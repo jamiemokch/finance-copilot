@@ -12,13 +12,12 @@ import { Layout } from '@/components/layout';
 import Welcome from '@/pages/welcome';
 import Onboarding from '@/pages/onboarding';
 import Dashboard from '@/pages/dashboard';
-import Memory from '@/pages/memory';
+import Position from '@/pages/position';
 import Ingest from '@/pages/ingest';
 import Copilot from '@/pages/copilot';
-import Optimisation from '@/pages/optimisation';
-import Exceptions from '@/pages/exceptions';
+import Tax from '@/pages/tax';
+import Inbox from '@/pages/inbox';
 import YearEnd from '@/pages/year-end';
-import Pack from '@/pages/pack';
 import Match from '@/pages/match';
 import Settings from '@/pages/settings';
 
@@ -27,7 +26,6 @@ const queryClient = new QueryClient();
 function Router() {
   const [location] = useLocation();
 
-  // Pages that don't use the shell layout
   if (location === '/welcome' || location === '/onboarding' || location === '/') {
     return (
       <Switch>
@@ -39,21 +37,23 @@ function Router() {
     );
   }
 
-  // App pages wrapped in Layout
   return (
     <Layout>
       <RoutedErrorBoundary>
         <Switch>
           <Route path="/dashboard" component={Dashboard} />
-          <Route path="/memory" component={Memory} />
-          <Route path="/ingest" component={Ingest} />
+          <Route path="/position" component={Position} />
+          <Route path="/inbox" component={Inbox} />
           <Route path="/copilot" component={Copilot} />
-          <Route path="/optimisation" component={Optimisation} />
-          <Route path="/exceptions" component={Exceptions} />
+          <Route path="/tax" component={Tax} />
           <Route path="/year-end" component={YearEnd} />
-          <Route path="/pack" component={Pack} />
-          <Route path="/match" component={Match} />
           <Route path="/settings" component={Settings} />
+          {/* Kept aliases for compatibility if requested, but linking to the new views */}
+          <Route path="/memory" component={Position} />
+          <Route path="/exceptions" component={Inbox} />
+          <Route path="/optimisation" component={Tax} />
+          <Route path="/ingest" component={Ingest} />
+          <Route path="/match" component={Match} />
           <Route component={NotFound} />
         </Switch>
       </RoutedErrorBoundary>

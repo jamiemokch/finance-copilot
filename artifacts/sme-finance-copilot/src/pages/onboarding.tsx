@@ -4,11 +4,22 @@ import { useStore, ProfileType } from '@/lib/store';
 import { User, Briefcase, Building } from 'lucide-react';
 
 export default function Onboarding() {
-  const { setProfileType } = useStore();
+  const { profiles, addProfile, setActiveProfileId } = useStore();
   const [, setLocation] = useLocation();
 
   const handleSelect = (type: ProfileType) => {
-    setProfileType(type);
+    const existingProfile = profiles.find((profile) => profile.type === type);
+    const profileId = existingProfile?.id ?? addProfile({
+      type,
+      name: type === 'individual'
+        ? 'Priya (Personal)'
+        : type === 'company'
+          ? 'New Micro Company'
+          : type === 'landlord'
+            ? 'New Rental Property'
+            : 'New Sole Trader Profile',
+    });
+    setActiveProfileId(profileId);
     setLocation('/dashboard');
   };
 
@@ -52,7 +63,7 @@ export default function Onboarding() {
 
           <Card 
             className="p-6 cursor-pointer hover:border-primary transition-all hover:-translate-y-1 flex flex-col items-center text-center space-y-4 hover:shadow-md group"
-            onClick={() => handleSelect('micro_company')}
+            onClick={() => handleSelect('company')}
           >
             <div className="p-4 bg-secondary rounded-full text-secondary-foreground group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
               <Building className="w-6 h-6" />

@@ -1,147 +1,122 @@
-import { Card, Badge } from '@/components/ui';
+import { Card, Badge, Button } from '@/components/ui';
 import { useStore } from '@/lib/store';
-import { BrainCircuit, AlertTriangle, Sparkles, CalendarCheck, TrendingUp, ShieldCheck, Upload } from 'lucide-react';
+import { WalletCards, Clock, CheckCircle2, ChevronRight, Inbox as InboxIcon } from 'lucide-react';
 import { Link } from 'wouter';
 
 export default function Dashboard() {
-  const { memories, exceptions, optimisations, yearEndReadiness } = useStore();
+  const { positionItems, activeProfileId, profiles, inboxItems } = useStore();
+  
+  const activeProfile = profiles.find(p => p.id === activeProfileId);
+  const activePositionItems = positionItems.filter(i => i.profileId === activeProfileId);
+  const activeInboxItems = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending');
 
-  const unresolvedExceptions = exceptions.filter(e => e.status === 'unresolved').length;
-  const newOptimisations = optimisations.filter(o => o.status === 'new').length;
+  const mainKpis = activePositionItems.filter(i => i.type === 'kpi').slice(0, 4);
 
   return (
-    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-serif font-bold text-foreground">Welcome back, Priya</h1>
-          <p className="text-muted-foreground mt-1">Here is the current state of your financial world.</p>
+          <h1 className="text-3xl font-serif text-foreground">Good morning.</h1>
+          <p className="text-muted-foreground mt-1 text-lg">Here is where {activeProfile?.name} stands today.</p>
         </div>
         <div className="flex gap-2">
-          <Badge variant="outline" className="text-sm py-1 px-3 border-primary/20 bg-primary/5 text-primary">
-            Complexity Score: Low-Medium
-          </Badge>
+          {activeInboxItems.length > 0 ? (
+            <Link href="/inbox">
+              <Button variant="outline" className="gap-2 text-primary border-primary/20 bg-primary/5 cursor-pointer">
+                <InboxIcon className="w-4 h-4" /> {activeInboxItems.length} items to review
+              </Button>
+            </Link>
+          ) : (
+            <Badge variant="outline" className="text-sm py-1 px-3 border-emerald-200 bg-emerald-50 text-emerald-700 gap-2 font-normal">
+              <CheckCircle2 className="w-4 h-4" /> All caught up
+            </Badge>
+          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Link href="/memory">
-          <Card className="p-5 cursor-pointer hover:border-primary transition-colors group h-full flex flex-col">
-            <div className="flex items-start justify-between">
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground font-medium">Financial Memory</p>
-                <p className="text-2xl font-bold">{memories.length}</p>
-              </div>
-              <div className="p-2 bg-secondary rounded-lg group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
-                <BrainCircuit className="w-5 h-5" />
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mt-auto pt-4 flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              Core context updated
-            </p>
-          </Card>
-        </Link>
-
-        <Link href="/optimisation">
-          <Card className="p-5 cursor-pointer hover:border-primary transition-colors group h-full flex flex-col">
-            <div className="flex items-start justify-between">
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground font-medium">Tax Opportunities</p>
-                <p className="text-2xl font-bold">{newOptimisations}</p>
-              </div>
-              <div className="p-2 bg-amber-100 text-amber-700 rounded-lg group-hover:bg-amber-200 transition-colors">
-                <Sparkles className="w-5 h-5" />
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mt-auto pt-4 flex items-center gap-1">
-              <TrendingUp className="w-3 h-3 text-amber-600" />
-              ~£1,212 potential savings
-            </p>
-          </Card>
-        </Link>
-
-        <Link href="/exceptions">
-          <Card className="p-5 cursor-pointer hover:border-primary transition-colors group h-full flex flex-col">
-            <div className="flex items-start justify-between">
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground font-medium">Exceptions</p>
-                <p className="text-2xl font-bold">{unresolvedExceptions}</p>
-              </div>
-              <div className="p-2 bg-red-100 text-red-700 rounded-lg group-hover:bg-red-200 transition-colors">
-                <AlertTriangle className="w-5 h-5" />
-              </div>
-            </div>
-            <p className="text-xs text-red-600 font-medium mt-auto pt-4">
-              Require your review
-            </p>
-          </Card>
-        </Link>
-
-        <Link href="/year-end">
-          <Card className="p-5 cursor-pointer hover:border-primary transition-colors group h-full flex flex-col">
-            <div className="flex items-start justify-between">
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground font-medium">Year-End Readiness</p>
-                <p className="text-2xl font-bold">65%</p>
-              </div>
-              <div className="p-2 bg-emerald-100 text-emerald-700 rounded-lg group-hover:bg-emerald-200 transition-colors">
-                <CalendarCheck className="w-5 h-5" />
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mt-auto pt-4">
-              {yearEndReadiness.tasksRemaining} tasks remaining
-            </p>
-          </Card>
-        </Link>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-4">
-          <h2 className="text-xl font-serif font-semibold">Recent Copilot Activity</h2>
-          <Card className="p-6 space-y-6">
-            <div className="flex gap-4">
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                <Upload className="w-4 h-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-sm font-medium">Auto-categorised 14 new transactions</p>
-                <p className="text-sm text-muted-foreground mt-1">Found 1 exception regarding an Apple Store purchase that requires your judgement.</p>
-              </div>
-            </div>
-            <div className="flex gap-4">
-              <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
-                <Sparkles className="w-4 h-4 text-amber-700" />
-              </div>
-              <div>
-                <p className="text-sm font-medium">Identified WFH allowance opportunity</p>
-                <p className="text-sm text-muted-foreground mt-1">Based on your memory indicating 4 days/week working from home.</p>
-                <Link href="/optimisation">
-                  <span className="text-xs font-semibold text-primary mt-2 inline-block cursor-pointer hover:underline">Review Opportunity &rarr;</span>
-                </Link>
-              </div>
-            </div>
-          </Card>
+      <section>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-serif font-medium">Financial position</h2>
+          <Link href="/position" className="text-sm text-primary font-medium flex items-center gap-1 hover:underline cursor-pointer">
+            View details <ChevronRight className="w-4 h-4" />
+          </Link>
         </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {mainKpis.map(kpi => (
+            <Link key={kpi.id} href="/position">
+              <Card className="p-5 cursor-pointer hover:border-primary/50 transition-colors group h-full flex flex-col bg-card shadow-sm">
+                <div className="space-y-1 mb-4">
+                  <p className="text-sm text-muted-foreground font-medium">{kpi.title}</p>
+                  <p className="text-3xl font-serif text-foreground">{kpi.value}</p>
+                </div>
+                <p className="text-xs text-muted-foreground mt-auto">
+                  {kpi.description}
+                </p>
+              </Card>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-4">
-          <h2 className="text-xl font-serif font-semibold">Upcoming Deadlines</h2>
-          <Card className="p-0 overflow-hidden">
-            <div className="p-4 border-b border-border flex justify-between items-center bg-secondary/30">
-              <div>
-                <div className="font-semibold text-sm">Self-Assessment</div>
-                <div className="text-xs text-muted-foreground">Tax Year 23/24</div>
+          <h2 className="text-xl font-serif font-medium">Upcoming deadlines</h2>
+          <Card className="p-0 overflow-hidden shadow-sm">
+            <div className="divide-y divide-border">
+              <div className="p-5 flex items-start gap-4 hover:bg-secondary/30 transition-colors">
+                <div className="w-10 h-10 rounded-full bg-accent text-accent-foreground flex items-center justify-center shrink-0">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex justify-between items-start">
+                    <h3 className="font-medium text-foreground">Self-Assessment Tax Return</h3>
+                    <span className="text-sm font-medium text-foreground bg-secondary px-2 py-1 rounded-md">31 Jan</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-1">For the 23/24 tax year. You have 3 tasks remaining to build your pack.</p>
+                  <Link href="/year-end">
+                    <Button variant="ghost" className="px-0 h-auto py-2 text-primary font-medium cursor-pointer hover:bg-transparent">
+                      View Year-End checklist &rarr;
+                    </Button>
+                  </Link>
+                </div>
               </div>
-              <div className="text-sm font-bold text-foreground">31 Jan 2025</div>
-            </div>
-            <div className="p-4 flex justify-between items-center">
-              <div>
-                <div className="font-semibold text-sm">VAT Q1</div>
-                <div className="text-xs text-muted-foreground">Quarterly Return</div>
+              <div className="p-5 flex items-start gap-4 hover:bg-secondary/30 transition-colors opacity-70">
+                <div className="w-10 h-10 rounded-full bg-secondary text-muted-foreground flex items-center justify-center shrink-0">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex justify-between items-start">
+                    <h3 className="font-medium text-foreground">VAT Quarter 1</h3>
+                    <span className="text-sm font-medium text-muted-foreground bg-secondary px-2 py-1 rounded-md">07 May</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-1">Quarterly return.</p>
+                </div>
               </div>
-              <div className="text-sm font-bold text-foreground">07 May 2024</div>
             </div>
           </Card>
         </div>
-      </div>
+
+        <div className="space-y-4">
+          <h2 className="text-xl font-serif font-medium">Quick actions</h2>
+          <Card className="p-5 shadow-sm space-y-3">
+            <Link href="/position">
+              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
+                <WalletCards className="w-5 h-5 mr-3 text-primary" /> View basis for financial position
+              </Button>
+            </Link>
+            <Link href="/inbox">
+              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
+                <InboxIcon className="w-5 h-5 mr-3 text-primary" /> Review {activeInboxItems.length} pending inbox items
+              </Button>
+            </Link>
+            <Link href="/tax">
+              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
+                <Clock className="w-5 h-5 mr-3 text-primary" /> Explore proactive tax ideas
+              </Button>
+            </Link>
+          </Card>
+        </div>
+      </section>
     </div>
   );
 }

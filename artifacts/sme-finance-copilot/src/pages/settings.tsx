@@ -1,102 +1,153 @@
-import { Card, Button, Badge } from '@/components/ui';
-import { useStore } from '@/lib/store';
-import { ShieldCheck, HardDrive, AlertTriangle, User } from 'lucide-react';
+import { Card, Button, Badge, Input, Label } from '@/components/ui';
+import { useStore, ProfileType } from '@/lib/store';
+import { UserCircle, Briefcase, Building2, Plus, ShieldCheck, Check } from 'lucide-react';
+import { useState } from 'react';
 
 export default function Settings() {
-  const { profileType, setProfileType } = useStore();
+  const { profiles, activeProfileId, setActiveProfileId, addProfile, sharedContext, updateSharedContext } = useStore();
+  
+  const [isCreating, setIsCreating] = useState(false);
+  const [newProfileType, setNewProfileType] = useState<ProfileType>('sole_trader');
+  const [newProfileName, setNewProfileName] = useState('');
+
+  const handleCreate = () => {
+    if (newProfileName.trim()) {
+      addProfile({ type: newProfileType, name: newProfileName });
+      setIsCreating(false);
+      setNewProfileName('');
+    }
+  };
+
+  const getTypeIcon = (type: string) => {
+    if (type === 'individual') return <UserCircle className="w-5 h-5 text-blue-500" />;
+    if (type === 'company') return <Building2 className="w-5 h-5 text-purple-500" />;
+    return <Briefcase className="w-5 h-5 text-amber-600" />;
+  };
+
+  const getTypeName = (type: string) => {
+    return type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 max-w-4xl mx-auto">
+    <div className="space-y-8 animate-in fade-in duration-500 max-w-3xl mx-auto">
       <div>
-        <h1 className="text-3xl font-serif font-bold text-foreground">Settings & Data</h1>
-        <p className="text-muted-foreground mt-1">
-          Manage your prototype preferences and data privacy.
+        <h1 className="text-3xl font-serif text-foreground">Profile & Settings</h1>
+        <p className="text-muted-foreground mt-1 text-lg">
+          Manage your personal context and switch between different tax profiles.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="md:col-span-1 space-y-2">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <User className="w-5 h-5" /> Profile Type
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            Changing this will update how the Copilot contextualises your data.
-          </p>
-        </div>
-        <Card className="p-6 md:col-span-2 space-y-4">
-          <div className="space-y-4">
-            <div className="flex flex-col gap-3">
-              <label className="flex items-center gap-3 p-3 rounded-lg border border-border cursor-pointer hover:bg-secondary/30 transition-colors">
-                <input 
-                  type="radio" 
-                  name="profile" 
-                  checked={profileType === 'individual'} 
-                  onChange={() => setProfileType('individual')}
-                  className="w-4 h-4 text-primary"
-                />
-                <div>
-                  <div className="font-medium text-sm">Individual</div>
-                  <div className="text-xs text-muted-foreground">Personal tax, PAYE</div>
+      <section>
+        <h2 className="text-xl font-serif mb-4">Your Profiles</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {profiles.map(profile => (
+            <Card 
+              key={profile.id} 
+              className={`p-5 cursor-pointer transition-all border-2 ${activeProfileId === profile.id ? 'border-primary shadow-md bg-primary/5' : 'border-transparent hover:border-border shadow-sm'}`}
+              onClick={() => setActiveProfileId(profile.id)}
+            >
+              <div className="flex justify-between items-start">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-background rounded-full border border-border shadow-sm">
+                    {getTypeIcon(profile.type)}
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-foreground">{profile.name}</h3>
+                    <p className="text-xs text-muted-foreground">{getTypeName(profile.type)}</p>
+                  </div>
                 </div>
-              </label>
-              <label className="flex items-center gap-3 p-3 rounded-lg border border-primary bg-primary/5 cursor-pointer">
-                <input 
-                  type="radio" 
-                  name="profile" 
-                  checked={profileType === 'sole_trader'} 
-                  onChange={() => setProfileType('sole_trader')}
-                  className="w-4 h-4 text-primary"
-                />
-                <div>
-                  <div className="font-medium text-sm flex items-center gap-2">Sole Trader / Landlord <Badge variant="secondary" className="text-[10px]">Active</Badge></div>
-                  <div className="text-xs text-muted-foreground">Self-assessment, VAT</div>
-                </div>
-              </label>
-              <label className="flex items-center gap-3 p-3 rounded-lg border border-border cursor-pointer hover:bg-secondary/30 transition-colors">
-                <input 
-                  type="radio" 
-                  name="profile" 
-                  checked={profileType === 'micro_company'} 
-                  onChange={() => setProfileType('micro_company')}
-                  className="w-4 h-4 text-primary"
-                />
-                <div>
-                  <div className="font-medium text-sm">Micro Limited Co</div>
-                  <div className="text-xs text-muted-foreground">Corp tax, dividends</div>
-                </div>
-              </label>
-            </div>
-          </div>
-        </Card>
-
-        <div className="md:col-span-1 space-y-2">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5" /> Data Safety
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            How your financial data is handled.
-          </p>
-        </div>
-        <Card className="p-6 md:col-span-2 space-y-6">
-          <div className="bg-amber-100/50 border border-amber-200 p-4 rounded-lg flex gap-3 text-amber-900">
-            <AlertTriangle className="w-5 h-5 shrink-0" />
-            <div className="text-sm space-y-1">
-              <p className="font-semibold">Prototype Mode Active</p>
-              <p>This is a frontend-only prototype. Your data is fictional, lives entirely in your browser's memory, and will reset if you refresh the page. There is no backend, no real AI processing, and no connection to HMRC or Open Banking.</p>
-            </div>
-          </div>
-
-          <div className="space-y-4 pt-4 border-t border-border">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium text-sm">Clear Local Data</p>
-                <p className="text-xs text-muted-foreground mt-1">Reset all fictional data and start fresh.</p>
+                {activeProfileId === profile.id && (
+                  <Check className="w-5 h-5 text-primary" />
+                )}
               </div>
-              <Button variant="destructive" className="cursor-pointer" onClick={() => window.location.reload()}>Reset Prototype</Button>
+            </Card>
+          ))}
+          
+          {!isCreating ? (
+            <button 
+              onClick={() => setIsCreating(true)}
+              className="p-5 rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center text-muted-foreground hover:bg-secondary/30 transition-colors gap-2 h-full cursor-pointer"
+            >
+              <Plus className="w-6 h-6" />
+              <span className="font-medium text-sm">Register new profile</span>
+            </button>
+          ) : (
+            <Card className="p-5 shadow-sm border-primary/20 space-y-4">
+              <h3 className="font-medium text-sm">New Profile</h3>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Type</Label>
+                  <select 
+                    className="w-full text-sm p-2 rounded-md border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    value={newProfileType}
+                    onChange={(e) => setNewProfileType(e.target.value as ProfileType)}
+                  >
+                    <option value="sole_trader">Sole Trader</option>
+                    <option value="landlord">Landlord</option>
+                    <option value="company">Limited Company</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Name</Label>
+                  <Input 
+                    placeholder="e.g. Graphic Design Business" 
+                    value={newProfileName}
+                    onChange={e => setNewProfileName(e.target.value)}
+                    className="h-9 text-sm"
+                  />
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="ghost" size="sm" onClick={() => setIsCreating(false)} className="cursor-pointer">Cancel</Button>
+                  <Button size="sm" onClick={handleCreate} disabled={!newProfileName} className="cursor-pointer">Create</Button>
+                </div>
+              </div>
+            </Card>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-3 flex items-center gap-1">
+          <ShieldCheck className="w-3.5 h-3.5 text-primary" />
+          Financial data stays separated per profile, but uses your shared personal context below.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-xl font-serif mb-4">Shared Personal Context</h2>
+        <Card className="p-6 shadow-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <Label>Full Name</Label>
+              <Input 
+                value={sharedContext.name} 
+                onChange={e => updateSharedContext({ name: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>National Insurance Number</Label>
+              <Input 
+                value={sharedContext.niNumber} 
+                onChange={e => updateSharedContext({ niNumber: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label>Primary Address</Label>
+              <Input 
+                value={sharedContext.address} 
+                onChange={e => updateSharedContext({ address: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>UTR (Unique Taxpayer Reference)</Label>
+              <Input 
+                value={sharedContext.utr} 
+                onChange={e => updateSharedContext({ utr: e.target.value })}
+              />
             </div>
           </div>
+          <div className="mt-6 flex justify-end">
+            <Button className="cursor-pointer">Save Changes</Button>
+          </div>
         </Card>
-      </div>
+      </section>
     </div>
   );
 }

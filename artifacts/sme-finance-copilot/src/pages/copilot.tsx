@@ -1,129 +1,177 @@
-import { Card, Button, Input, Badge } from '@/components/ui';
-import { useState, useRef, useEffect } from 'react';
-import { BrainCircuit, Send, User, Sparkles, AlertCircle } from 'lucide-react';
+import { Card, Badge, Button } from '@/components/ui';
+import { useState } from 'react';
+import { Search, MessageSquare, Bot, Clock, ChevronRight } from 'lucide-react';
+import { useStore } from '@/lib/store';
 
 export default function Copilot() {
-  const [messages, setMessages] = useState([
-    { 
-      role: 'system', 
-      content: 'Hello Priya. I am your SME Finance Copilot. I have your full financial memory, current transactions, and tax status loaded. What would you like to know?' 
-    }
-  ]);
+  const { chatHistory, createChatSession, addChatMessage } = useStore();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  const activeSession = chatHistory.find(s => s.id === activeSessionId);
+  
+  const filteredHistory = chatHistory.filter(s => 
+    s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    s.messages.some(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
 
-  const handleSend = (preset?: string) => {
-    const text = preset || input;
-    if (!text.trim()) return;
+  const handleNewChat = () => {
+    setActiveSessionId(null);
+  };
+
+  const handleSend = () => {
+    if (!input.trim()) return;
     
-    setMessages(prev => [...prev, { role: 'user', content: text }]);
-    if (!preset) setInput('');
+    let sessionId = activeSessionId;
+    if (!sessionId) {
+      sessionId = createChatSession(input.slice(0, 30) + '...', { role: 'user', content: input, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
+      setActiveSessionId(sessionId);
+    } else {
+      addChatMessage(sessionId, { role: 'user', content: input, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
+    }
+    
+    setInput('');
     setIsTyping(true);
 
     setTimeout(() => {
-      let response = "I don't have enough specific data to answer that accurately based on your current memory. Would you like to add this context to your memory?";
-      
-      const lower = text.toLowerCase();
-      if (lower.includes('laptop') || lower.includes('equipment')) {
-         response = "Based on your sole trader profile, you can claim the full cost of new equipment like a laptop under the Annual Investment Allowance (AIA). Since your memory shows you are VAT registered, you can also reclaim the 20% VAT on your next quarterly return.";
-      } else if (lower.includes('tax') || lower.includes('owe') || lower.includes('liability')) {
-         response = "Looking at your current logged transactions (profits of approx £24,000) and your rental property income (£12,000), you sit within the Basic Rate band. Your estimated combined income tax and NI liability for 23/24 is currently around £5,800. We still have 1 unresolved exception that could adjust this slightly.";
-      } else if (lower.includes('home') || lower.includes('wfh')) {
-         response = "I noticed in your Financial Memory that you work 4 days a week from home. You have two options: a flat rate of £26/month, or a proportion of your actual bills (gas, electricity, metered water). Given current energy prices, apportioning your actual bills will likely yield a higher deduction. Would you like me to create an Optimisation task for this?";
-      }
-
-      setMessages(prev => [...prev, { role: 'system', content: response }]);
+      addChatMessage(sessionId!, { 
+        role: 'system', 
+        content: "I'm a prototype companion. In a real scenario, I would look up your financial position and give a conservative answer, citing any assumptions I made.", 
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
       setIsTyping(false);
-    }, 1200);
+    }, 1500);
   };
 
-  const suggestions = [
-    "How much tax do I owe so far?",
-    "Can I expense a new laptop?",
-    "What's the best way to claim WFH expenses?"
-  ];
-
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] animate-in fade-in duration-500">
-      <div className="mb-6">
-        <h1 className="text-3xl font-serif font-bold text-foreground">Copilot</h1>
-        <p className="text-muted-foreground mt-1">Ask questions in plain English. I'll use your Financial Memory to give specific answers.</p>
-      </div>
+    <div className="flex flex-col md:flex-row gap-6 h-[calc(100vh-6rem)] max-w-6xl mx-auto animate-in fade-in duration-500">
+      {/* History Sidebar */}
+      <div className="w-full md:w-80 flex flex-col gap-4">
+        <div>
+          <h1 className="text-3xl font-serif text-foreground">Copilot</h1>
+          <p className="text-sm text-muted-foreground mt-1">Your financial companion and history.</p>
+        </div>
+        
+        <Button onClick={handleNewChat} className="w-full justify-start gap-2 cursor-pointer" variant={!activeSessionId ? "default" : "outline"}>
+          <MessageSquare className="w-4 h-4" /> New conversation
+        </Button>
 
-      <Card className="flex-1 flex flex-col min-h-0 border-primary/20 shadow-sm overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex gap-4 max-w-[80%] ${msg.role === 'user' ? 'ml-auto flex-row-reverse' : ''}`}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                msg.role === 'system' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground'
-              }`}>
-                {msg.role === 'system' ? <BrainCircuit className="w-5 h-5" /> : <User className="w-5 h-5" />}
-              </div>
-              <div className={`p-4 rounded-2xl ${
-                msg.role === 'user' 
-                  ? 'bg-primary text-primary-foreground rounded-tr-sm' 
-                  : 'bg-secondary/50 text-foreground rounded-tl-sm border border-border'
-              }`}>
-                <p className="text-sm leading-relaxed">{msg.content}</p>
-                {msg.role === 'system' && i > 0 && (
-                  <div className="mt-3 flex gap-2">
-                    <Badge variant="outline" className="text-[10px] bg-background/50 border-border/50 text-muted-foreground gap-1">
-                      <Sparkles className="w-3 h-3" /> Grounded in Financial Memory
-                    </Badge>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          
-          {isTyping && (
-            <div className="flex gap-4 max-w-[80%]">
-              <div className="w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0">
-                <BrainCircuit className="w-5 h-5" />
-              </div>
-              <div className="p-4 rounded-2xl bg-secondary/50 rounded-tl-sm border border-border flex items-center gap-1.5">
-                <div className="w-2 h-2 bg-primary/40 rounded-full animate-bounce" />
-                <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:0.2s]" />
-                <div className="w-2 h-2 bg-primary/80 rounded-full animate-bounce [animation-delay:0.4s]" />
-              </div>
-            </div>
-          )}
-          <div ref={bottomRef} />
+        <div className="relative">
+          <Search className="w-4 h-4 absolute left-3 top-3 text-muted-foreground" />
+          <input 
+            type="text"
+            placeholder="Search past conversations..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 bg-card border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
         </div>
 
-        <div className="p-4 border-t border-border bg-card">
-          <div className="flex flex-wrap gap-2 mb-4">
-            {suggestions.map((s, i) => (
-              <Badge 
-                key={i} 
-                variant="secondary" 
-                className="cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors py-1.5 px-3"
-                onClick={() => handleSend(s)}
+        <div className="flex-1 overflow-y-auto space-y-2">
+          {filteredHistory.map(session => (
+            <button
+              key={session.id}
+              onClick={() => setActiveSessionId(session.id)}
+              className={`w-full text-left p-3 rounded-lg transition-colors cursor-pointer border ${
+                activeSessionId === session.id 
+                  ? 'bg-primary/5 border-primary ring-1 ring-primary/20' 
+                  : 'bg-card border-border hover:bg-secondary/50'
+              }`}
+            >
+              <div className="font-medium text-sm truncate">{session.title}</div>
+              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                <Clock className="w-3 h-3" /> {session.date}
+              </div>
+            </button>
+          ))}
+          {filteredHistory.length === 0 && (
+            <p className="text-sm text-muted-foreground text-center py-4">No conversations found.</p>
+          )}
+        </div>
+      </div>
+
+      {/* Main Chat Area */}
+      <Card className="flex-1 flex flex-col min-h-0 border-border shadow-sm overflow-hidden bg-card">
+        {activeSessionId && activeSession ? (
+          <>
+            <div className="p-4 border-b border-border bg-secondary/20">
+              <h2 className="font-medium">{activeSession.title}</h2>
+              <p className="text-xs text-muted-foreground">Started {activeSession.date}</p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-background">
+              {activeSession.messages.map((msg) => (
+                <div key={msg.id} className={`flex max-w-[85%] ${msg.role === 'user' ? 'ml-auto' : ''}`}>
+                  <div className={`p-4 rounded-2xl text-sm leading-relaxed ${
+                    msg.role === 'user' 
+                      ? 'bg-primary text-primary-foreground rounded-br-sm' 
+                      : 'bg-secondary text-secondary-foreground rounded-bl-sm border border-border/50'
+                  }`}>
+                    {msg.role === 'system' && (
+                      <div className="flex items-center gap-2 mb-2 text-primary font-medium text-xs pb-2 border-b border-border/10">
+                        <Bot className="w-4 h-4" /> Finance Companion
+                      </div>
+                    )}
+                    {msg.content}
+                    <div className="text-[10px] mt-2 opacity-60 text-right">{msg.timestamp}</div>
+                  </div>
+                </div>
+              ))}
+              {isTyping && (
+                <div className="flex max-w-[85%]">
+                  <div className="p-4 rounded-2xl bg-secondary text-secondary-foreground rounded-bl-sm border border-border/50">
+                    <div className="flex gap-1 items-center h-4">
+                      <div className="w-1.5 h-1.5 bg-foreground/40 rounded-full animate-bounce" />
+                      <div className="w-1.5 h-1.5 bg-foreground/40 rounded-full animate-bounce [animation-delay:0.2s]" />
+                      <div className="w-1.5 h-1.5 bg-foreground/40 rounded-full animate-bounce [animation-delay:0.4s]" />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-muted-foreground bg-background">
+            <Bot className="w-16 h-16 mb-4 text-primary opacity-20" />
+            <h2 className="text-xl font-medium text-foreground mb-2">How can I help today?</h2>
+            <p className="max-w-md text-sm">Ask a question about your financial position, tax estimates, or specific transactions. I'll use your verified context to give you accurate answers.</p>
+            
+            <div className="mt-8 grid grid-cols-1 gap-2 w-full max-w-md">
+              <button 
+                onClick={() => setInput('What is my estimated tax bill so far?')}
+                className="p-3 text-sm text-left border border-border rounded-lg bg-card hover:bg-secondary/50 transition-colors flex justify-between items-center"
               >
-                {s}
-              </Badge>
-            ))}
+                What is my estimated tax bill so far? <ChevronRight className="w-4 h-4" />
+              </button>
+              <button 
+                onClick={() => setInput('Can I expense my internet bill while working from home?')}
+                className="p-3 text-sm text-left border border-border rounded-lg bg-card hover:bg-secondary/50 transition-colors flex justify-between items-center"
+              >
+                Can I expense my internet bill while working from home? <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-          <div className="flex gap-3">
-            <Input 
-              placeholder="Ask a financial question..." 
+        )}
+
+        <div className="p-4 border-t border-border bg-card">
+          <form 
+            onSubmit={e => { e.preventDefault(); handleSend(); }}
+            className="flex gap-3"
+          >
+            <input 
+              type="text"
+              placeholder="Ask a question..." 
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSend()}
-              className="flex-1 rounded-xl h-12"
+              className="flex-1 rounded-xl h-12 px-4 bg-background border border-border focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm"
             />
-            <Button size="icon" className="h-12 w-12 rounded-xl shrink-0 cursor-pointer" onClick={() => handleSend()}>
-              <Send className="w-5 h-5" />
+            <Button type="submit" size="default" className="h-12 px-6 rounded-xl cursor-pointer">
+              Send
             </Button>
-          </div>
-          <div className="mt-3 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-            <AlertCircle className="w-3 h-3" />
-            Tax rules apply to standard UK scenarios. Always review complex cases with a qualified accountant.
+          </form>
+          <div className="mt-3 text-center text-xs text-muted-foreground">
+            Tax rules apply to standard UK scenarios. Always verify complex cases.
           </div>
         </div>
       </Card>
