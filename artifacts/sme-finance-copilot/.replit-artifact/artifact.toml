@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "SME Finance Copilot"
+description = "A plain-English finance and tax planning prototype for individuals, sole traders, landlords, and micro companies. Uses fictional sample data to demonstrate Financial Memory, AI finance guidance, tax optimisation, exceptions, year-end readiness, accountant review, and matching choices without filing to HMRC."
+version = "1.0.0"
+id = "artifacts/sme-finance-copilot"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22846
+
+[services.development]
+run = "pnpm --filter @workspace/sme-finance-copilot run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/sme-finance-copilot", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/sme-finance-copilot/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22846"
+BASE_PATH = "/"
