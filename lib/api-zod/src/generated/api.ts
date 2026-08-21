@@ -703,12 +703,18 @@ export const ListTransactionsResponseItem = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
-  "recordType": zod.enum(['income', 'expense']),
+  "recordType": zod.enum(['income', 'expense', 'unknown']),
   "category": zod.string(),
   "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
+  "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "financialAccountId": zod.string().nullish(),
+  "bankImportBatchId": zod.string().nullish(),
+  "bankImportRowId": zod.string().nullish(),
+  "bankMovementIdentity": zod.string().nullish(),
+  "ledgerStatus": zod.enum(['active', 'voided']).optional(),
   "createdAt": zod.string(),
   "updatedAt": zod.string()
 })
@@ -737,12 +743,18 @@ export const CreateTransactionResponse = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
-  "recordType": zod.enum(['income', 'expense']),
+  "recordType": zod.enum(['income', 'expense', 'unknown']),
   "category": zod.string(),
   "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
+  "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "financialAccountId": zod.string().nullish(),
+  "bankImportBatchId": zod.string().nullish(),
+  "bankImportRowId": zod.string().nullish(),
+  "bankMovementIdentity": zod.string().nullish(),
+  "ledgerStatus": zod.enum(['active', 'voided']).optional(),
   "createdAt": zod.string(),
   "updatedAt": zod.string()
 })
@@ -762,12 +774,18 @@ export const GetTransactionResponse = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
-  "recordType": zod.enum(['income', 'expense']),
+  "recordType": zod.enum(['income', 'expense', 'unknown']),
   "category": zod.string(),
   "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
+  "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "financialAccountId": zod.string().nullish(),
+  "bankImportBatchId": zod.string().nullish(),
+  "bankImportRowId": zod.string().nullish(),
+  "bankMovementIdentity": zod.string().nullish(),
+  "ledgerStatus": zod.enum(['active', 'voided']).optional(),
   "createdAt": zod.string(),
   "updatedAt": zod.string()
 })
@@ -786,7 +804,8 @@ export const UpdateTransactionBody = zod.object({
   "description": zod.string().optional(),
   "amount": zod.number().optional(),
   "category": zod.string().optional(),
-  "taxTreatment": zod.string().optional()
+  "taxTreatment": zod.string().optional(),
+  "accountingClassification": zod.enum(['income', 'expense', 'transfer', 'owner_funds', 'drawings', 'loan', 'tax_payment', 'unknown']).optional()
 })
 
 export const UpdateTransactionResponse = zod.object({
@@ -795,12 +814,18 @@ export const UpdateTransactionResponse = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
-  "recordType": zod.enum(['income', 'expense']),
+  "recordType": zod.enum(['income', 'expense', 'unknown']),
   "category": zod.string(),
   "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
+  "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "financialAccountId": zod.string().nullish(),
+  "bankImportBatchId": zod.string().nullish(),
+  "bankImportRowId": zod.string().nullish(),
+  "bankMovementIdentity": zod.string().nullish(),
+  "ledgerStatus": zod.enum(['active', 'voided']).optional(),
   "createdAt": zod.string(),
   "updatedAt": zod.string()
 })
@@ -815,6 +840,824 @@ export const DeleteTransactionParams = zod.object({
 })
 
 export const DeleteTransactionResponse = zod.void()
+
+
+/**
+ * @summary List financial accounts used as bank-import provenance
+ */
+export const ListFinancialAccountsParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const ListFinancialAccountsResponseItem = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "displayName": zod.string(),
+  "lastFour": zod.string().nullish(),
+  "currency": zod.string(),
+  "accountType": zod.enum(['current', 'savings', 'credit_card', 'cash']),
+  "createdAt": zod.string()
+})
+export const ListFinancialAccountsResponse = zod.array(ListFinancialAccountsResponseItem)
+
+
+/**
+ * @summary Create a profile-owned financial account identity
+ */
+export const CreateFinancialAccountParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const createFinancialAccountBodyDisplayNameMax = 120;
+
+export const createFinancialAccountBodyLastFourRegExp = new RegExp('^\\d{4}$');
+export const createFinancialAccountBodyCurrencyMin = 3;
+export const createFinancialAccountBodyCurrencyMax = 3;
+
+
+
+export const CreateFinancialAccountBody = zod.object({
+  "displayName": zod.string().min(1).max(createFinancialAccountBodyDisplayNameMax),
+  "lastFour": zod.string().regex(createFinancialAccountBodyLastFourRegExp).nullish(),
+  "currency": zod.string().min(createFinancialAccountBodyCurrencyMin).max(createFinancialAccountBodyCurrencyMax).optional(),
+  "accountType": zod.enum(['current', 'savings', 'credit_card', 'cash']).optional()
+})
+
+export const CreateFinancialAccountResponse = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "displayName": zod.string(),
+  "lastFour": zod.string().nullish(),
+  "currency": zod.string(),
+  "accountType": zod.enum(['current', 'savings', 'credit_card', 'cash']),
+  "createdAt": zod.string()
+})
+
+
+/**
+ * @summary List profile-scoped bank CSV import batches
+ */
+export const ListBankImportsParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const listBankImportsResponseConfirmedMappingOneHeaderRowMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsDateMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsAmountMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsDebitMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsCreditMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const listBankImportsResponseConfirmedMappingOneColumnsBalanceMin = 0;
+
+
+
+export const ListBankImportsResponseItem = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(listBankImportsResponseConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(listBankImportsResponseConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+})
+export const ListBankImportsResponse = zod.array(ListBankImportsResponseItem)
+
+
+/**
+ * @summary Register a directly uploaded CSV and obtain a mapping proposal
+ */
+export const RegisterBankImportParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const RegisterBankImportBody = zod.object({
+  "filename": zod.string(),
+  "objectPath": zod.string(),
+  "accountId": zod.string()
+})
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const registerBankImportResponseOneBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+export const registerBankImportResponseOneProposalMappingHeaderRowMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsDateMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsAmountMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsDebitMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsCreditMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsDescriptionMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsReferenceMin = 0;
+
+export const registerBankImportResponseOneProposalMappingColumnsBalanceMin = 0;
+
+
+
+export const RegisterBankImportResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(registerBankImportResponseOneBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+}),
+  "rows": zod.array(zod.object({
+  "id": zod.string(),
+  "sourceRowNumber": zod.number(),
+  "date": zod.string().nullish(),
+  "amount": zod.number().nullish(),
+  "direction": zod.union([zod.literal('money_in'),zod.literal('money_out'),zod.literal(null)]).nullish(),
+  "description": zod.string().nullish(),
+  "reference": zod.string().nullish(),
+  "balance": zod.number().nullish(),
+  "validationStatus": zod.enum(['valid', 'invalid', 'out_of_scope']),
+  "duplicateStatus": zod.enum(['none', 'already_imported', 'possible_duplicate']),
+  "validationErrors": zod.array(zod.string()),
+  "selectedForCommit": zod.boolean()
+})),
+  "proposal": zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(registerBankImportResponseOneProposalMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(registerBankImportResponseOneProposalMappingColumnsDateMin),
+  "amount": zod.number().min(registerBankImportResponseOneProposalMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(registerBankImportResponseOneProposalMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(registerBankImportResponseOneProposalMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(registerBankImportResponseOneProposalMappingColumnsDescriptionMin),
+  "reference": zod.number().min(registerBankImportResponseOneProposalMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(registerBankImportResponseOneProposalMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),
+  "decimalConvention": zod.enum(['dot', 'comma', 'ambiguous']),
+  "headers": zod.array(zod.string()),
+  "examples": zod.array(zod.array(zod.string()))
+}).optional()
+}).and(zod.object({
+  "reused": zod.boolean()
+}))
+
+
+/**
+ * @summary Read one profile-scoped bank import and saved preview rows
+ */
+export const GetBankImportParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "batchId": zod.coerce.string()
+})
+
+export const getBankImportResponseBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const getBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+export const getBankImportResponseProposalMappingHeaderRowMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsDateMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsAmountMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsDebitMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsCreditMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsDescriptionMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsReferenceMin = 0;
+
+export const getBankImportResponseProposalMappingColumnsBalanceMin = 0;
+
+
+
+export const GetBankImportResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(getBankImportResponseBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(getBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+}),
+  "rows": zod.array(zod.object({
+  "id": zod.string(),
+  "sourceRowNumber": zod.number(),
+  "date": zod.string().nullish(),
+  "amount": zod.number().nullish(),
+  "direction": zod.union([zod.literal('money_in'),zod.literal('money_out'),zod.literal(null)]).nullish(),
+  "description": zod.string().nullish(),
+  "reference": zod.string().nullish(),
+  "balance": zod.number().nullish(),
+  "validationStatus": zod.enum(['valid', 'invalid', 'out_of_scope']),
+  "duplicateStatus": zod.enum(['none', 'already_imported', 'possible_duplicate']),
+  "validationErrors": zod.array(zod.string()),
+  "selectedForCommit": zod.boolean()
+})),
+  "proposal": zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(getBankImportResponseProposalMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(getBankImportResponseProposalMappingColumnsDateMin),
+  "amount": zod.number().min(getBankImportResponseProposalMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(getBankImportResponseProposalMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(getBankImportResponseProposalMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(getBankImportResponseProposalMappingColumnsDescriptionMin),
+  "reference": zod.number().min(getBankImportResponseProposalMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(getBankImportResponseProposalMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),
+  "decimalConvention": zod.enum(['dot', 'comma', 'ambiguous']),
+  "headers": zod.array(zod.string()),
+  "examples": zod.array(zod.array(zod.string()))
+}).optional()
+})
+
+
+/**
+ * @summary Discard an uncommitted bank import
+ */
+export const DiscardBankImportParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "batchId": zod.coerce.string()
+})
+
+export const discardBankImportResponseBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const discardBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+
+
+export const DiscardBankImportResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(discardBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+})
+})
+
+
+/**
+ * @summary Validate a mapping and save a non-mutating bank import preview
+ */
+export const PreviewBankImportParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "batchId": zod.coerce.string()
+})
+
+export const previewBankImportBodyMappingHeaderRowMin = 0;
+
+export const previewBankImportBodyMappingColumnsDateMin = 0;
+
+export const previewBankImportBodyMappingColumnsAmountMin = 0;
+
+export const previewBankImportBodyMappingColumnsDebitMin = 0;
+
+export const previewBankImportBodyMappingColumnsCreditMin = 0;
+
+export const previewBankImportBodyMappingColumnsDescriptionMin = 0;
+
+export const previewBankImportBodyMappingColumnsReferenceMin = 0;
+
+export const previewBankImportBodyMappingColumnsBalanceMin = 0;
+
+
+
+export const PreviewBankImportBody = zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(previewBankImportBodyMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(previewBankImportBodyMappingColumnsDateMin),
+  "amount": zod.number().min(previewBankImportBodyMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(previewBankImportBodyMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(previewBankImportBodyMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(previewBankImportBodyMappingColumnsDescriptionMin),
+  "reference": zod.number().min(previewBankImportBodyMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(previewBankImportBodyMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+})
+})
+
+export const previewBankImportResponseBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const previewBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+export const previewBankImportResponseProposalMappingHeaderRowMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsDateMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsAmountMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsDebitMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsCreditMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsDescriptionMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsReferenceMin = 0;
+
+export const previewBankImportResponseProposalMappingColumnsBalanceMin = 0;
+
+
+
+export const PreviewBankImportResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(previewBankImportResponseBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+}),
+  "rows": zod.array(zod.object({
+  "id": zod.string(),
+  "sourceRowNumber": zod.number(),
+  "date": zod.string().nullish(),
+  "amount": zod.number().nullish(),
+  "direction": zod.union([zod.literal('money_in'),zod.literal('money_out'),zod.literal(null)]).nullish(),
+  "description": zod.string().nullish(),
+  "reference": zod.string().nullish(),
+  "balance": zod.number().nullish(),
+  "validationStatus": zod.enum(['valid', 'invalid', 'out_of_scope']),
+  "duplicateStatus": zod.enum(['none', 'already_imported', 'possible_duplicate']),
+  "validationErrors": zod.array(zod.string()),
+  "selectedForCommit": zod.boolean()
+})),
+  "proposal": zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(previewBankImportResponseProposalMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(previewBankImportResponseProposalMappingColumnsDateMin),
+  "amount": zod.number().min(previewBankImportResponseProposalMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(previewBankImportResponseProposalMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(previewBankImportResponseProposalMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(previewBankImportResponseProposalMappingColumnsDescriptionMin),
+  "reference": zod.number().min(previewBankImportResponseProposalMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(previewBankImportResponseProposalMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),
+  "decimalConvention": zod.enum(['dot', 'comma', 'ambiguous']),
+  "headers": zod.array(zod.string()),
+  "examples": zod.array(zod.array(zod.string()))
+}).optional()
+})
+
+
+/**
+ * @summary Save explicit include or exclude choices for preview rows
+ */
+export const UpdateBankImportRowsParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "batchId": zod.coerce.string()
+})
+
+
+
+
+export const UpdateBankImportRowsBody = zod.object({
+  "selections": zod.array(zod.object({
+  "rowId": zod.string(),
+  "selectedForCommit": zod.boolean()
+})).min(1)
+})
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const updateBankImportRowsResponseBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingHeaderRowMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsDateMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsAmountMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsDebitMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsCreditMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsDescriptionMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsReferenceMin = 0;
+
+export const updateBankImportRowsResponseProposalMappingColumnsBalanceMin = 0;
+
+
+
+export const UpdateBankImportRowsResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(updateBankImportRowsResponseBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+}),
+  "rows": zod.array(zod.object({
+  "id": zod.string(),
+  "sourceRowNumber": zod.number(),
+  "date": zod.string().nullish(),
+  "amount": zod.number().nullish(),
+  "direction": zod.union([zod.literal('money_in'),zod.literal('money_out'),zod.literal(null)]).nullish(),
+  "description": zod.string().nullish(),
+  "reference": zod.string().nullish(),
+  "balance": zod.number().nullish(),
+  "validationStatus": zod.enum(['valid', 'invalid', 'out_of_scope']),
+  "duplicateStatus": zod.enum(['none', 'already_imported', 'possible_duplicate']),
+  "validationErrors": zod.array(zod.string()),
+  "selectedForCommit": zod.boolean()
+})),
+  "proposal": zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(updateBankImportRowsResponseProposalMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsDateMin),
+  "amount": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsDescriptionMin),
+  "reference": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(updateBankImportRowsResponseProposalMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),
+  "decimalConvention": zod.enum(['dot', 'comma', 'ambiguous']),
+  "headers": zod.array(zod.string()),
+  "examples": zod.array(zod.array(zod.string()))
+}).optional()
+})
+
+
+/**
+ * @summary Atomically commit selected rows to Financial Memory exactly once
+ */
+export const CommitBankImportParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "batchId": zod.coerce.string()
+})
+
+
+
+
+export const CommitBankImportBody = zod.object({
+  "previewVersion": zod.number().min(1)
+})
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneHeaderRowMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsDateMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsAmountMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsDebitMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsCreditMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsDescriptionMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsReferenceMin = 0;
+
+export const commitBankImportResponseOneBatchConfirmedMappingOneColumnsBalanceMin = 0;
+
+export const commitBankImportResponseOneProposalMappingHeaderRowMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsDateMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsAmountMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsDebitMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsCreditMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsDescriptionMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsReferenceMin = 0;
+
+export const commitBankImportResponseOneProposalMappingColumnsBalanceMin = 0;
+
+
+
+export const CommitBankImportResponse = zod.object({
+  "batch": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "taxYearSnapshot": zod.string(),
+  "filename": zod.string(),
+  "encoding": zod.string(),
+  "delimiter": zod.string(),
+  "status": zod.enum(['mapping_required', 'preview_ready', 'committing', 'committed', 'discarded', 'failed']),
+  "confirmedMapping": zod.union([zod.object({
+  "headerRow": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsDateMin),
+  "amount": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsAmountMin).optional(),
+  "debit": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsDebitMin).optional(),
+  "credit": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsCreditMin).optional(),
+  "description": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsDescriptionMin),
+  "reference": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsReferenceMin).optional(),
+  "balance": zod.number().min(commitBankImportResponseOneBatchConfirmedMappingOneColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),zod.null()]).optional(),
+  "mappingVersion": zod.number(),
+  "previewVersion": zod.number(),
+  "totalRows": zod.number(),
+  "validRows": zod.number(),
+  "invalidRows": zod.number(),
+  "duplicateRows": zod.number(),
+  "possibleDuplicateRows": zod.number(),
+  "outOfScopeRows": zod.number(),
+  "selectedRows": zod.number(),
+  "committedRows": zod.number(),
+  "lastError": zod.string().nullish(),
+  "createdAt": zod.string()
+}),
+  "rows": zod.array(zod.object({
+  "id": zod.string(),
+  "sourceRowNumber": zod.number(),
+  "date": zod.string().nullish(),
+  "amount": zod.number().nullish(),
+  "direction": zod.union([zod.literal('money_in'),zod.literal('money_out'),zod.literal(null)]).nullish(),
+  "description": zod.string().nullish(),
+  "reference": zod.string().nullish(),
+  "balance": zod.number().nullish(),
+  "validationStatus": zod.enum(['valid', 'invalid', 'out_of_scope']),
+  "duplicateStatus": zod.enum(['none', 'already_imported', 'possible_duplicate']),
+  "validationErrors": zod.array(zod.string()),
+  "selectedForCommit": zod.boolean()
+})),
+  "proposal": zod.object({
+  "mapping": zod.object({
+  "headerRow": zod.number().min(commitBankImportResponseOneProposalMappingHeaderRowMin),
+  "columns": zod.object({
+  "date": zod.number().min(commitBankImportResponseOneProposalMappingColumnsDateMin),
+  "amount": zod.number().min(commitBankImportResponseOneProposalMappingColumnsAmountMin).optional(),
+  "debit": zod.number().min(commitBankImportResponseOneProposalMappingColumnsDebitMin).optional(),
+  "credit": zod.number().min(commitBankImportResponseOneProposalMappingColumnsCreditMin).optional(),
+  "description": zod.number().min(commitBankImportResponseOneProposalMappingColumnsDescriptionMin),
+  "reference": zod.number().min(commitBankImportResponseOneProposalMappingColumnsReferenceMin).optional(),
+  "balance": zod.number().min(commitBankImportResponseOneProposalMappingColumnsBalanceMin).optional()
+}),
+  "dateFormat": zod.enum(['dmy', 'ymd']),
+  "decimalConvention": zod.enum(['dot', 'comma'])
+}),
+  "decimalConvention": zod.enum(['dot', 'comma', 'ambiguous']),
+  "headers": zod.array(zod.string()),
+  "examples": zod.array(zod.array(zod.string()))
+}).optional()
+}).and(zod.object({
+  "replayed": zod.boolean()
+}))
 
 
 /**

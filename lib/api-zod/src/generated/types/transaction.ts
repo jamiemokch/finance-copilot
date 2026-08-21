@@ -5,6 +5,8 @@
  * SME Finance Copilot API
  * OpenAPI spec version: 0.1.0
  */
+import type { TransactionAccountingClassification } from './transactionAccountingClassification';
+import type { TransactionLedgerStatus } from './transactionLedgerStatus';
 import type { TransactionRecordType } from './transactionRecordType';
 
 export interface Transaction {
@@ -21,6 +23,17 @@ export interface Transaction {
   source: string;
   /** @nullable */
   evidenceId?: string | null;
+  /** @nullable */
+  accountingClassification?: TransactionAccountingClassification;
+  /** @nullable */
+  financialAccountId?: string | null;
+  /** @nullable */
+  bankImportBatchId?: string | null;
+  /** @nullable */
+  bankImportRowId?: string | null;
+  /** @nullable */
+  bankMovementIdentity?: string | null;
+  ledgerStatus?: TransactionLedgerStatus;
   createdAt: string;
   updatedAt: string;
 }

@@ -371,6 +371,11 @@ export interface APITransaction {
   sourceRowIndex?: number | null;
   rawRowData?: unknown;
   classificationConfidence?: number | null;
+  accountingClassification?: string | null;
+  financialAccountId?: string | null;
+  bankImportBatchId?: string | null;
+  bankImportRowId?: string | null;
+  ledgerStatus?: 'active' | 'voided';
   createdAt?: string;
   updatedAt?: string;
 }
@@ -391,7 +396,14 @@ export const transactionsApi = {
   update: (
     profileId: string,
     transactionId: string,
-    data: { date?: string; description?: string; amount?: number; category?: string; taxTreatment?: string },
+    data: {
+      date?: string;
+      description?: string;
+      amount?: number;
+      category?: string;
+      taxTreatment?: string;
+      accountingClassification?: 'income' | 'expense' | 'transfer' | 'owner_funds' | 'drawings' | 'loan' | 'tax_payment' | 'unknown';
+    },
   ) =>
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}`, {
       method: "PATCH",
@@ -405,6 +417,114 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {
       method: "PATCH", body: JSON.stringify({ evidenceId }),
     }),
+};
+
+// ── Bank CSV imports ───────────────────────────────────────────────────────────
+
+export interface FinancialAccount {
+  id: string;
+  profileId: string;
+  displayName: string;
+  lastFour: string | null;
+  currency: string;
+  accountType: 'current' | 'savings' | 'credit_card' | 'cash';
+  createdAt: string;
+}
+
+export interface BankCsvMapping {
+  headerRow: number;
+  columns: {
+    date: number;
+    amount?: number;
+    debit?: number;
+    credit?: number;
+    description: number;
+    reference?: number;
+    balance?: number;
+  };
+  dateFormat: 'dmy' | 'ymd';
+  decimalConvention: 'dot' | 'comma';
+}
+
+export interface BankImportRow {
+  id: string;
+  sourceRowNumber: number;
+  date: string | null;
+  amount: number | null;
+  direction: 'money_in' | 'money_out' | null;
+  description: string | null;
+  reference: string | null;
+  balance: number | null;
+  validationStatus: 'valid' | 'invalid' | 'out_of_scope';
+  duplicateStatus: 'none' | 'already_imported' | 'possible_duplicate';
+  validationErrors: string[];
+  selectedForCommit: boolean;
+}
+
+export interface BankImportBatch {
+  id: string;
+  profileId: string;
+  financialAccountId: string;
+  taxYearSnapshot: string;
+  filename: string;
+  encoding: string;
+  delimiter: string;
+  status: 'mapping_required' | 'preview_ready' | 'committing' | 'committed' | 'discarded' | 'failed';
+  confirmedMapping: BankCsvMapping | null;
+  mappingVersion: number;
+  previewVersion: number;
+  totalRows: number;
+  validRows: number;
+  invalidRows: number;
+  duplicateRows: number;
+  possibleDuplicateRows: number;
+  outOfScopeRows: number;
+  selectedRows: number;
+  committedRows: number;
+  lastError: string | null;
+  createdAt: string;
+}
+
+type BankMappingProposal = {
+  mapping: BankCsvMapping;
+  decimalConvention: 'dot' | 'comma' | 'ambiguous';
+  headers: string[];
+  examples: string[][];
+};
+
+export const bankImportsApi = {
+  accounts: (profileId: string) =>
+    apiFetch<FinancialAccount[]>(`/profiles/${profileId}/financial-accounts`),
+  createAccount: (profileId: string, data: {
+    displayName: string;
+    lastFour?: string | null;
+    accountType?: FinancialAccount['accountType'];
+  }) => apiFetch<FinancialAccount>(`/profiles/${profileId}/financial-accounts`, {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+  list: (profileId: string) =>
+    apiFetch<BankImportBatch[]>(`/profiles/${profileId}/bank-imports`),
+  register: (profileId: string, data: { filename: string; objectPath: string; accountId: string }) =>
+    apiFetch<{ batch: BankImportBatch; rows: BankImportRow[]; proposal: BankMappingProposal; reused: boolean }>(
+      `/profiles/${profileId}/bank-imports`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  get: (profileId: string, batchId: string) =>
+    apiFetch<{ batch: BankImportBatch; rows: BankImportRow[]; proposal?: BankMappingProposal }>(`/profiles/${profileId}/bank-imports/${batchId}`),
+  preview: (profileId: string, batchId: string, mapping: BankCsvMapping) =>
+    apiFetch<{ batch: BankImportBatch; rows: BankImportRow[] }>(`/profiles/${profileId}/bank-imports/${batchId}/preview`, {
+      method: 'POST', body: JSON.stringify({ mapping }),
+    }),
+  updateSelections: (profileId: string, batchId: string, selections: Array<{ rowId: string; selectedForCommit: boolean }>) =>
+    apiFetch<{ batch: BankImportBatch; rows: BankImportRow[] }>(`/profiles/${profileId}/bank-imports/${batchId}/rows`, {
+      method: 'PATCH', body: JSON.stringify({ selections }),
+    }),
+  commit: (profileId: string, batchId: string, previewVersion: number) =>
+    apiFetch<{ batch: BankImportBatch; rows: BankImportRow[]; replayed: boolean }>(`/profiles/${profileId}/bank-imports/${batchId}/commit`, {
+      method: 'POST', body: JSON.stringify({ previewVersion }),
+    }),
+  discard: (profileId: string, batchId: string) =>
+    apiFetch<{ batch: BankImportBatch }>(`/profiles/${profileId}/bank-imports/${batchId}`, { method: 'DELETE' }),
 };
 
 // ── Income-tax estimate ───────────────────────────────────────────────────────

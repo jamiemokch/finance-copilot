@@ -1,5 +1,8 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
-import { evidenceApi, transactionsApi } from '@/lib/api';
+import {
+  bankImportsApi, evidenceApi, transactionsApi,
+  type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount,
+} from '@/lib/api';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -75,7 +78,160 @@ function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileI
   </Card>;
 }
 
-function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind: 'bank' | 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
+type BankRole = 'date' | 'amount' | 'description' | 'debit' | 'credit' | 'reference' | 'balance' | 'none';
+
+function BankImportFlow({ profileId, refresh, onBack }: { profileId: string; refresh: () => Promise<void>; onBack: () => void }) {
+  const [stage, setStage] = useState<'setup' | 'uploading' | 'mapping' | 'preview' | 'committing' | 'done' | 'error'>('setup');
+  const [accounts, setAccounts] = useState<FinancialAccount[]>([]);
+  const [accountId, setAccountId] = useState('');
+  const [accountName, setAccountName] = useState('');
+  const [batch, setBatch] = useState<BankImportBatch | null>(null);
+  const [rows, setRows] = useState<BankImportRow[]>([]);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [examples, setExamples] = useState<string[][]>([]);
+  const [mapping, setMapping] = useState<BankCsvMapping>({ headerRow: 0, columns: { date: 0, description: 1, amount: 2 }, dateFormat: 'dmy', decimalConvention: 'dot' });
+  const [savedBatches, setSavedBatches] = useState<BankImportBatch[]>([]);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const loadSaved = async () => {
+    const [loadedAccounts, batches] = await Promise.all([bankImportsApi.accounts(profileId), bankImportsApi.list(profileId)]);
+    setAccounts(loadedAccounts);
+    setAccountId(current => current || loadedAccounts[0]?.id || '');
+    setSavedBatches(batches.filter(item => ['mapping_required', 'preview_ready', 'failed'].includes(item.status)));
+  };
+  useEffect(() => { void loadSaved().catch(() => setMessage('We could not load saved bank imports.')); }, [profileId]);
+  useEffect(() => {
+    setStage('setup'); setBatch(null); setRows([]); setHeaders([]); setExamples([]); setMessage('');
+  }, [profileId]);
+
+  const accountForUpload = async () => {
+    if (accountId) return accountId;
+    if (!accountName.trim()) throw new Error('Add the account name before choosing a CSV.');
+    const account = await bankImportsApi.createAccount(profileId, { displayName: accountName.trim() });
+    setAccounts(current => [account, ...current]);
+    setAccountId(account.id);
+    return account.id;
+  };
+  const chooseFile = async (file: File) => {
+    setBusy(true); setStage('uploading'); setMessage('');
+    try {
+      if (!file.name.toLowerCase().endsWith('.csv')) throw new Error('Bank imports accept CSV files only.');
+      const selectedAccountId = await accountForUpload();
+      const { objectPath } = await evidenceApi.uploadDirect(file);
+      const result = await bankImportsApi.register(profileId, { filename: file.name, objectPath, accountId: selectedAccountId });
+      setBatch(result.batch); setRows(result.rows);
+      setHeaders(result.proposal.headers); setExamples(result.proposal.examples);
+      setMapping(result.proposal.mapping);
+      if (result.proposal.decimalConvention === 'ambiguous') {
+        setMessage('This export has an ambiguous decimal convention. Please confirm it below before previewing.');
+      }
+      setStage(result.batch.status === 'preview_ready' ? 'preview' : result.batch.status === 'committed' ? 'done' : 'mapping');
+      await loadSaved();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'We could not read this bank CSV.');
+      setStage('error');
+    } finally { setBusy(false); }
+  };
+  const resume = async (saved: BankImportBatch) => {
+    setBusy(true); setMessage('');
+    try {
+      const loaded = await bankImportsApi.get(profileId, saved.id);
+      setBatch(loaded.batch); setRows(loaded.rows);
+      if (loaded.batch.confirmedMapping) setMapping(loaded.batch.confirmedMapping);
+      if (loaded.proposal) {
+        setHeaders(loaded.proposal.headers); setExamples(loaded.proposal.examples); setMapping(loaded.proposal.mapping);
+      }
+      setStage(loaded.batch.status === 'preview_ready' || loaded.batch.status === 'failed' ? 'preview' : 'mapping');
+      if (loaded.batch.status === 'failed') setMessage(loaded.batch.lastError ?? 'This saved import can be reviewed and safely retried.');
+    } catch { setMessage('We could not resume that bank import.'); setStage('error'); }
+    finally { setBusy(false); }
+  };
+  const discard = async (id: string) => {
+    setBusy(true);
+    try { await bankImportsApi.discard(profileId, id); await loadSaved(); }
+    catch (err) { setMessage(err instanceof Error ? err.message : 'We could not discard that bank import.'); }
+    finally { setBusy(false); }
+  };
+  const setRole = (column: number, role: BankRole) => {
+    const columns = { ...mapping.columns };
+    (Object.keys(columns) as Array<keyof typeof columns>).forEach(key => { if (columns[key] === column) delete columns[key]; });
+    if (role !== 'none') (columns as Record<string, number>)[role] = column;
+    setMapping({ ...mapping, columns });
+  };
+  const roleFor = (column: number): BankRole =>
+    (Object.entries(mapping.columns).find(([, index]) => index === column)?.[0] as BankRole) ?? 'none';
+  const buildPreview = async () => {
+    if (!batch) return;
+    setBusy(true); setMessage('');
+    try {
+      const result = await bankImportsApi.preview(profileId, batch.id, mapping);
+      setBatch(result.batch); setRows(result.rows); setStage('preview'); await loadSaved();
+    } catch (err) { setMessage(err instanceof Error ? err.message : 'We could not validate this mapping.'); }
+    finally { setBusy(false); }
+  };
+  const setSelected = async (row: BankImportRow, selectedForCommit: boolean) => {
+    if (!batch) return;
+    setRows(current => current.map(item => item.id === row.id ? { ...item, selectedForCommit } : item));
+    try {
+      const result = await bankImportsApi.updateSelections(profileId, batch.id, [{ rowId: row.id, selectedForCommit }]);
+      setBatch(result.batch); setRows(result.rows);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'We could not update this selection.');
+      setRows(current => current.map(item => item.id === row.id ? row : item));
+    }
+  };
+  const commit = async () => {
+    if (!batch) return;
+    setBusy(true); setStage('committing'); setMessage('');
+    try {
+      const result = await bankImportsApi.commit(profileId, batch.id, batch.previewVersion);
+      setBatch(result.batch); setRows(result.rows); await refresh(); await loadSaved(); setStage('done');
+    } catch (err) {
+      try {
+        const refreshed = await bankImportsApi.preview(profileId, batch.id, mapping);
+        setBatch(refreshed.batch); setRows(refreshed.rows);
+        setMessage('The saved preview was refreshed because a matching movement was imported elsewhere. Review any duplicate choices before trying again.');
+      } catch {
+        setMessage(err instanceof Error ? err.message : 'The bank import stopped before completing. Your preview is still saved.');
+      }
+      setStage('preview');
+    } finally { setBusy(false); }
+  };
+  const columnCount = Math.max(headers.length, ...examples.map(row => row.length), 0);
+  const actionableRows = rows.filter(row => row.validationStatus === 'valid' && row.duplicateStatus !== 'already_imported');
+  const needsDecision = rows.filter(row => row.duplicateStatus === 'possible_duplicate');
+
+  return <Card className="p-6 shadow-sm space-y-5">
+    <button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
+    <div><h2 className="text-xl font-serif">Import a bank CSV</h2><p className="text-sm text-muted-foreground mt-1">Bank movements are added as unreviewed records. They do not affect tax or profit until you classify them.</p></div>
+    {message && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{message}</div>}
+    {stage === 'setup' && <div className="space-y-5">
+      {savedBatches.length > 0 && <div className="rounded-xl border border-border p-4 space-y-3"><div><p className="font-medium">Saved bank imports</p><p className="text-xs text-muted-foreground">Resume or discard the saved preview before starting again.</p></div>{savedBatches.map(item => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t pt-3"><div><p className="text-sm font-medium">{item.filename}</p><p className="text-xs text-muted-foreground">{item.status === 'preview_ready' ? `${item.selectedRows} rows selected for import` : item.status === 'failed' ? 'Commit stopped — safely resume' : 'Mapping still needed'}</p></div><div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void resume(item)}>Resume</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void discard(item.id)}>Discard</Button></div></div>)}</div>}
+      <div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1"><Label>Financial account</Label><Select value={accountId} onChange={event => setAccountId(event.target.value)}><option value="">Add a new account below</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.displayName}{account.lastFour ? ` ··${account.lastFour}` : ''}</option>)}</Select></label>{!accountId && <label className="space-y-1"><Label>New account name</Label><Input value={accountName} placeholder="e.g. Starling business current account" onChange={event => setAccountName(event.target.value)} /></label>}</div>
+      <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><Landmark className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a bank CSV export</p><p className="text-xs text-muted-foreground">CSV only · up to 5 MB · no live bank connection</p><FilePicker accept=".csv,text/csv" onPick={chooseFile} label="Choose bank CSV" /></div>
+    </div>}
+    {stage === 'uploading' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Checking the CSV format and saved import history…</div>}
+    {stage === 'mapping' && <div className="space-y-4">
+      <div className="bg-primary/5 border border-primary/15 rounded-lg p-3 text-sm"><strong>Confirm the columns and formats.</strong> Your mapping is only a preview; nothing has entered Financial Memory yet.</div>
+      <div className="grid gap-3 sm:grid-cols-2"><label className="space-y-1"><Label>Date format</Label><Select value={mapping.dateFormat} onChange={event => setMapping({ ...mapping, dateFormat: event.target.value as BankCsvMapping['dateFormat'] })}><option value="dmy">Day / month / year (31/01/2026)</option><option value="ymd">Year / month / day (2026-01-31)</option></Select></label><label className="space-y-1"><Label>Decimal convention</Label><Select value={mapping.decimalConvention} onChange={event => setMapping({ ...mapping, decimalConvention: event.target.value as BankCsvMapping['decimalConvention'] })}><option value="dot">Dot decimal (1,234.56)</option><option value="comma">Comma decimal (1.234,56)</option></Select></label></div>
+      <div className="overflow-x-auto border border-border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, col) => <th key={col} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1 truncate">{headers[col] || `Column ${col + 1}`}</span><Select value={roleFor(col)} onChange={event => setRole(col, event.target.value as BankRole)} className="text-xs"><option value="none">Ignore</option><option value="date">Date</option><option value="amount">Signed amount</option><option value="debit">Debit</option><option value="credit">Credit</option><option value="description">Description</option><option value="reference">Reference</option><option value="balance">Balance (audit only)</option></Select></th>)}</tr></thead><tbody>{examples.slice(0, 5).map((row, index) => <tr key={index} className="border-t border-border">{Array.from({ length: columnCount }, (_, col) => <td key={col} className="p-2 max-w-48 truncate">{row[col] || '—'}</td>)}</tr>)}</tbody></table></div>
+      <div className="flex justify-end"><Button disabled={busy} onClick={() => void buildPreview()}>{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Review validated preview</Button></div>
+    </div>}
+    {stage === 'preview' && batch && <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-sm"><div className="rounded-lg bg-secondary p-3"><strong>{batch.validRows}</strong><br /><span className="text-xs text-muted-foreground">valid rows</span></div><div className="rounded-lg bg-secondary p-3"><strong>{batch.invalidRows}</strong><br /><span className="text-xs text-muted-foreground">invalid</span></div><div className="rounded-lg bg-secondary p-3"><strong>{batch.duplicateRows}</strong><br /><span className="text-xs text-muted-foreground">already imported</span></div><div className="rounded-lg bg-secondary p-3"><strong>{batch.outOfScopeRows}</strong><br /><span className="text-xs text-muted-foreground">outside tax year</span></div></div>
+      <p className="text-sm"><strong>{batch.selectedRows}</strong> valid movement{batch.selectedRows === 1 ? '' : 's'} selected. Balances are kept as audit context only and are never added to your figures.</p>
+      {needsDecision.length > 0 && <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm space-y-2"><strong>Possible duplicates need your decision.</strong><p>These rows have no stable reference, so we will not silently include them. Check each one you want to import.</p>{needsDecision.map(row => <label key={row.id} className="flex items-start gap-2 rounded bg-white/70 p-2"><input type="checkbox" checked={row.selectedForCommit} disabled={busy} onChange={event => void setSelected(row, event.target.checked)} /><span>{row.date} · {row.description} · £{Math.abs(row.amount ?? 0).toFixed(2)}</span></label>)}</div>}
+      {(rows.some(row => row.validationStatus !== 'valid') || batch.duplicateRows > 0) && <details className="rounded-lg border p-3 text-sm"><summary className="cursor-pointer">See rows not being imported</summary><div className="mt-2 space-y-2">{rows.filter(row => row.validationStatus !== 'valid' || row.duplicateStatus === 'already_imported').slice(0, 30).map(row => <p key={row.id}><strong>Row {row.sourceRowNumber}:</strong> {row.validationErrors.join(' ') || 'Already imported.'}</p>)}</div></details>}
+      <div className="flex flex-wrap justify-between gap-3"><Button variant="outline" disabled={busy} onClick={() => setStage('mapping')}>Change mapping</Button><Button disabled={busy || actionableRows.length === 0} onClick={() => void commit()}>{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Import {batch.selectedRows} selected movement{batch.selectedRows === 1 ? '' : 's'}</Button></div>
+    </div>}
+    {stage === 'committing' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Committing your selected movements safely…</div>}
+    {stage === 'done' && batch && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-900"><div className="flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" /><div><p className="font-semibold">Bank import complete</p><p className="text-sm mt-1">{batch.committedRows} movement{batch.committedRows === 1 ? '' : 's'} added to Financial Memory as unreviewed. Classify them before relying on tax or profit figures.</p></div></div></div>}
+    {stage === 'error' && <Button variant="outline" onClick={() => setStage('setup')}>Back to bank import</Button>}
+  </Card>;
+}
+
+function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind: 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
   const [stage, setStage] = useState<'pick' | 'detecting' | 'mapping' | 'importing' | 'done' | 'error'>(resumeEvidence ? 'detecting' : 'pick');
   const [evidenceId, setEvidenceId] = useState(resumeEvidence?.id ?? '');
   const [filename, setFilename] = useState(resumeEvidence?.filename ?? '');
@@ -182,7 +338,10 @@ export default function AddRecords() {
   const [resumeError, setResumeError] = useState('');
   const [showResumePanel, setShowResumePanel] = useState(true);
   const [attachTo, setAttachTo] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ id: string; date: string; amount: string; description: string; category: string } | null>(null);
+  const [editing, setEditing] = useState<{
+    id: string; date: string; amount: string; description: string; category: string;
+    source: string; accountingClassification: string;
+  } | null>(null);
   const [attaching, setAttaching] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [attachError, setAttachError] = useState('');
@@ -224,7 +383,9 @@ export default function AddRecords() {
         amount,
         description: editing.description.trim(),
         category: editing.category,
-        taxTreatment: amount > 0 ? 'income' : 'deductible',
+        ...(editing.source === 'bank_csv'
+          ? { accountingClassification: editing.accountingClassification as 'income' | 'expense' | 'transfer' | 'owner_funds' | 'drawings' | 'loan' | 'tax_payment' | 'unknown' }
+          : { taxTreatment: amount > 0 ? 'income' : 'deductible' }),
       });
       await refreshData();
       setEditing(null);
@@ -233,7 +394,7 @@ export default function AddRecords() {
     }
   };
   const deleteRecord = async (id: string) => {
-    if (!window.confirm('Delete this manual record? This cannot be undone.')) return;
+    if (!window.confirm('Remove this record from active Financial Memory? Imported records are audit-voided rather than erased.')) return;
     await transactionsApi.remove(activeProfileId, id);
     await refreshData();
   };
@@ -250,11 +411,12 @@ export default function AddRecords() {
       <Button variant="ghost" size="sm" onClick={startNewUpload} className="cursor-pointer">Start a new upload</Button>
     </Card>}
     {!intake ? <><div className="grid sm:grid-cols-2 gap-4">{INTAKES.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setIntake(option.id)} className="text-left border border-border rounded-xl p-5 bg-card hover:border-primary/40 hover:bg-primary/[.02] transition-all cursor-pointer"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-4"><Icon className="w-5 h-5" /></div><h2 className="font-serif text-lg">{option.title}</h2><p className="text-sm text-muted-foreground mt-1">{option.text}</p><p className="text-xs text-primary mt-3">{option.note} →</p></button>; })}</div>
-      <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}{t.source === 'manual' && <><button onClick={() => setEditing({ id: t.id, date: t.date, amount: String(t.amount), description: t.description, category: t.category })} className="text-xs text-primary hover:underline">Edit</button><button onClick={() => void deleteRecord(t.id)} className="text-xs text-destructive hover:underline">Delete</button></>}</div></div><div className="flex items-center gap-3"><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span>{t.source === 'manual' && <Pencil className="w-4 h-4 text-muted-foreground" />}</div></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
+      <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{t.source === 'bank_csv' && <Badge variant="outline" className="text-[10px] py-0">Needs classification</Badge>}{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}{(t.source === 'manual' || t.source === 'bank_csv') && <><button onClick={() => setEditing({ id: t.id, date: t.date, amount: String(t.amount), description: t.description, category: t.category, source: t.source, accountingClassification: t.accountingClassification ?? 'unknown' })} className="text-xs text-primary hover:underline">{t.source === 'bank_csv' ? 'Review' : 'Edit'}</button><button onClick={() => void deleteRecord(t.id)} className="text-xs text-destructive hover:underline">{t.source === 'bank_csv' ? 'Remove' : 'Delete'}</button></>}</div></div><div className="flex items-center gap-3"><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span>{(t.source === 'manual' || t.source === 'bank_csv') && <Pencil className="w-4 h-4 text-muted-foreground" />}</div></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
        intake === 'document' ? <DocumentFlow profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={() => { setIntake(null); setResumeEvidence(null); }} /> :
       intake === 'manual' ? <ManualFlow onBack={() => setIntake(null)} /> :
-       <BatchFlow kind={intake} profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={() => { setIntake(null); setResumeEvidence(null); }} />}
+        intake === 'bank' ? <BankImportFlow profileId={activeProfileId} refresh={refreshData} onBack={() => { setIntake(null); setResumeEvidence(null); }} /> :
+        <BatchFlow kind="ledger" profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={() => { setIntake(null); setResumeEvidence(null); }} />}
     {attachTo && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="p-6 w-full max-w-md space-y-4"><h2 className="font-serif text-xl">Attach a receipt</h2><p className="text-sm text-muted-foreground">Adding an original receipt upgrades this record’s evidence quality.</p>{attaching ? <Loader2 className="animate-spin text-primary mx-auto" /> : <FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={attachReceipt} label="Choose receipt" />}{attachError && <p className="text-sm text-destructive">{attachError}</p>}<Button variant="outline" className="w-full" onClick={() => setAttachTo(null)}>Cancel</Button></Card></div>}
-    {editing && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="w-full max-w-lg space-y-4 p-6"><div><h2 className="font-serif text-xl">Edit manual record</h2><p className="mt-1 text-sm text-muted-foreground">Updating this record refreshes Financial Memory and tax figures.</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1"><span className="text-sm">Date</span><Input type="date" value={editing.date} onChange={e => setEditing({ ...editing, date: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Amount (£)</span><Input type="number" value={editing.amount} onChange={e => setEditing({ ...editing, amount: e.target.value })} /></label><label className="space-y-1 sm:col-span-2"><span className="text-sm">Description</span><Input value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Category</span><Input value={editing.category} onChange={e => setEditing({ ...editing, category: e.target.value })} /></label></div><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button><Button disabled={savingEdit} onClick={() => void saveEdit()}>{savingEdit ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pencil className="mr-2 h-4 w-4" />}Save changes</Button></div></Card></div>}
+    {editing && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="w-full max-w-lg space-y-4 p-6"><div><h2 className="font-serif text-xl">{editing.source === 'bank_csv' ? 'Review imported movement' : 'Edit manual record'}</h2><p className="mt-1 text-sm text-muted-foreground">{editing.source === 'bank_csv' ? 'Choose how this movement should affect your accounts. Transfers and owner movements remain outside profit and tax.' : 'Updating this record refreshes Financial Memory and tax figures.'}</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1"><span className="text-sm">Date</span><Input type="date" value={editing.date} onChange={e => setEditing({ ...editing, date: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Amount (£)</span><Input type="number" value={editing.amount} onChange={e => setEditing({ ...editing, amount: e.target.value })} /></label><label className="space-y-1 sm:col-span-2"><span className="text-sm">Description</span><Input value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} /></label>{editing.source === 'bank_csv' && <label className="space-y-1 sm:col-span-2"><span className="text-sm">Accounting classification</span><Select value={editing.accountingClassification} onChange={e => setEditing({ ...editing, accountingClassification: e.target.value })}><option value="unknown">Keep unreviewed</option><option value="income">Business income</option><option value="expense">Business expense</option><option value="transfer">Transfer between accounts</option><option value="owner_funds">Owner funds introduced</option><option value="drawings">Owner drawings</option><option value="loan">Loan movement</option><option value="tax_payment">Tax payment</option></Select></label>}<label className="space-y-1"><span className="text-sm">Category</span><Input value={editing.category} onChange={e => setEditing({ ...editing, category: e.target.value })} /></label></div><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button><Button disabled={savingEdit} onClick={() => void saveEdit()}>{savingEdit ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pencil className="mr-2 h-4 w-4" />}Save changes</Button></div></Card></div>}
   </div>;
 }

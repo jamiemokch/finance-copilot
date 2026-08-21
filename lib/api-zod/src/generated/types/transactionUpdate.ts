@@ -5,6 +5,7 @@
  * SME Finance Copilot API
  * OpenAPI spec version: 0.1.0
  */
+import type { TransactionUpdateAccountingClassification } from './transactionUpdateAccountingClassification';
 
 export interface TransactionUpdate {
   date?: string;
@@ -12,4 +13,5 @@ export interface TransactionUpdate {
   amount?: number;
   category?: string;
   taxTreatment?: string;
+  accountingClassification?: TransactionUpdateAccountingClassification;
 }

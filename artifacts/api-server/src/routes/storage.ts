@@ -4,8 +4,14 @@ import {
   RequestUploadUrlResponse,
 } from '@workspace/api-zod';
 import express, { Router, type IRouter, type Request, type Response } from 'express';
-
-import { ObjectPermission } from '../lib/objectAcl';
+import { eq } from 'drizzle-orm';
+import {
+  db,
+  bankImportBatchesTable,
+  evidenceItemsTable,
+  privateUploadObjectsTable,
+  profilesTable,
+} from '@workspace/db';
 import {
   ObjectNotFoundError,
   ObjectStorageService,
@@ -16,7 +22,7 @@ const objectStorageService = new ObjectStorageService();
 
 function hasAuthenticatedSession(
   req: Request,
-): req is Request & { isAuthenticated: () => boolean } {
+): req is Request & { isAuthenticated: () => boolean; user: { id: string } } {
   if (
     !('isAuthenticated' in req) ||
     typeof req.isAuthenticated !== 'function'
@@ -54,6 +60,17 @@ router.post(
         req.body,
         contentType,
       );
+      try {
+        await db.insert(privateUploadObjectsTable).values({
+          objectPath,
+          userId: req.user.id,
+        });
+      } catch (err) {
+        await objectStorageService.getObjectEntityFile(objectPath)
+          .then((file) => file.delete())
+          .catch(() => undefined);
+        throw err;
+      }
       res.json({ objectPath });
     } catch (err) {
       req.log.error({ err }, 'Direct upload failed');
@@ -154,26 +171,44 @@ router.get(
  */
 router.get('/storage/objects/*path', async (req: Request, res: Response) => {
   try {
+    if (!hasAuthenticatedSession(req)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
     const raw = req.params.path;
     const wildcardPath = Array.isArray(raw) ? raw.join('/') : raw;
     const objectPath = `/objects/${wildcardPath}`;
+    const [bankBatch] = await db.select({ id: bankImportBatchesTable.id }).from(bankImportBatchesTable)
+      .where(eq(bankImportBatchesTable.objectPath, objectPath))
+      .limit(1);
+    if (bankBatch) {
+      // Bank CSVs are intentionally served only through their profile-scoped
+      // endpoint, never through a path-only object URL.
+      res.status(404).json({ error: 'Object not found' });
+      return;
+    }
+    const [uploaded] = await db.select().from(privateUploadObjectsTable)
+      .where(eq(privateUploadObjectsTable.objectPath, objectPath))
+      .limit(1);
+    let ownerId = uploaded?.userId ?? null;
+    // A compatibility lookup keeps existing private evidence readable while
+    // ensuring bank-import objects use the stronger direct-upload owner record.
+    if (!ownerId) {
+      const [evidenceOwner] = await db.select({ userId: profilesTable.userId })
+        .from(evidenceItemsTable)
+        .innerJoin(profilesTable, eq(evidenceItemsTable.profileId, profilesTable.id))
+        .where(eq(evidenceItemsTable.objectPath, objectPath))
+        .limit(1);
+      ownerId = evidenceOwner?.userId ?? null;
+    }
+    if (!ownerId || ownerId !== req.user.id) {
+      // A 404 avoids confirming that a private object path exists for someone
+      // else, while still providing a clear not-found outcome to the caller.
+      res.status(404).json({ error: 'Object not found' });
+      return;
+    }
     const objectFile =
       await objectStorageService.getObjectEntityFile(objectPath);
-
-    // --- Protected route example (uncomment when using replit-auth) ---
-    // if (!req.isAuthenticated()) {
-    //   res.status(401).json({ error: "Unauthorized" });
-    //   return;
-    // }
-    // const canAccess = await objectStorageService.canAccessObjectEntity({
-    //   userId: req.user.id,
-    //   objectFile,
-    //   requestedPermission: ObjectPermission.READ,
-    // });
-    // if (!canAccess) {
-    //   res.status(403).json({ error: "Forbidden" });
-    //   return;
-    // }
 
     const response = await objectStorageService.downloadObject(objectFile);
 

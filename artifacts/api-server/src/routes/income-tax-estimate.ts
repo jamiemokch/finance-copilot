@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { transactionsTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { estimateSoleTraderIncomeTax, getUkIncomeTaxRules, type AccountingBasis } from "../lib/income-tax.js";
 import { requireProfile } from "./profiles.js";
 import { getOrMigrateSa100Context } from "../lib/self-assessment-context.js";
@@ -22,7 +22,7 @@ router.get("/profiles/:profileId/income-tax-estimate", async (req, res) => {
     }
 
     const transactions = await db.select().from(transactionsTable)
-      .where(eq(transactionsTable.profileId, profile.id));
+      .where(and(eq(transactionsTable.profileId, profile.id), eq(transactionsTable.ledgerStatus, "active")));
     const ledger = summarizeTaxYearLedger(transactions, profile.taxYear);
     if (!ledger) { res.status(422).json({ error: "The selected profile tax year is not supported for an income-tax estimate" }); return; }
     if (!ledger.hasStarted) { res.status(422).json({ error: "The selected tax year has not started yet" }); return; }

@@ -21,6 +21,15 @@ import type {
 
 import type {
   AuthUserEnvelope,
+  BankImportBatch,
+  BankImportCommitInput,
+  BankImportCommitResult,
+  BankImportDetail,
+  BankImportDiscardResult,
+  BankImportPreviewInput,
+  BankImportRegistration,
+  BankImportRegistrationInput,
+  BankImportRowSelectionInput,
   BeginBrowserLoginParams,
   BusinessIdea,
   CopilotMessageInput,
@@ -33,6 +42,8 @@ import type {
   ErrorEnvelope,
   EvidenceInput,
   EvidenceItem,
+  FinancialAccount,
+  FinancialAccountInput,
   FinancialPosition,
   HandleBrowserLoginCallbackParams,
   HealthStatus,
@@ -2281,6 +2292,681 @@ export const useDeleteTransaction = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getDeleteTransactionMutationOptions(options));
+    }
+
+export const getListFinancialAccountsUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/financial-accounts`
+}
+
+/**
+ * @summary List financial accounts used as bank-import provenance
+ */
+export const listFinancialAccounts = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<FinancialAccount[]> => {
+
+  return customFetch<FinancialAccount[]>(getListFinancialAccountsUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListFinancialAccountsQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/financial-accounts`
+    ] as const;
+    }
+
+
+export const getListFinancialAccountsQueryOptions = <TData = Awaited<ReturnType<typeof listFinancialAccounts>>, TError = ErrorType<unknown>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listFinancialAccounts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListFinancialAccountsQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listFinancialAccounts>>> = ({ signal }) => listFinancialAccounts(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listFinancialAccounts>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListFinancialAccountsQueryResult = NonNullable<Awaited<ReturnType<typeof listFinancialAccounts>>>
+export type ListFinancialAccountsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List financial accounts used as bank-import provenance
+ */
+
+export function useListFinancialAccounts<TData = Awaited<ReturnType<typeof listFinancialAccounts>>, TError = ErrorType<unknown>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listFinancialAccounts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListFinancialAccountsQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getCreateFinancialAccountUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/financial-accounts`
+}
+
+/**
+ * @summary Create a profile-owned financial account identity
+ */
+export const createFinancialAccount = async (profileId: string,
+    financialAccountInput: FinancialAccountInput, options?: Parameters<typeof customFetch>[1]): Promise<FinancialAccount> => {
+
+  return customFetch<FinancialAccount>(getCreateFinancialAccountUrl(profileId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(financialAccountInput)
+  }
+);}
+
+
+
+
+
+export const getCreateFinancialAccountMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFinancialAccount>>, TError,{profileId: string;data: BodyType<FinancialAccountInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createFinancialAccount>>, TError,{profileId: string;data: BodyType<FinancialAccountInput>}, TContext> => {
+
+const mutationKey = ['createFinancialAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createFinancialAccount>>, {profileId: string;data: BodyType<FinancialAccountInput>}> = (props) => {
+          const {profileId,data} = props ?? {};
+
+          return  createFinancialAccount(profileId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateFinancialAccountMutationResult = NonNullable<Awaited<ReturnType<typeof createFinancialAccount>>>
+    export type CreateFinancialAccountMutationBody = BodyType<FinancialAccountInput>
+    export type CreateFinancialAccountMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Create a profile-owned financial account identity
+ */
+export const useCreateFinancialAccount = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFinancialAccount>>, TError,{profileId: string;data: BodyType<FinancialAccountInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createFinancialAccount>>,
+        TError,
+        {profileId: string;data: BodyType<FinancialAccountInput>},
+        TContext
+      > => {
+      return useMutation(getCreateFinancialAccountMutationOptions(options));
+    }
+
+export const getListBankImportsUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports`
+}
+
+/**
+ * @summary List profile-scoped bank CSV import batches
+ */
+export const listBankImports = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<BankImportBatch[]> => {
+
+  return customFetch<BankImportBatch[]>(getListBankImportsUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListBankImportsQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/bank-imports`
+    ] as const;
+    }
+
+
+export const getListBankImportsQueryOptions = <TData = Awaited<ReturnType<typeof listBankImports>>, TError = ErrorType<unknown>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listBankImports>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListBankImportsQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listBankImports>>> = ({ signal }) => listBankImports(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listBankImports>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListBankImportsQueryResult = NonNullable<Awaited<ReturnType<typeof listBankImports>>>
+export type ListBankImportsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List profile-scoped bank CSV import batches
+ */
+
+export function useListBankImports<TData = Awaited<ReturnType<typeof listBankImports>>, TError = ErrorType<unknown>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listBankImports>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListBankImportsQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getRegisterBankImportUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports`
+}
+
+/**
+ * @summary Register a directly uploaded CSV and obtain a mapping proposal
+ */
+export const registerBankImport = async (profileId: string,
+    bankImportRegistrationInput: BankImportRegistrationInput, options?: Parameters<typeof customFetch>[1]): Promise<BankImportRegistration> => {
+
+  return customFetch<BankImportRegistration>(getRegisterBankImportUrl(profileId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bankImportRegistrationInput)
+  }
+);}
+
+
+
+
+
+export const getRegisterBankImportMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof registerBankImport>>, TError,{profileId: string;data: BodyType<BankImportRegistrationInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof registerBankImport>>, TError,{profileId: string;data: BodyType<BankImportRegistrationInput>}, TContext> => {
+
+const mutationKey = ['registerBankImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof registerBankImport>>, {profileId: string;data: BodyType<BankImportRegistrationInput>}> = (props) => {
+          const {profileId,data} = props ?? {};
+
+          return  registerBankImport(profileId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RegisterBankImportMutationResult = NonNullable<Awaited<ReturnType<typeof registerBankImport>>>
+    export type RegisterBankImportMutationBody = BodyType<BankImportRegistrationInput>
+    export type RegisterBankImportMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Register a directly uploaded CSV and obtain a mapping proposal
+ */
+export const useRegisterBankImport = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof registerBankImport>>, TError,{profileId: string;data: BodyType<BankImportRegistrationInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof registerBankImport>>,
+        TError,
+        {profileId: string;data: BodyType<BankImportRegistrationInput>},
+        TContext
+      > => {
+      return useMutation(getRegisterBankImportMutationOptions(options));
+    }
+
+export const getGetBankImportUrl = (profileId: string,
+    batchId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports/${batchId}`
+}
+
+/**
+ * @summary Read one profile-scoped bank import and saved preview rows
+ */
+export const getBankImport = async (profileId: string,
+    batchId: string, options?: Parameters<typeof customFetch>[1]): Promise<BankImportDetail> => {
+
+  return customFetch<BankImportDetail>(getGetBankImportUrl(profileId,batchId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetBankImportQueryKey = (profileId: string,
+    batchId: string,) => {
+    return [
+    `/api/profiles/${profileId}/bank-imports/${batchId}`
+    ] as const;
+    }
+
+
+export const getGetBankImportQueryOptions = <TData = Awaited<ReturnType<typeof getBankImport>>, TError = ErrorType<unknown>>(profileId: string,
+    batchId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getBankImport>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetBankImportQueryKey(profileId,batchId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getBankImport>>> = ({ signal }) => getBankImport(profileId,batchId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined && batchId !== null && batchId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getBankImport>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetBankImportQueryResult = NonNullable<Awaited<ReturnType<typeof getBankImport>>>
+export type GetBankImportQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read one profile-scoped bank import and saved preview rows
+ */
+
+export function useGetBankImport<TData = Awaited<ReturnType<typeof getBankImport>>, TError = ErrorType<unknown>>(
+ profileId: string,
+    batchId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getBankImport>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetBankImportQueryOptions(profileId,batchId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getDiscardBankImportUrl = (profileId: string,
+    batchId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports/${batchId}`
+}
+
+/**
+ * @summary Discard an uncommitted bank import
+ */
+export const discardBankImport = async (profileId: string,
+    batchId: string, options?: Parameters<typeof customFetch>[1]): Promise<BankImportDiscardResult> => {
+
+  return customFetch<BankImportDiscardResult>(getDiscardBankImportUrl(profileId,batchId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDiscardBankImportMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof discardBankImport>>, TError,{profileId: string;batchId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof discardBankImport>>, TError,{profileId: string;batchId: string}, TContext> => {
+
+const mutationKey = ['discardBankImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof discardBankImport>>, {profileId: string;batchId: string}> = (props) => {
+          const {profileId,batchId} = props ?? {};
+
+          return  discardBankImport(profileId,batchId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DiscardBankImportMutationResult = NonNullable<Awaited<ReturnType<typeof discardBankImport>>>
+
+    export type DiscardBankImportMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Discard an uncommitted bank import
+ */
+export const useDiscardBankImport = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof discardBankImport>>, TError,{profileId: string;batchId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof discardBankImport>>,
+        TError,
+        {profileId: string;batchId: string},
+        TContext
+      > => {
+      return useMutation(getDiscardBankImportMutationOptions(options));
+    }
+
+export const getPreviewBankImportUrl = (profileId: string,
+    batchId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports/${batchId}/preview`
+}
+
+/**
+ * @summary Validate a mapping and save a non-mutating bank import preview
+ */
+export const previewBankImport = async (profileId: string,
+    batchId: string,
+    bankImportPreviewInput: BankImportPreviewInput, options?: Parameters<typeof customFetch>[1]): Promise<BankImportDetail> => {
+
+  return customFetch<BankImportDetail>(getPreviewBankImportUrl(profileId,batchId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bankImportPreviewInput)
+  }
+);}
+
+
+
+
+
+export const getPreviewBankImportMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportPreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof previewBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportPreviewInput>}, TContext> => {
+
+const mutationKey = ['previewBankImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof previewBankImport>>, {profileId: string;batchId: string;data: BodyType<BankImportPreviewInput>}> = (props) => {
+          const {profileId,batchId,data} = props ?? {};
+
+          return  previewBankImport(profileId,batchId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PreviewBankImportMutationResult = NonNullable<Awaited<ReturnType<typeof previewBankImport>>>
+    export type PreviewBankImportMutationBody = BodyType<BankImportPreviewInput>
+    export type PreviewBankImportMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Validate a mapping and save a non-mutating bank import preview
+ */
+export const usePreviewBankImport = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportPreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof previewBankImport>>,
+        TError,
+        {profileId: string;batchId: string;data: BodyType<BankImportPreviewInput>},
+        TContext
+      > => {
+      return useMutation(getPreviewBankImportMutationOptions(options));
+    }
+
+export const getUpdateBankImportRowsUrl = (profileId: string,
+    batchId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports/${batchId}/rows`
+}
+
+/**
+ * @summary Save explicit include or exclude choices for preview rows
+ */
+export const updateBankImportRows = async (profileId: string,
+    batchId: string,
+    bankImportRowSelectionInput: BankImportRowSelectionInput, options?: Parameters<typeof customFetch>[1]): Promise<BankImportDetail> => {
+
+  return customFetch<BankImportDetail>(getUpdateBankImportRowsUrl(profileId,batchId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bankImportRowSelectionInput)
+  }
+);}
+
+
+
+
+
+export const getUpdateBankImportRowsMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateBankImportRows>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportRowSelectionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateBankImportRows>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportRowSelectionInput>}, TContext> => {
+
+const mutationKey = ['updateBankImportRows'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateBankImportRows>>, {profileId: string;batchId: string;data: BodyType<BankImportRowSelectionInput>}> = (props) => {
+          const {profileId,batchId,data} = props ?? {};
+
+          return  updateBankImportRows(profileId,batchId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateBankImportRowsMutationResult = NonNullable<Awaited<ReturnType<typeof updateBankImportRows>>>
+    export type UpdateBankImportRowsMutationBody = BodyType<BankImportRowSelectionInput>
+    export type UpdateBankImportRowsMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Save explicit include or exclude choices for preview rows
+ */
+export const useUpdateBankImportRows = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateBankImportRows>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportRowSelectionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateBankImportRows>>,
+        TError,
+        {profileId: string;batchId: string;data: BodyType<BankImportRowSelectionInput>},
+        TContext
+      > => {
+      return useMutation(getUpdateBankImportRowsMutationOptions(options));
+    }
+
+export const getCommitBankImportUrl = (profileId: string,
+    batchId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/bank-imports/${batchId}/commit`
+}
+
+/**
+ * @summary Atomically commit selected rows to Financial Memory exactly once
+ */
+export const commitBankImport = async (profileId: string,
+    batchId: string,
+    bankImportCommitInput: BankImportCommitInput, options?: Parameters<typeof customFetch>[1]): Promise<BankImportCommitResult> => {
+
+  return customFetch<BankImportCommitResult>(getCommitBankImportUrl(profileId,batchId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bankImportCommitInput)
+  }
+);}
+
+
+
+
+
+export const getCommitBankImportMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof commitBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportCommitInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof commitBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportCommitInput>}, TContext> => {
+
+const mutationKey = ['commitBankImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof commitBankImport>>, {profileId: string;batchId: string;data: BodyType<BankImportCommitInput>}> = (props) => {
+          const {profileId,batchId,data} = props ?? {};
+
+          return  commitBankImport(profileId,batchId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CommitBankImportMutationResult = NonNullable<Awaited<ReturnType<typeof commitBankImport>>>
+    export type CommitBankImportMutationBody = BodyType<BankImportCommitInput>
+    export type CommitBankImportMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Atomically commit selected rows to Financial Memory exactly once
+ */
+export const useCommitBankImport = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof commitBankImport>>, TError,{profileId: string;batchId: string;data: BodyType<BankImportCommitInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof commitBankImport>>,
+        TError,
+        {profileId: string;batchId: string;data: BodyType<BankImportCommitInput>},
+        TContext
+      > => {
+      return useMutation(getCommitBankImportMutationOptions(options));
     }
 
 export const getListInboxItemsUrl = (profileId: string,) => {

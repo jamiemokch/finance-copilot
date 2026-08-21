@@ -182,6 +182,7 @@ export function computePLBreakdown(
   transactions: Array<{
     amount: number;
     recordType?: string;
+    ledgerStatus?: string | null;
     category: string;
     taxTreatment: string;
     allowableAmount?: number | null;
@@ -194,11 +195,15 @@ export function computePLBreakdown(
   let nonDeductibleExpenses = 0;
 
   for (const tx of transactions) {
+    if (tx.ledgerStatus === "voided") continue;
     // recordType is the canonical ledger classification. Category-based checks
     // remain only for legacy rows that predate recordType.
     const recordType = tx.recordType === 'income' || tx.recordType === 'expense'
       ? tx.recordType
-      : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+      : tx.recordType === 'unknown'
+        ? 'unknown'
+        : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+    if (recordType === 'unknown') continue;
     const isIncome = recordType === 'income';
     const isDeductible =
       recordType === 'expense' &&
@@ -328,6 +333,7 @@ export function computeMonthlyTrend(
     date: string;
     amount: number;
     recordType?: string;
+    ledgerStatus?: string | null;
     taxTreatment: string;
     category: string;
     allowableAmount?: number | null;
@@ -336,13 +342,17 @@ export function computeMonthlyTrend(
   const byMonth = new Map<string, { revenue: number; expenses: number }>();
 
   for (const tx of transactions) {
+    if (tx.ledgerStatus === "voided") continue;
     const month = tx.date.slice(0, 7); // "2024-11"
     if (!byMonth.has(month)) byMonth.set(month, { revenue: 0, expenses: 0 });
     const m = byMonth.get(month)!;
 
     const recordType = tx.recordType === 'income' || tx.recordType === 'expense'
       ? tx.recordType
-      : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+      : tx.recordType === 'unknown'
+        ? 'unknown'
+        : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+    if (recordType === 'unknown') continue;
     if (recordType === 'income') {
       m.revenue += Math.abs(tx.amount);
     } else if (tx.taxTreatment === 'deductible' && tx.amount < 0) {

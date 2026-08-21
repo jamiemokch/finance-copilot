@@ -84,7 +84,10 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
     const resolutionResult = await db.transaction(async (tx) => {
     // Fetch current transactions to compute tax impact diff accurately
     const existingTxns = await tx.select().from(transactionsTable)
-      .where(eq(transactionsTable.profileId, profile.id));
+      .where(and(
+        eq(transactionsTable.profileId, profile.id),
+        eq(transactionsTable.ledgerStatus, "active"),
+      ));
     const existingPendingAmounts = await tx.select().from(inboxItemsTable)
       .where(and(eq(inboxItemsTable.profileId, profile.id), eq(inboxItemsTable.status, "pending")));
     const pendingAmounts = existingPendingAmounts

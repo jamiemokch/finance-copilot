@@ -25,7 +25,11 @@ export function summarizeTaxYearLedger(
   const hasStarted = asOf >= period.start;
   const end = !hasStarted ? period.start : asOf < period.end ? asOf : period.end;
   const records = hasStarted
-    ? transactions.filter((transaction) => transaction.date >= period.start && transaction.date <= end)
+    ? transactions.filter((transaction) =>
+      transaction.ledgerStatus !== 'voided'
+      && transaction.date >= period.start
+      && transaction.date <= end,
+    )
     : [];
   const categoryMap = new Map<string, TaxYearLedgerCategory>();
   let totalIncome = 0;
@@ -36,7 +40,10 @@ export function summarizeTaxYearLedger(
     // Explicit record type is canonical. Signed amount remains a legacy fallback.
     const recordType = transaction.recordType === 'income' || transaction.recordType === 'expense'
       ? transaction.recordType
-      : transaction.amount >= 0 ? 'income' : 'expense';
+      : transaction.recordType === 'unknown'
+        ? 'unknown'
+        : transaction.amount >= 0 ? 'income' : 'expense';
+    if (recordType === 'unknown') continue;
     const amount = Math.abs(transaction.amount);
     if (recordType === 'income') totalIncome += amount;
     else {

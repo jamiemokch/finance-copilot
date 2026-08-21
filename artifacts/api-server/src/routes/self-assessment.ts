@@ -226,7 +226,10 @@ router.get('/profiles/:profileId/self-assessment/readiness', async (req, res): P
       publicIdentity(req.user.id),
       getOrMigrateSa100Context(req.user.id, profile.taxYear),
       businessContext(profile.id, profile.taxYear),
-      db.select().from(transactionsTable).where(eq(transactionsTable.profileId, profile.id)),
+      db.select().from(transactionsTable).where(and(
+        eq(transactionsTable.profileId, profile.id),
+        eq(transactionsTable.ledgerStatus, 'active'),
+      )),
       db.select().from(profilesTable).where(and(
         eq(profilesTable.userId, req.user.id),
         eq(profilesTable.taxYear, profile.taxYear),

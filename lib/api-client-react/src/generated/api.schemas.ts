@@ -458,6 +458,32 @@ export type TransactionRecordType = typeof TransactionRecordType[keyof typeof Tr
 export const TransactionRecordType = {
   income: 'income',
   expense: 'expense',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * @nullable
+ */
+export type TransactionAccountingClassification = typeof TransactionAccountingClassification[keyof typeof TransactionAccountingClassification] | null;
+
+
+export const TransactionAccountingClassification = {
+  income: 'income',
+  expense: 'expense',
+  transfer: 'transfer',
+  owner_funds: 'owner_funds',
+  drawings: 'drawings',
+  loan: 'loan',
+  tax_payment: 'tax_payment',
+  unknown: 'unknown',
+} as const;
+
+export type TransactionLedgerStatus = typeof TransactionLedgerStatus[keyof typeof TransactionLedgerStatus];
+
+
+export const TransactionLedgerStatus = {
+  active: 'active',
+  voided: 'voided',
 } as const;
 
 export interface Transaction {
@@ -474,6 +500,17 @@ export interface Transaction {
   source: string;
   /** @nullable */
   evidenceId?: string | null;
+  /** @nullable */
+  accountingClassification?: TransactionAccountingClassification;
+  /** @nullable */
+  financialAccountId?: string | null;
+  /** @nullable */
+  bankImportBatchId?: string | null;
+  /** @nullable */
+  bankImportRowId?: string | null;
+  /** @nullable */
+  bankMovementIdentity?: string | null;
+  ledgerStatus?: TransactionLedgerStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -496,12 +533,264 @@ export interface TransactionInput {
   note?: string | null;
 }
 
+export type TransactionUpdateAccountingClassification = typeof TransactionUpdateAccountingClassification[keyof typeof TransactionUpdateAccountingClassification];
+
+
+export const TransactionUpdateAccountingClassification = {
+  income: 'income',
+  expense: 'expense',
+  transfer: 'transfer',
+  owner_funds: 'owner_funds',
+  drawings: 'drawings',
+  loan: 'loan',
+  tax_payment: 'tax_payment',
+  unknown: 'unknown',
+} as const;
+
 export interface TransactionUpdate {
   date?: string;
   description?: string;
   amount?: number;
   category?: string;
   taxTreatment?: string;
+  accountingClassification?: TransactionUpdateAccountingClassification;
+}
+
+export type FinancialAccountAccountType = typeof FinancialAccountAccountType[keyof typeof FinancialAccountAccountType];
+
+
+export const FinancialAccountAccountType = {
+  current: 'current',
+  savings: 'savings',
+  credit_card: 'credit_card',
+  cash: 'cash',
+} as const;
+
+export interface FinancialAccount {
+  id: string;
+  profileId: string;
+  displayName: string;
+  /** @nullable */
+  lastFour?: string | null;
+  currency: string;
+  accountType: FinancialAccountAccountType;
+  createdAt: string;
+}
+
+export type FinancialAccountInputAccountType = typeof FinancialAccountInputAccountType[keyof typeof FinancialAccountInputAccountType];
+
+
+export const FinancialAccountInputAccountType = {
+  current: 'current',
+  savings: 'savings',
+  credit_card: 'credit_card',
+  cash: 'cash',
+} as const;
+
+export interface FinancialAccountInput {
+  /**
+     * @minLength 1
+     * @maxLength 120
+     */
+  displayName: string;
+  /**
+     * @nullable
+     * @pattern ^\d{4}$
+     */
+  lastFour?: string | null;
+  /**
+     * @minLength 3
+     * @maxLength 3
+     */
+  currency?: string;
+  accountType?: FinancialAccountInputAccountType;
+}
+
+export type BankCsvMappingDateFormat = typeof BankCsvMappingDateFormat[keyof typeof BankCsvMappingDateFormat];
+
+
+export const BankCsvMappingDateFormat = {
+  dmy: 'dmy',
+  ymd: 'ymd',
+} as const;
+
+export type BankCsvMappingDecimalConvention = typeof BankCsvMappingDecimalConvention[keyof typeof BankCsvMappingDecimalConvention];
+
+
+export const BankCsvMappingDecimalConvention = {
+  dot: 'dot',
+  comma: 'comma',
+} as const;
+
+export interface BankCsvMappingColumns {
+  /** @minimum 0 */
+  date: number;
+  /** @minimum 0 */
+  amount?: number;
+  /** @minimum 0 */
+  debit?: number;
+  /** @minimum 0 */
+  credit?: number;
+  /** @minimum 0 */
+  description: number;
+  /** @minimum 0 */
+  reference?: number;
+  /** @minimum 0 */
+  balance?: number;
+}
+
+export interface BankCsvMapping {
+  /** @minimum 0 */
+  headerRow: number;
+  columns: BankCsvMappingColumns;
+  dateFormat: BankCsvMappingDateFormat;
+  decimalConvention: BankCsvMappingDecimalConvention;
+}
+
+export type BankImportBatchStatus = typeof BankImportBatchStatus[keyof typeof BankImportBatchStatus];
+
+
+export const BankImportBatchStatus = {
+  mapping_required: 'mapping_required',
+  preview_ready: 'preview_ready',
+  committing: 'committing',
+  committed: 'committed',
+  discarded: 'discarded',
+  failed: 'failed',
+} as const;
+
+export interface BankImportBatch {
+  id: string;
+  profileId: string;
+  financialAccountId: string;
+  taxYearSnapshot: string;
+  filename: string;
+  encoding: string;
+  delimiter: string;
+  status: BankImportBatchStatus;
+  confirmedMapping?: BankCsvMapping | null;
+  mappingVersion: number;
+  previewVersion: number;
+  totalRows: number;
+  validRows: number;
+  invalidRows: number;
+  duplicateRows: number;
+  possibleDuplicateRows: number;
+  outOfScopeRows: number;
+  selectedRows: number;
+  committedRows: number;
+  /** @nullable */
+  lastError?: string | null;
+  createdAt: string;
+}
+
+/**
+ * @nullable
+ */
+export type BankImportRowDirection = typeof BankImportRowDirection[keyof typeof BankImportRowDirection] | null;
+
+
+export const BankImportRowDirection = {
+  money_in: 'money_in',
+  money_out: 'money_out',
+} as const;
+
+export type BankImportRowValidationStatus = typeof BankImportRowValidationStatus[keyof typeof BankImportRowValidationStatus];
+
+
+export const BankImportRowValidationStatus = {
+  valid: 'valid',
+  invalid: 'invalid',
+  out_of_scope: 'out_of_scope',
+} as const;
+
+export type BankImportRowDuplicateStatus = typeof BankImportRowDuplicateStatus[keyof typeof BankImportRowDuplicateStatus];
+
+
+export const BankImportRowDuplicateStatus = {
+  none: 'none',
+  already_imported: 'already_imported',
+  possible_duplicate: 'possible_duplicate',
+} as const;
+
+export interface BankImportRow {
+  id: string;
+  sourceRowNumber: number;
+  /** @nullable */
+  date?: string | null;
+  /** @nullable */
+  amount?: number | null;
+  /** @nullable */
+  direction?: BankImportRowDirection;
+  /** @nullable */
+  description?: string | null;
+  /** @nullable */
+  reference?: string | null;
+  /** @nullable */
+  balance?: number | null;
+  validationStatus: BankImportRowValidationStatus;
+  duplicateStatus: BankImportRowDuplicateStatus;
+  validationErrors: string[];
+  selectedForCommit: boolean;
+}
+
+export type BankImportProposalDecimalConvention = typeof BankImportProposalDecimalConvention[keyof typeof BankImportProposalDecimalConvention];
+
+
+export const BankImportProposalDecimalConvention = {
+  dot: 'dot',
+  comma: 'comma',
+  ambiguous: 'ambiguous',
+} as const;
+
+export interface BankImportProposal {
+  mapping: BankCsvMapping;
+  decimalConvention: BankImportProposalDecimalConvention;
+  headers: string[];
+  examples: string[][];
+}
+
+export interface BankImportRegistrationInput {
+  filename: string;
+  objectPath: string;
+  accountId: string;
+}
+
+export interface BankImportPreviewInput {
+  mapping: BankCsvMapping;
+}
+
+export interface BankImportRowSelection {
+  rowId: string;
+  selectedForCommit: boolean;
+}
+
+export interface BankImportRowSelectionInput {
+  /** @minItems 1 */
+  selections: BankImportRowSelection[];
+}
+
+export interface BankImportCommitInput {
+  /** @minimum 1 */
+  previewVersion: number;
+}
+
+export interface BankImportDetail {
+  batch: BankImportBatch;
+  rows: BankImportRow[];
+  proposal?: BankImportProposal;
+}
+
+export type BankImportRegistration = BankImportDetail & {
+  reused: boolean;
+};
+
+export type BankImportCommitResult = BankImportDetail & {
+  replayed: boolean;
+};
+
+export interface BankImportDiscardResult {
+  batch: BankImportBatch;
 }
 
 export interface InboxSubOption {

@@ -614,6 +614,180 @@ paths:
         '204':
           description: Transaction deleted.
 
+  /profiles/{profileId}/financial-accounts:
+    get:
+      tags: [Bank imports]
+      operationId: listFinancialAccounts
+      summary: List financial accounts used as bank-import provenance
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: Profile-owned financial accounts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FinancialAccount'
+    post:
+      tags: [Bank imports]
+      operationId: createFinancialAccount
+      summary: Create a profile-owned financial account identity
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinancialAccountInput'
+      responses:
+        '201':
+          description: Financial account created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancialAccount'
+
+  /profiles/{profileId}/bank-imports:
+    get:
+      tags: [Bank imports]
+      operationId: listBankImports
+      summary: List profile-scoped bank CSV import batches
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: Bank import batches.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BankImportBatch'
+    post:
+      tags: [Bank imports]
+      operationId: registerBankImport
+      summary: Register a directly uploaded CSV and obtain a mapping proposal
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankImportRegistrationInput'
+      responses:
+        '201':
+          description: New bank import registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportRegistration'
+        '200':
+          description: Existing same-file batch resumed idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportRegistration'
+
+  /profiles/{profileId}/bank-imports/{batchId}:
+    get:
+      tags: [Bank imports]
+      operationId: getBankImport
+      summary: Read one profile-scoped bank import and saved preview rows
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - $ref: '#/components/parameters/BankImportBatchIdParam'
+      responses:
+        '200':
+          description: Bank import details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportDetail'
+    delete:
+      tags: [Bank imports]
+      operationId: discardBankImport
+      summary: Discard an uncommitted bank import
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - $ref: '#/components/parameters/BankImportBatchIdParam'
+      responses:
+        '200':
+          description: Bank import discarded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportDiscardResult'
+
+  /profiles/{profileId}/bank-imports/{batchId}/preview:
+    post:
+      tags: [Bank imports]
+      operationId: previewBankImport
+      summary: Validate a mapping and save a non-mutating bank import preview
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - $ref: '#/components/parameters/BankImportBatchIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankImportPreviewInput'
+      responses:
+        '200':
+          description: Validated preview rows and counts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportDetail'
+
+  /profiles/{profileId}/bank-imports/{batchId}/rows:
+    patch:
+      tags: [Bank imports]
+      operationId: updateBankImportRows
+      summary: Save explicit include or exclude choices for preview rows
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - $ref: '#/components/parameters/BankImportBatchIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankImportRowSelectionInput'
+      responses:
+        '200':
+          description: Updated preview selection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportDetail'
+
+  /profiles/{profileId}/bank-imports/{batchId}/commit:
+    post:
+      tags: [Bank imports]
+      operationId: commitBankImport
+      summary: Atomically commit selected rows to Financial Memory exactly once
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - $ref: '#/components/parameters/BankImportBatchIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankImportCommitInput'
+      responses:
+        '200':
+          description: Idempotent commit result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankImportCommitResult'
+
   /profiles/{profileId}/inbox:
     get:
       tags: [Inbox]
@@ -846,6 +1020,12 @@ components:
       schema:
         type: string
         pattern: '^\d{4}/\d{2}$'
+    BankImportBatchIdParam:
+      name: batchId
+      in: path
+      required: true
+      schema:
+        type: string
 
   schemas:
     HealthStatus:
@@ -1610,7 +1790,7 @@ components:
           type: number
         recordType:
           type: string
-          enum: [income, expense]
+          enum: [income, expense, unknown]
         category:
           type: string
         note:
@@ -1621,6 +1801,20 @@ components:
           type: string
         evidenceId:
           type: [string, 'null']
+        accountingClassification:
+          type: [string, 'null']
+          enum: [income, expense, transfer, owner_funds, drawings, loan, tax_payment, unknown, null]
+        financialAccountId:
+          type: [string, 'null']
+        bankImportBatchId:
+          type: [string, 'null']
+        bankImportRowId:
+          type: [string, 'null']
+        bankMovementIdentity:
+          type: [string, 'null']
+        ledgerStatus:
+          type: string
+          enum: [active, voided]
         createdAt:
           type: string
         updatedAt:
@@ -1656,6 +1850,208 @@ components:
           type: string
         taxTreatment:
           type: string
+        accountingClassification:
+          type: string
+          enum: [income, expense, transfer, owner_funds, drawings, loan, tax_payment, unknown]
+
+    FinancialAccount:
+      type: object
+      required: [id, profileId, displayName, currency, accountType, createdAt]
+      properties:
+        id: { type: string }
+        profileId: { type: string }
+        displayName: { type: string }
+        lastFour: { type: [string, 'null'] }
+        currency: { type: string }
+        accountType:
+          type: string
+          enum: [current, savings, credit_card, cash]
+        createdAt: { type: string }
+
+    FinancialAccountInput:
+      type: object
+      required: [displayName]
+      properties:
+        displayName: { type: string, minLength: 1, maxLength: 120 }
+        lastFour: { type: [string, 'null'], pattern: '^\d{4}$' }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        accountType:
+          type: string
+          enum: [current, savings, credit_card, cash]
+
+    BankCsvMapping:
+      type: object
+      required: [headerRow, columns, dateFormat, decimalConvention]
+      properties:
+        headerRow: { type: number, minimum: 0 }
+        columns:
+          $ref: '#/components/schemas/BankCsvMappingColumns'
+        dateFormat:
+          type: string
+          enum: [dmy, ymd]
+        decimalConvention:
+          type: string
+          enum: [dot, comma]
+
+    BankCsvMappingColumns:
+      type: object
+      required: [date, description]
+      properties:
+        date: { type: number, minimum: 0 }
+        amount: { type: number, minimum: 0 }
+        debit: { type: number, minimum: 0 }
+        credit: { type: number, minimum: 0 }
+        description: { type: number, minimum: 0 }
+        reference: { type: number, minimum: 0 }
+        balance: { type: number, minimum: 0 }
+
+    BankImportBatch:
+      type: object
+      required: [id, profileId, financialAccountId, taxYearSnapshot, filename, encoding, delimiter, status, mappingVersion, previewVersion, totalRows, validRows, invalidRows, duplicateRows, possibleDuplicateRows, outOfScopeRows, selectedRows, committedRows, createdAt]
+      properties:
+        id: { type: string }
+        profileId: { type: string }
+        financialAccountId: { type: string }
+        taxYearSnapshot: { type: string }
+        filename: { type: string }
+        encoding: { type: string }
+        delimiter: { type: string }
+        status:
+          type: string
+          enum: [mapping_required, preview_ready, committing, committed, discarded, failed]
+        confirmedMapping:
+          oneOf:
+            - $ref: '#/components/schemas/BankCsvMapping'
+            - type: 'null'
+        mappingVersion: { type: number }
+        previewVersion: { type: number }
+        totalRows: { type: number }
+        validRows: { type: number }
+        invalidRows: { type: number }
+        duplicateRows: { type: number }
+        possibleDuplicateRows: { type: number }
+        outOfScopeRows: { type: number }
+        selectedRows: { type: number }
+        committedRows: { type: number }
+        lastError: { type: [string, 'null'] }
+        createdAt: { type: string }
+
+    BankImportRow:
+      type: object
+      required: [id, sourceRowNumber, validationStatus, duplicateStatus, validationErrors, selectedForCommit]
+      properties:
+        id: { type: string }
+        sourceRowNumber: { type: number }
+        date: { type: [string, 'null'] }
+        amount: { type: [number, 'null'] }
+        direction:
+          type: [string, 'null']
+          enum: [money_in, money_out, null]
+        description: { type: [string, 'null'] }
+        reference: { type: [string, 'null'] }
+        balance: { type: [number, 'null'] }
+        validationStatus:
+          type: string
+          enum: [valid, invalid, out_of_scope]
+        duplicateStatus:
+          type: string
+          enum: [none, already_imported, possible_duplicate]
+        validationErrors:
+          type: array
+          items: { type: string }
+        selectedForCommit: { type: boolean }
+
+    BankImportProposal:
+      type: object
+      required: [mapping, decimalConvention, headers, examples]
+      properties:
+        mapping:
+          $ref: '#/components/schemas/BankCsvMapping'
+        decimalConvention:
+          type: string
+          enum: [dot, comma, ambiguous]
+        headers:
+          type: array
+          items: { type: string }
+        examples:
+          type: array
+          items:
+            type: array
+            items: { type: string }
+
+    BankImportRegistrationInput:
+      type: object
+      required: [filename, objectPath, accountId]
+      properties:
+        filename: { type: string }
+        objectPath: { type: string }
+        accountId: { type: string }
+
+    BankImportPreviewInput:
+      type: object
+      required: [mapping]
+      properties:
+        mapping:
+          $ref: '#/components/schemas/BankCsvMapping'
+
+    BankImportRowSelection:
+      type: object
+      required: [rowId, selectedForCommit]
+      properties:
+        rowId: { type: string }
+        selectedForCommit: { type: boolean }
+
+    BankImportRowSelectionInput:
+      type: object
+      required: [selections]
+      properties:
+        selections:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BankImportRowSelection'
+
+    BankImportCommitInput:
+      type: object
+      required: [previewVersion]
+      properties:
+        previewVersion: { type: number, minimum: 1 }
+
+    BankImportDetail:
+      type: object
+      required: [batch, rows]
+      properties:
+        batch:
+          $ref: '#/components/schemas/BankImportBatch'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankImportRow'
+        proposal:
+          $ref: '#/components/schemas/BankImportProposal'
+
+    BankImportRegistration:
+      allOf:
+        - $ref: '#/components/schemas/BankImportDetail'
+        - type: object
+          required: [reused]
+          properties:
+            reused: { type: boolean }
+
+    BankImportCommitResult:
+      allOf:
+        - $ref: '#/components/schemas/BankImportDetail'
+        - type: object
+          required: [replayed]
+          properties:
+            replayed: { type: boolean }
+
+    BankImportDiscardResult:
+      type: object
+      required: [batch]
+      properties:
+        batch:
+          $ref: '#/components/schemas/BankImportBatch'
 
     InboxSubOption:
       type: object

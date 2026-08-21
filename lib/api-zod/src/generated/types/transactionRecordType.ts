@@ -12,4 +12,5 @@ export type TransactionRecordType = typeof TransactionRecordType[keyof typeof Tr
 export const TransactionRecordType = {
   income: 'income',
   expense: 'expense',
+  unknown: 'unknown',
 } as const;

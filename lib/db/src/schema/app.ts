@@ -62,6 +62,25 @@ export const insertProfileSchema = createInsertSchema(profilesTable).omit({
 export type Profile = typeof profilesTable.$inferSelect;
 export type InsertProfile = z.infer<typeof insertProfileSchema>;
 
+// ─── Private Upload Ownership ──────────────────────────────────────────────────
+
+/**
+ * Object storage paths are unguessable but still need a database ownership
+ * record. This prevents a private object path from being attached to another
+ * user's bank-import batch and gives the serving route a real access check.
+ */
+export const privateUploadObjectsTable = pgTable('private_upload_objects', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  objectPath: text('object_path').notNull(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => usersTable.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('private_upload_objects_path_unique').on(table.objectPath),
+  index('private_upload_objects_user_idx').on(table.userId, table.createdAt),
+]);
+
 // ─── Evidence Items ───────────────────────────────────────────────────────────
 
 export const evidenceItemsTable = pgTable('evidence_items', {
@@ -105,6 +124,129 @@ export const insertEvidenceItemSchema = createInsertSchema(evidenceItemsTable).o
 export type EvidenceItem = typeof evidenceItemsTable.$inferSelect;
 export type InsertEvidenceItem = z.infer<typeof insertEvidenceItemSchema>;
 
+// ─── Financial Accounts & Bank Import Audit ────────────────────────────────────
+
+/**
+ * Identity only. These accounts deliberately do not model a reconciled balance
+ * or a bank feed; they record which owned account a bank CSV came from.
+ */
+export const financialAccountsTable = pgTable('financial_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  displayName: text('display_name').notNull(),
+  lastFour: text('last_four'),
+  currency: text('currency').notNull().default('GBP'),
+  accountType: text('account_type').notNull().default('current'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => [
+  index('financial_accounts_profile_idx').on(table.profileId, table.createdAt),
+]);
+
+export const insertFinancialAccountSchema = createInsertSchema(financialAccountsTable).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type FinancialAccount = typeof financialAccountsTable.$inferSelect;
+export type InsertFinancialAccount = z.infer<typeof insertFinancialAccountSchema>;
+
+/**
+ * Bank-import batches and rows are staging/audit records only. Financial
+ * calculations always read the canonical transactions table.
+ */
+export const bankImportBatchesTable = pgTable('bank_import_batches', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  financialAccountId: uuid('financial_account_id')
+    .notNull()
+    .references(() => financialAccountsTable.id, { onDelete: 'restrict' }),
+  taxYearSnapshot: text('tax_year_snapshot').notNull(),
+  accountingBasisSnapshot: text('accounting_basis_snapshot').notNull().default('cash'),
+  filename: text('filename').notNull(),
+  objectPath: text('object_path').notNull(),
+  fileHash: text('file_hash').notNull(),
+  encoding: text('encoding').notNull().default('utf-8'),
+  delimiter: text('delimiter').notNull().default(','),
+  confirmedMapping: jsonb('confirmed_mapping'),
+  mappingVersion: integer('mapping_version').notNull().default(0),
+  previewVersion: integer('preview_version').notNull().default(0),
+  // uploaded | mapping_required | preview_ready | committing | committed | failed | discarded
+  status: text('status').notNull().default('uploaded'),
+  totalRows: integer('total_rows').notNull().default(0),
+  validRows: integer('valid_rows').notNull().default(0),
+  invalidRows: integer('invalid_rows').notNull().default(0),
+  duplicateRows: integer('duplicate_rows').notNull().default(0),
+  possibleDuplicateRows: integer('possible_duplicate_rows').notNull().default(0),
+  outOfScopeRows: integer('out_of_scope_rows').notNull().default(0),
+  selectedRows: integer('selected_rows').notNull().default(0),
+  committedRows: integer('committed_rows').notNull().default(0),
+  lastError: text('last_error'),
+  processingLeaseExpiresAt: timestamp('processing_lease_expires_at', { withTimezone: true }),
+  processingToken: text('processing_token'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => [
+  uniqueIndex('bank_import_batches_profile_hash_unique').on(table.profileId, table.fileHash),
+  index('bank_import_batches_profile_created_idx').on(table.profileId, table.createdAt),
+  index('bank_import_batches_account_idx').on(table.financialAccountId, table.createdAt),
+]);
+
+export const insertBankImportBatchSchema = createInsertSchema(bankImportBatchesTable).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type BankImportBatch = typeof bankImportBatchesTable.$inferSelect;
+export type InsertBankImportBatch = z.infer<typeof insertBankImportBatchSchema>;
+
+export const bankImportRowsTable = pgTable('bank_import_rows', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  batchId: uuid('batch_id')
+    .notNull()
+    .references(() => bankImportBatchesTable.id, { onDelete: 'cascade' }),
+  sourceRowNumber: integer('source_row_number').notNull(),
+  sourceFingerprint: text('source_fingerprint').notNull(),
+  occurrenceIdentity: integer('occurrence_identity').notNull().default(1),
+  date: text('date'),
+  amount: doublePrecision('amount'),
+  // money_in | money_out — intentionally independent from accounting classification
+  direction: text('direction'),
+  description: text('description'),
+  reference: text('reference'),
+  balance: doublePrecision('balance'),
+  // valid | invalid | out_of_scope
+  validationStatus: text('validation_status').notNull().default('invalid'),
+  // none | already_imported | possible_duplicate
+  duplicateStatus: text('duplicate_status').notNull().default('none'),
+  validationErrors: jsonb('validation_errors').notNull().default('[]'),
+  selectedForCommit: boolean('selected_for_commit').notNull().default(false),
+  canonicalTransactionId: uuid('canonical_transaction_id'),
+  rawRowData: jsonb('raw_row_data').notNull().default('[]'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('bank_import_rows_batch_source_unique').on(table.batchId, table.sourceRowNumber),
+  index('bank_import_rows_fingerprint_idx').on(table.sourceFingerprint),
+  index('bank_import_rows_committed_idx').on(table.canonicalTransactionId),
+]);
+
+export const insertBankImportRowSchema = createInsertSchema(bankImportRowsTable).omit({
+  id: true,
+  createdAt: true,
+});
+export type BankImportRow = typeof bankImportRowsTable.$inferSelect;
+export type InsertBankImportRow = z.infer<typeof insertBankImportRowSchema>;
+
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
 export const transactionsTable = pgTable('transactions', {
@@ -114,7 +256,8 @@ export const transactionsTable = pgTable('transactions', {
     .references(() => profilesTable.id, { onDelete: 'cascade' }),
   date: text('date').notNull(),
   description: text('description').notNull(),
-  // positive = income, negative = expense
+  // Existing manual/extracted records use income/expense. Bank imports use
+  // unknown until a person explicitly confirms accounting classification.
   amount: doublePrecision('amount').notNull(),
   recordType: text('record_type').notNull(),
   note: text('note'),
@@ -122,7 +265,7 @@ export const transactionsTable = pgTable('transactions', {
   category: text('category').notNull().default('expense'),
   // deductible | non_deductible | income | ar | ap
   taxTreatment: text('tax_treatment').notNull().default('deductible'),
-  // manual | extracted | demo
+  // manual | extracted | demo | bank_csv
   source: text('source').notNull().default('manual'),
   evidenceId: uuid('evidence_id'),
   // 0 demo, 1 original document, 2 bank CSV, 3 ledger/spreadsheet, 4 manual
@@ -137,6 +280,23 @@ export const transactionsTable = pgTable('transactions', {
   capitalAllowanceType: text('capital_allowance_type'),   // AIA | main_pool | nil | null
   vatMetadata: jsonb('vat_metadata'),                     // {rate, vatAmount, isVatInclusive} | null
   userOverride: boolean('user_override').notNull().default(false),
+  // Bank imports carry direction separately from accounting treatment. A value
+  // of unknown or null must not be included in taxable/allowable calculations.
+  accountingClassification: text('accounting_classification'),
+  financialAccountId: uuid('financial_account_id')
+    .references(() => financialAccountsTable.id, { onDelete: 'restrict' }),
+  bankImportBatchId: uuid('bank_import_batch_id')
+    .references(() => bankImportBatchesTable.id, { onDelete: 'restrict' }),
+  bankImportRowId: uuid('bank_import_row_id'),
+  // Stable normalized movement identity plus contextual occurrence number. This
+  // is the durable cross-file duplicate fence, distinct from a batch row ID.
+  bankMovementIdentity: text('bank_movement_identity'),
+  originalImportSnapshot: jsonb('original_import_snapshot'),
+  // active | voided. Imported records are voided rather than deleted so their
+  // audit trail and repeat-upload protection remain durable.
+  ledgerStatus: text('ledger_status').notNull().default('active'),
+  voidedAt: timestamp('voided_at', { withTimezone: true }),
+  voidReason: text('void_reason'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .notNull()
@@ -150,7 +310,14 @@ export const transactionsTable = pgTable('transactions', {
   uniqueIndex('transactions_document_evidence_unique')
     .on(table.evidenceId)
     .where(sql`${table.evidenceId} is not null and ${table.sourceRowIndex} is null`),
+  uniqueIndex('transactions_bank_import_row_unique')
+    .on(table.bankImportRowId)
+    .where(sql`${table.bankImportRowId} is not null`),
+  uniqueIndex('transactions_profile_bank_movement_identity_unique')
+    .on(table.profileId, table.financialAccountId, table.bankMovementIdentity)
+    .where(sql`${table.bankMovementIdentity} is not null`),
   index('transactions_profile_date_idx').on(table.profileId, table.date, table.createdAt),
+  index('transactions_profile_ledger_status_idx').on(table.profileId, table.ledgerStatus, table.date),
 ]);
 
 export const insertTransactionSchema = createInsertSchema(transactionsTable).omit({

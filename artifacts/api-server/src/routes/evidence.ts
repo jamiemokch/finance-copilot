@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { randomUUID } from "crypto";
-import { db } from "@workspace/db";
+import { db, privateUploadObjectsTable } from "@workspace/db";
 import {
   evidenceItemsTable, inboxItemsTable, transactionsTable, profilesTable,
 } from "@workspace/db/schema";
@@ -70,6 +70,15 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [upload] = await db.select().from(privateUploadObjectsTable).where(
+      eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
+    ).limit(1);
+    if (!upload || upload.userId !== req.user.id) {
+      // An opaque storage path alone is never proof that the caller owns the
+      // bytes. This blocks attachment and downstream processing cross-user.
+      res.status(404).json({ error: "Uploaded file not found" });
+      return;
+    }
     const [item] = await db.insert(evidenceItemsTable).values({
       profileId: profile.id,
       filename: body.data.filename,

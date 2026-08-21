@@ -6,3 +6,4 @@
 - [Resumable evidence processing](resumable-evidence-processing.md) — recovery leases must be fenced by a claim token before any financial outcome is persisted
 - [Income-tax estimate safeguards](income-tax-estimate-safeguards.md) — estimates use allowable ledger profit; tax-year-scoped personal income and unsupported accrual timing stay incomplete
 - [OpenAPI Zod number compatibility](openapi-zod-number-compatibility.md) — this generator emits unavailable zod.int() for integer schemas; use number for count-like fields
+- [Bank CSV import safety model](bank-csv-import-safety.md) — imports stage first, require explicit duplicate choices, then atomically write unreviewed ledger movements

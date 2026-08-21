@@ -12,6 +12,7 @@ import copilotRouter from "./copilot.js";
 import demoRouter from "./demo.js";
 import incomeTaxEstimateRouter from "./income-tax-estimate.js";
 import selfAssessmentRouter from "./self-assessment.js";
+import bankImportsRouter from "./bank-imports.js";
 
 const router: IRouter = Router();
 
@@ -22,6 +23,7 @@ router.use(profilesRouter);
 router.use(positionRouter);
 router.use(incomeTaxEstimateRouter);
 router.use(selfAssessmentRouter);
+router.use(bankImportsRouter);
 router.use(evidenceRouter);
 router.use(transactionsRouter);
 router.use(inboxRouter);

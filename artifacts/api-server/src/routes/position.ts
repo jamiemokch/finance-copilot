@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import {
   transactionsTable, inboxItemsTable, saChecklistItemsTable, decisionMemoryTable,
 } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   computePLBreakdown, computeTaxForProfit, computeCashPosition, buildKPIs,
   computeMonthlyTrend, computeVATWarning, computeEvidenceCoverage,
@@ -22,7 +22,7 @@ router.get("/profiles/:profileId/position", async (req, res) => {
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
 
     const [transactions, inboxItems, saItems] = await Promise.all([
-      db.select().from(transactionsTable).where(eq(transactionsTable.profileId, profile.id)),
+      db.select().from(transactionsTable).where(and(eq(transactionsTable.profileId, profile.id), eq(transactionsTable.ledgerStatus, "active"))),
       db.select().from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profile.id)),
       db.select().from(saChecklistItemsTable).where(eq(saChecklistItemsTable.profileId, profile.id)),
     ]);
@@ -79,7 +79,7 @@ router.get("/profiles/:profileId/business-ideas", async (req, res) => {
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
 
     const [transactions, inboxItems, decisions, saItems] = await Promise.all([
-      db.select().from(transactionsTable).where(eq(transactionsTable.profileId, profile.id)),
+      db.select().from(transactionsTable).where(and(eq(transactionsTable.profileId, profile.id), eq(transactionsTable.ledgerStatus, "active"))),
       db.select().from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profile.id)),
       db.select().from(decisionMemoryTable).where(eq(decisionMemoryTable.profileId, profile.id)),
       db.select().from(saChecklistItemsTable).where(eq(saChecklistItemsTable.profileId, profile.id)),

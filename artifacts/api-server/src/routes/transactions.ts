@@ -14,7 +14,10 @@ router.get("/profiles/:profileId/transactions", async (req, res) => {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const txns = await db.select().from(transactionsTable)
-      .where(eq(transactionsTable.profileId, profile.id));
+      .where(and(
+        eq(transactionsTable.profileId, profile.id),
+        eq(transactionsTable.ledgerStatus, "active"),
+      ));
     res.json(txns);
   } catch (err) {
     req.log.error(err);
@@ -90,7 +93,7 @@ router.get("/profiles/:profileId/transactions/:txId", async (req, res) => {
   }
 });
 
-// PATCH /profiles/:profileId/transactions/:txId — edit a manual record
+// PATCH /profiles/:profileId/transactions/:txId — edit manual or explicitly classify imported record
 router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   const body = z.object({
@@ -99,6 +102,9 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
     amount: z.number().refine((value) => value !== 0, "Amount must be non-zero").optional(),
     category: z.string().trim().min(1).optional(),
     taxTreatment: z.string().optional(),
+    accountingClassification: z.enum([
+      "income", "expense", "transfer", "owner_funds", "drawings", "loan", "tax_payment", "unknown",
+    ]).optional(),
   }).safeParse(req.body);
   if (!body.success || Object.keys(body.data).length === 0) { res.status(400).json({ error: "Invalid transaction update" }); return; }
   try {
@@ -109,14 +115,38 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
       eq(transactionsTable.profileId, profile.id),
     ));
     if (!existing) { res.status(404).json({ error: "Transaction not found" }); return; }
-    if (existing.source !== "manual") { res.status(422).json({ error: "Only manually added records can be edited here" }); return; }
+    if (existing.ledgerStatus !== "active") { res.status(422).json({ error: "Voided records cannot be edited" }); return; }
+    if (existing.source !== "manual" && existing.source !== "bank_csv") {
+      res.status(422).json({ error: "Only manual or bank-imported records can be edited here" });
+      return;
+    }
     const amount = body.data.amount ?? existing.amount;
     const updates: Record<string, unknown> = {
       ...body.data,
-      recordType: amount > 0 ? "income" : "expense",
     };
-    if (body.data.amount !== undefined && body.data.taxTreatment === undefined) {
+    if (existing.source === "manual") {
+      updates.recordType = amount > 0 ? "income" : "expense";
+    }
+    if (existing.source === "manual" && body.data.amount !== undefined && body.data.taxTreatment === undefined) {
       updates.taxTreatment = amount > 0 ? "income" : "deductible";
+    }
+    if (existing.source === "bank_csv") {
+      updates.userOverride = true;
+      const classification = body.data.accountingClassification ?? existing.accountingClassification ?? "unknown";
+      updates.accountingClassification = classification;
+      if (classification === "income") {
+        updates.recordType = "income";
+        updates.category = body.data.category ?? "income";
+        updates.taxTreatment = body.data.taxTreatment ?? "income";
+      } else if (classification === "expense") {
+        updates.recordType = "expense";
+        updates.category = body.data.category ?? "expense";
+        updates.taxTreatment = body.data.taxTreatment ?? "deductible";
+      } else {
+        updates.recordType = "unknown";
+        updates.category = body.data.category ?? classification;
+        updates.taxTreatment = "unreviewed";
+      }
     }
     const [updated] = await db.update(transactionsTable).set(updates)
       .where(and(eq(transactionsTable.id, existing.id), eq(transactionsTable.profileId, profile.id)))
@@ -128,7 +158,7 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
   }
 });
 
-// DELETE /profiles/:profileId/transactions/:txId — remove a manual record
+// DELETE /profiles/:profileId/transactions/:txId — delete manual or audit-void an imported record
 router.delete("/profiles/:profileId/transactions/:txId", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   try {
@@ -139,11 +169,24 @@ router.delete("/profiles/:profileId/transactions/:txId", async (req, res) => {
       eq(transactionsTable.profileId, profile.id),
     ));
     if (!existing) { res.status(404).json({ error: "Transaction not found" }); return; }
-    if (existing.source !== "manual") { res.status(422).json({ error: "Only manually added records can be deleted here" }); return; }
-    await db.delete(transactionsTable).where(and(
-      eq(transactionsTable.id, existing.id),
-      eq(transactionsTable.profileId, profile.id),
-    ));
+    if (existing.source === "manual") {
+      await db.delete(transactionsTable).where(and(
+        eq(transactionsTable.id, existing.id),
+        eq(transactionsTable.profileId, profile.id),
+      ));
+    } else if (existing.source === "bank_csv") {
+      await db.update(transactionsTable).set({
+        ledgerStatus: "voided",
+        voidedAt: new Date(),
+        voidReason: "Removed from active Financial Memory by the user",
+      }).where(and(
+        eq(transactionsTable.id, existing.id),
+        eq(transactionsTable.profileId, profile.id),
+      ));
+    } else {
+      res.status(422).json({ error: "Only manually added or bank-imported records can be removed here" });
+      return;
+    }
     res.status(204).end();
   } catch (err) {
     req.log.error(err);

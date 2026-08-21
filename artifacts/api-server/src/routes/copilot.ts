@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { transactionsTable, inboxItemsTable, saChecklistItemsTable, profilesTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import { getCopilotReply, isConfigured } from "../lib/ai.js";
@@ -42,7 +42,7 @@ router.post("/copilot/message", async (req, res) => {
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
 
     const [transactions, inboxItems, saItems] = await Promise.all([
-      db.select().from(transactionsTable).where(eq(transactionsTable.profileId, profile.id)),
+      db.select().from(transactionsTable).where(and(eq(transactionsTable.profileId, profile.id), eq(transactionsTable.ledgerStatus, "active"))),
       db.select().from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profile.id)),
       db.select().from(saChecklistItemsTable).where(eq(saChecklistItemsTable.profileId, profile.id)),
     ]);
