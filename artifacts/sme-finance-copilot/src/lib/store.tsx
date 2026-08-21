@@ -86,12 +86,8 @@ export interface TransactionItem {
   date: string;
   description: string;
   amount: number;
-  recordType: 'income' | 'expense';
   category: string;
-  note?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  source: string;
+  source: 'bank' | 'manual' | 'receipt';
   evidenceTier?: number;
   evidenceId?: string | null;
 }
@@ -358,15 +354,14 @@ export interface AppState {
   positionItems: PositionItem[];
 
   transactions: TransactionItem[];
-  addTransaction: (transaction: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>) => Promise<void>;
-  updateTransaction: (id: string, transaction: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>) => Promise<void>;
-  deleteTransaction: (id: string) => Promise<void>;
+  addTransaction: (transaction: Omit<TransactionItem, 'id'>, idempotencyKey: string) => Promise<void>;
 
   evidenceItems: EvidenceItem[];
   addEvidenceItem: (item: Omit<EvidenceItem, 'id'>) => string;
 
   inboxItems: InboxItem[];
-  resolveInboxItem: (id: string, resolution: string) => void;
+  resolveInboxItem: (id: string, resolution: string) => Promise<boolean>;
+  resolveInboxBatch: (ids: string[], resolution: string) => Promise<boolean>;
 
   chatHistory: ChatSession[];
   addChatMessage: (sessionId: string, message: Omit<ChatMessage, 'id'>) => void;
@@ -638,16 +633,10 @@ function mapTransaction(t: APITransaction): TransactionItem {
     date: t.date,
     description: t.description,
     amount: t.amount,
-    // Explicit stored classification is canonical. Signed amount is only a
-    // compatibility fallback for rows created before recordType existed.
-    recordType: t.recordType ?? (t.amount > 0 ? 'income' : 'expense'),
     category: t.category,
-    note: t.note ?? undefined,
-    source: src,
+    source: (src === 'bank' || src === 'manual' || src === 'receipt') ? src : 'manual',
     evidenceTier: t.evidenceTier,
     evidenceId: t.evidenceId,
-    createdAt: t.createdAt,
-    updatedAt: t.updatedAt,
   };
 }
 
@@ -683,8 +672,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // ── Profiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileIdState] = useState('');
-  const activeProfileIdRef = useRef('');
+  const [activeProfileId, setActiveProfileId] = useState('');
   const [profilesLoaded, setProfilesLoaded] = useState(false);
 
   // ── API data (raw, for computing derived types)
@@ -704,22 +692,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [sharedContext, setSharedContext] = useState<SharedContext>({ name: '', address: '', utr: '', niNumber: '' });
   const [copilotTrigger, setCopilotTrigger] = useState<string | null>(null);
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
-
-  const clearProfileData = useCallback(() => {
-    setRawPosition(null);
-    setRawTransactions([]);
-    setInboxItems([]);
-    setEvidenceItems([]);
-    setDecisionMemory([]);
-    setBusinessIdeas([]);
-    setSAChecklist([]);
-  }, []);
-
-  const setActiveProfileId = useCallback((profileId: string) => {
-    activeProfileIdRef.current = profileId;
-    clearProfileData();
-    setActiveProfileIdState(profileId);
-  }, [clearProfileData]);
+  const resolvingInboxIds = useRef(new Set<string>());
+  const dataFetchVersion = useRef(0);
 
   // ── Auth check on mount
   useEffect(() => {
@@ -732,31 +706,40 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // ── Core data fetcher
   const fetchAll = useCallback(async (profileId: string) => {
     if (!profileId) return;
-    const [posResult, inboxResult, evidResult, txnResult, decResult, ideaResult, saResult] =
+    const fetchVersion = ++dataFetchVersion.current;
+    const [posResult, inboxResult, evidResult, txnResult, decResult, saResult] =
       await Promise.allSettled([
         positionApi.get(profileId),
         inboxApi.list(profileId),
         evidenceApi.list(profileId),
         transactionsApi.list(profileId),
         decisionsApi.list(profileId),
-        ideasApi.list(profileId),
         saChecklistApi.list(profileId),
       ]);
 
-    // A request for a profile that is no longer selected must never replace
-    // the newly selected profile's data when responses arrive out of order.
-    if (activeProfileIdRef.current !== profileId) return;
-
+    // Ignore a response from an older load. In particular, a pre-mutation
+    // refresh must not overwrite the server-confirmed result from a newer one.
+    if (fetchVersion !== dataFetchVersion.current) return;
     if (posResult.status === 'fulfilled') setRawPosition(posResult.value);
     if (inboxResult.status === 'fulfilled') setInboxItems(inboxResult.value.map(mapInboxItem));
     if (evidResult.status === 'fulfilled') setEvidenceItems(evidResult.value.map(mapEvidenceItem));
     if (txnResult.status === 'fulfilled') setRawTransactions(txnResult.value);
     if (decResult.status === 'fulfilled')
       setDecisionMemory(decResult.value.map(d => mapDecision(d, profileId)));
-    if (ideaResult.status === 'fulfilled')
-      setBusinessIdeas(ideaResult.value.map(i => mapIdea(i, profileId)));
     if (saResult.status === 'fulfilled')
       setSAChecklist(saResult.value.map(i => mapSAItem(i, profileId)));
+
+    // Business Ideas can involve a slower AI call. It should never hold the
+    // records, Inbox, or Tasks screens blank after a confirmed mutation.
+    void ideasApi.list(profileId)
+      .then(ideas => {
+        if (fetchVersion === dataFetchVersion.current) {
+          setBusinessIdeas(ideas.map(idea => mapIdea(idea, profileId)));
+        }
+      })
+      // A route change can intentionally abort this non-critical background
+      // request. Its next page visit will request a fresh set of ideas.
+      .catch(() => undefined);
   }, []);
 
   // ── Initialise once authenticated
@@ -788,7 +771,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setProfiles(mapped);
         const firstId = profs[0].id;
         setActiveProfileId(firstId);
-        await fetchAll(firstId);
         setProfilesLoaded(true);
       } catch (err) {
         console.error('[store] init failed', err);
@@ -905,71 +887,66 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
-  const addTransaction = useCallback(async (tx: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>): Promise<void> => {
+  const addTransaction = useCallback(async (tx: Omit<TransactionItem, 'id'>, idempotencyKey: string): Promise<void> => {
+    const taxTreatment = tx.amount > 0 ? 'income' : 'deductible';
     await transactionsApi.create(activeProfileId, {
-      date: tx.date, recordType: tx.recordType, description: tx.description, amount: tx.amount,
-      category: tx.category, note: tx.note,
+      date: tx.date, description: tx.description, amount: tx.amount,
+      category: tx.category, taxTreatment, idempotencyKey,
     });
-    await fetchAll(activeProfileId);
-  }, [activeProfileId, fetchAll]);
-
-  const updateTransaction = useCallback(async (id: string, tx: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>): Promise<void> => {
-    await transactionsApi.update(activeProfileId, id, {
-      date: tx.date, recordType: tx.recordType, description: tx.description, amount: tx.amount,
-      category: tx.category, note: tx.note,
-    });
-    await fetchAll(activeProfileId);
-  }, [activeProfileId, fetchAll]);
-
-  const deleteTransaction = useCallback(async (id: string): Promise<void> => {
-    await transactionsApi.remove(activeProfileId, id);
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
   const addEvidenceItem = useCallback((item: Omit<EvidenceItem, 'id'>): string => {
-    const profileId = activeProfileId;
     const tempId = `temp-${Math.random().toString(36).slice(2)}`;
     // Optimistic: show immediately in UI
     setEvidenceItems(prev => [{ id: tempId, ...item }, ...prev]);
     // Background: register in DB
-    evidenceApi.register(profileId, {
+    evidenceApi.register(activeProfileId, {
       filename: item.filename,
       objectPath: `uploads/${item.filename}`,
       mimeType: 'application/octet-stream',
       category: item.category,
     }).then(() => {
       // Replace temp with real item on next fetch
-      return evidenceApi.list(profileId);
-    }).then(items => {
-      if (activeProfileIdRef.current === profileId) {
-        setEvidenceItems(items.map(mapEvidenceItem));
-      }
-    }).catch(err => {
-      if (activeProfileIdRef.current === profileId) {
-        setEvidenceItems(prev => prev.filter(item => item.id !== tempId));
-      }
-      console.error(err);
-    });
+      return evidenceApi.list(activeProfileId);
+    }).then(items => setEvidenceItems(items.map(mapEvidenceItem)))
+      .catch(console.error);
     return tempId;
   }, [activeProfileId]);
 
-  const resolveInboxItem = useCallback((id: string, resolution: string) => {
-    const profileId = activeProfileId;
-    // Optimistic update
-    setInboxItems(prev => prev.map(item =>
-      item.id === id ? { ...item, status: 'resolved', customAnswer: resolution } : item
-    ));
-    inboxApi.resolve(profileId, id, resolution)
-      .then(() => fetchAll(profileId))
-      .catch(err => {
-        console.error('[store] resolveInboxItem failed', err);
-        // Rollback optimistic update
-        if (activeProfileIdRef.current === profileId) {
-          setInboxItems(prev => prev.map(item =>
-            item.id === id ? { ...item, status: 'pending', customAnswer: undefined } : item
-          ));
-        }
-      });
+  const resolveInboxItem = useCallback(async (id: string, resolution: string): Promise<boolean> => {
+    if (resolvingInboxIds.current.has(id)) return false;
+    resolvingInboxIds.current.add(id);
+    try {
+      await inboxApi.resolve(activeProfileId, id, resolution);
+      await fetchAll(activeProfileId);
+      return true;
+    } catch (err) {
+      console.error('[store] resolveInboxItem failed', err);
+      return false;
+    } finally {
+      resolvingInboxIds.current.delete(id);
+    }
+  }, [activeProfileId, fetchAll]);
+
+  const resolveInboxBatch = useCallback(async (ids: string[], resolution: string): Promise<boolean> => {
+    const uniqueIds = [...new Set(ids)].filter(id => !resolvingInboxIds.current.has(id));
+    if (uniqueIds.length === 0) return false;
+    uniqueIds.forEach(id => resolvingInboxIds.current.add(id));
+    try {
+      const outcomes = await Promise.allSettled(
+        uniqueIds.map(id => inboxApi.resolve(activeProfileId, id, resolution)),
+      );
+      // The server can persist part of a batch before a transient client error.
+      // Refresh only after every real mutation result has settled.
+      await fetchAll(activeProfileId);
+      return outcomes.every(outcome => outcome.status === 'fulfilled');
+    } catch (err) {
+      console.error('[store] resolveInboxBatch failed', err);
+      return false;
+    } finally {
+      uniqueIds.forEach(id => resolvingInboxIds.current.delete(id));
+    }
   }, [activeProfileId, fetchAll]);
 
   const addChatMessage = useCallback((sessionId: string, message: Omit<ChatMessage, 'id'>) => {
@@ -1116,14 +1093,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     positionItems,
     transactions,
     addTransaction,
-    updateTransaction,
-    deleteTransaction,
 
     evidenceItems,
     addEvidenceItem,
 
     inboxItems,
     resolveInboxItem,
+    resolveInboxBatch,
 
     chatHistory,
     addChatMessage,

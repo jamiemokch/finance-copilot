@@ -11,7 +11,7 @@ import {
   type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { parseSpreadsheet, parseMoney, normaliseCell } from "../lib/spreadsheet.js";
+import { parseSpreadsheet, normaliseCell, mapSpreadsheetRow } from "../lib/spreadsheet.js";
 
 const router = Router();
 const storageService = new ObjectStorageService();
@@ -91,36 +91,53 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
 
-    const [evidenceItem] = await db.select().from(evidenceItemsTable).where(
-      and(eq(evidenceItemsTable.id, req.params.evidenceId),
-          eq(evidenceItemsTable.profileId, profile.id))
-    );
-    if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!existingEvidence) { res.status(404).json({ error: "Evidence item not found" }); return; }
 
-    await db.update(evidenceItemsTable)
+    // A retry after the server has already persisted an outcome must return that
+    // outcome instead of extracting and posting the same document a second time.
+    if (existingEvidence.status === "processed" || existingEvidence.status === "needs_review") {
+      res.json(existingEvidence);
+      return;
+    }
+
+    // Claim the evidence item before reading the file. This also makes a
+    // simultaneous retry explicit rather than letting two requests post twice.
+    const [evidenceItem] = await db.update(evidenceItemsTable)
       .set({ status: "processing" })
-      .where(eq(evidenceItemsTable.id, evidenceItem.id));
+      .where(and(
+        eq(evidenceItemsTable.id, existingEvidence.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        inArray(evidenceItemsTable.status, ["received", "error"]),
+      ))
+      .returning();
+    if (!evidenceItem) {
+      res.status(409).json({ error: "This document is already being processed" });
+      return;
+    }
 
     if (!isConfigured()) {
-      const [updated] = await db.update(evidenceItemsTable).set({
-        status: "needs_review",
-        aiReasoning: "AI not configured — classify manually.",
-        confidence: 0,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
-      await db.insert(inboxItemsTable).values({
-        profileId: profile.id,
-        evidenceId: evidenceItem.id,
-        date: new Date().toISOString().split("T")[0],
-        description: evidenceItem.filename,
-        amount: null,
-        aiReasoning: "AI extraction not available. Please classify manually.",
-        options: [
-          { label: "Income received", isSuggested: false },
-          { label: "Fully deductible business expense", isSuggested: false },
-          { label: "Partially deductible (mixed use)", isSuggested: false },
-          { label: "Not deductible — personal expense", isSuggested: false },
-        ],
-        status: "pending",
+      const [updated] = await db.transaction(async (tx) => {
+        await tx.insert(inboxItemsTable).values({
+          profileId: profile.id,
+          evidenceId: evidenceItem.id,
+          date: new Date().toISOString().split("T")[0],
+          description: evidenceItem.filename,
+          amount: null,
+          aiReasoning: "AI extraction not available. Please classify manually.",
+          options: [
+            { label: "Income received", isSuggested: false },
+            { label: "Fully deductible business expense", isSuggested: false },
+            { label: "Partially deductible (mixed use)", isSuggested: false },
+            { label: "Not deductible — personal expense", isSuggested: false },
+          ],
+          status: "pending",
+        });
+        return tx.update(evidenceItemsTable).set({
+          status: "needs_review",
+          aiReasoning: "AI not configured — classify manually.",
+          confidence: 0,
+        }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
       });
       res.json(updated);
       return;
@@ -188,12 +205,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 
     if (isHighConf && extracted.taxTreatment === "income" && extracted.amount) {
       // High-confidence income → auto-post as positive transaction
-      await db.insert(transactionsTable).values({
+      const incomeAmount = extracted.amount;
+      const [updated] = await db.transaction(async (tx) => {
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
-        amount: extracted.amount, // positive
-        recordType: "income",
+        amount: incomeAmount, // positive
         category: "income",
         taxTreatment: "income",
         source: "extracted",
@@ -202,27 +220,28 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         classificationConfidence: extracted.confidence,
         accountingCategory: extracted.accountingCategory ?? "income",
         allowablePercentage: 100,
-        allowableAmount: extracted.amount,
+        allowableAmount: incomeAmount,
         capitalAllowanceType: null,
         vatMetadata: extracted.vatMetadata as Record<string, unknown> | null ?? null,
       });
-      const [updated] = await db.update(evidenceItemsTable).set({
+      return tx.update(evidenceItemsTable).set({
         status: "processed",
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
       }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+      });
       res.json(updated);
 
     } else if (isHighConf && extracted.taxTreatment === "deductible" && extracted.amount) {
       // High-confidence deductible expense → auto-post as negative transaction
       const txAmount = -(extracted.amount); // store as negative
-      await db.insert(transactionsTable).values({
+      const [updated] = await db.transaction(async (tx) => {
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
         amount: txAmount,
-        recordType: "expense",
         category: "expense",
         taxTreatment: "deductible",
         source: "extracted",
@@ -235,22 +254,24 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         capitalAllowanceType: extracted.capitalAllowanceType ?? null,
         vatMetadata: extracted.vatMetadata as Record<string, unknown> | null ?? null,
       });
-      const [updated] = await db.update(evidenceItemsTable).set({
+      return tx.update(evidenceItemsTable).set({
         status: "processed",
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
       }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+      });
       res.json(updated);
 
     } else if (isHighConf && extracted.taxTreatment === "non_deductible" && extracted.amount) {
       // High-confidence non-deductible → record in ledger (for transparency) but NOT deducted
-      await db.insert(transactionsTable).values({
+      const nonDeductibleAmount = extracted.amount;
+      const [updated] = await db.transaction(async (tx) => {
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
-        amount: -(extracted.amount),
-        recordType: "expense",
+        amount: -nonDeductibleAmount,
         category: "expense",
         taxTreatment: "non_deductible",
         source: "extracted",
@@ -263,33 +284,36 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         capitalAllowanceType: null,
         vatMetadata: null,
       });
-      const [updated] = await db.update(evidenceItemsTable).set({
+      return tx.update(evidenceItemsTable).set({
         status: "processed",
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
       }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+      });
       res.json(updated);
 
     } else {
       // Low confidence or unclear → send to Inbox for user review
       const options = buildInboxOptions(extracted);
-      await db.insert(inboxItemsTable).values({
-        profileId: profile.id,
-        evidenceId: evidenceItem.id,
-        date: extracted.date ?? new Date().toISOString().split("T")[0],
-        description: extracted.description ?? evidenceItem.filename,
-        amount: extracted.amount ?? null,
-        aiReasoning: `${extracted.aiReasoning}${extracted.hmrcBasisNote ? ` (${extracted.hmrcBasisNote})` : ""}`,
-        options,
-        status: "pending",
+      const [updated] = await db.transaction(async (tx) => {
+        await tx.insert(inboxItemsTable).values({
+          profileId: profile.id,
+          evidenceId: evidenceItem.id,
+          date: extracted.date ?? new Date().toISOString().split("T")[0],
+          description: extracted.description ?? evidenceItem.filename,
+          amount: extracted.amount ?? null,
+          aiReasoning: `${extracted.aiReasoning}${extracted.hmrcBasisNote ? ` (${extracted.hmrcBasisNote})` : ""}`,
+          options,
+          status: "pending",
+        });
+        return tx.update(evidenceItemsTable).set({
+          status: "needs_review",
+          extractedData: extracted as unknown as Record<string, unknown>,
+          confidence: extracted.confidence,
+          aiReasoning: extracted.aiReasoning,
+        }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
       });
-      const [updated] = await db.update(evidenceItemsTable).set({
-        status: "needs_review",
-        extractedData: extracted as unknown as Record<string, unknown>,
-        confidence: extracted.confidence,
-        aiReasoning: extracted.aiReasoning,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
       res.json(updated);
     }
   } catch (err) {
@@ -356,21 +380,15 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
     )).returning();
     if (!claimed) { res.status(409).json({ error: "This spreadsheet is already being processed" }); return; }
     const existing = await db.select({
-      date: transactionsTable.date, amount: transactionsTable.amount, description: transactionsTable.description,
       evidenceId: transactionsTable.evidenceId, sourceRowIndex: transactionsTable.sourceRowIndex,
     }).from(transactionsTable).where(eq(transactionsTable.profileId, profile.id));
     const existingInbox = await db.select({
-      date: inboxItemsTable.date, amount: inboxItemsTable.amount, description: inboxItemsTable.description,
       evidenceId: inboxItemsTable.evidenceId, sourceRowIndex: inboxItemsTable.sourceRowIndex,
     }).from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profile.id));
     const handledRowIndexes = new Set([
       ...existing.filter((row) => row.evidenceId === evidenceItem.id && row.sourceRowIndex !== null).map((row) => row.sourceRowIndex!),
       ...existingInbox.filter((row) => row.evidenceId === evidenceItem.id && row.sourceRowIndex !== null).map((row) => row.sourceRowIndex!),
     ]);
-    const existingCandidates = [
-      ...existing.map(({ date, amount, description }) => ({ date, amount, description })),
-      ...existingInbox.map(({ date, amount, description }) => ({ date, amount: amount ?? 0, description })),
-    ];
     const context = await buildExtractionContext(profile, evidenceItem.category);
 
     let processedRows = 0, autoPostedRows = 0, inboxRows = 0, skippedRows = 0;
@@ -395,7 +413,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
       if (!rowData.date || parsedAmount === null || !rowData.description) { skippedRows += 1; continue; }
       const confirmedRow = { ...rowData, amount: parsedAmount };
       if (isStructuralBalanceSummary(confirmedRow, mapping)) { skippedRows += 1; continue; }
-      if (isDuplicate(existingCandidates, confirmedRow.date, confirmedRow.amount, confirmedRow.description)) { skippedRows += 1; continue; }
 
       const extracted = isConfigured()
         ? await extractFromText(`Spreadsheet row: ${JSON.stringify(row)}\nDate: ${confirmedRow.date}\nAmount: ${confirmedRow.amount}\nDescription: ${confirmedRow.description}`, evidenceItem.filename, context)
@@ -408,7 +425,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
       if (highConfidence && !conflictsWithCashDirection) {
         const transaction = transactionFromExtracted(profile.id, evidenceItem.id, extracted, confirmedRow, evidenceTier, index, row);
         await db.insert(transactionsTable).values(transaction);
-        existingCandidates.push({ date: transaction.date, amount: transaction.amount, description: transaction.description });
         autoPostedRows += 1;
       } else {
         await db.insert(inboxItemsTable).values({
@@ -420,7 +436,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
           options: buildInboxOptions(extracted), status: "pending",
           sourceRowIndex: index, rawRowData: row,
         });
-        existingCandidates.push({ date: confirmedRow.date, amount: confirmedRow.amount, description: confirmedRow.description });
         inboxRows += 1;
       }
     }
@@ -508,55 +523,12 @@ async function buildExtractionContext(profile: typeof profilesTable.$inferSelect
   };
 }
 
-function mapSpreadsheetRow(row: string[], mapping: MappingSchema) {
-  const col = (name: keyof MappingSchema["columns"]) => {
-    const index = mapping.columns[name];
-    return index === undefined ? "" : normaliseCell(row[index]);
-  };
-  const debit = parseMoney(col("debit"));
-  const credit = parseMoney(col("credit"));
-  const directAmount = parseMoney(col("amount"));
-  const amount = directAmount ?? (credit !== null ? Math.abs(credit) : debit !== null ? -Math.abs(debit) : null);
-  return {
-    date: normaliseImportedDate(col("date")),
-    amount,
-    description: col("description") || col("category") || "Imported transaction",
-  };
-}
-
 function isStructuralBalanceSummary(
   row: { description: string; amount: number; date: string },
   mapping: MappingSchema,
 ): boolean {
   if (mapping.columns.balance === undefined) return false;
   return /^(opening|closing|running)\s+balance$/i.test(row.description.trim());
-}
-
-function isDuplicate(existing: Array<{ date: string; amount: number; description: string }>, date: string, amount: number, description: string) {
-  const canonical = description.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return existing.some((transaction) => transaction.date === date && Math.abs(transaction.amount - amount) < 0.001 &&
-    descriptionSimilarity(transaction.description.toLowerCase().replace(/[^a-z0-9]/g, ""), canonical) >= 0.92);
-}
-
-function normaliseImportedDate(value: string): string {
-  const trimmed = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
-  const uk = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (!uk) return trimmed;
-  const year = uk[3].length === 2 ? `20${uk[3]}` : uk[3];
-  return `${year}-${uk[2].padStart(2, "0")}-${uk[1].padStart(2, "0")}`;
-}
-
-function descriptionSimilarity(left: string, right: string): number {
-  if (left === right) return 1;
-  if (!left || !right) return 0;
-  const shorter = left.length < right.length ? left : right;
-  const longer = left.length < right.length ? right : left;
-  if (longer.includes(shorter)) return shorter.length / longer.length;
-  const tokensLeft = new Set(left.match(/[a-z0-9]+/g) ?? []);
-  const tokensRight = new Set(right.match(/[a-z0-9]+/g) ?? []);
-  const intersection = [...tokensLeft].filter((token) => tokensRight.has(token)).length;
-  return intersection / new Set([...tokensLeft, ...tokensRight]).size;
 }
 
 function lowConfidenceRow(row: { date: string; amount: number; description: string }): ExtractedData {
@@ -574,7 +546,7 @@ function transactionFromExtracted(profileId: string, evidenceId: string, extract
   const allowable = Math.abs(amount) * (extracted.allowablePercentage / 100);
   return {
     profileId, evidenceId, date: extracted.date ?? row.date, description: extracted.description ?? row.description,
-    amount, recordType: isIncome ? "income" : "expense", category: isIncome ? "income" : "expense", taxTreatment: extracted.taxTreatment, source: "extracted",
+    amount, category: isIncome ? "income" : "expense", taxTreatment: extracted.taxTreatment, source: "extracted",
     evidenceTier, sourceRowIndex, rawRowData, classificationConfidence: extracted.confidence,
     accountingCategory: extracted.accountingCategory, allowablePercentage: isIncome ? 100 : extracted.allowablePercentage,
     allowableAmount: isIncome ? amount : extracted.taxTreatment === "non_deductible" ? 0 : -allowable,

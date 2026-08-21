@@ -156,7 +156,7 @@ function ComplianceTab() {
 // ─── Inbox Tab ────────────────────────────────────────────────────────────────
 
 function InboxTab() {
-  const { inboxItems, evidenceItems, resolveInboxItem, activeProfileId, profiles, setCopilotTrigger } = useStore();
+  const { inboxItems, evidenceItems, resolveInboxItem, resolveInboxBatch, activeProfileId, profiles, setCopilotTrigger } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeItems = inboxItems.filter(i => i.profileId === activeProfileId);
   const pendingItems = activeItems.filter(i => i.status === 'pending');
@@ -164,6 +164,7 @@ function InboxTab() {
   const [subTab, setSubTab] = useState<'pending' | 'resolved'>('pending');
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
   const [collapsedBatches, setCollapsedBatches] = useState<Record<string, boolean>>({});
+  const [resolvingBatchId, setResolvingBatchId] = useState<string | null>(null);
 
   const handleOptionSelect = (itemId: string, optionLabel: string, hasSubOptions: boolean) => {
     if (!hasSubOptions) {
@@ -204,6 +205,16 @@ function InboxTab() {
   });
   const batchItems = (evidenceId: string) => pendingItems.filter(item => item.evidenceId === evidenceId);
   const batchName = (evidenceId: string) => evidenceItems.find(item => item.id === evidenceId)?.filename ?? 'Imported file';
+  const resolveBatchAsExpenses = async (evidenceId: string) => {
+    const ids = batchItems(evidenceId).map(item => item.id);
+    if (ids.length === 0 || resolvingBatchId) return;
+    setResolvingBatchId(evidenceId);
+    try {
+      await resolveInboxBatch(ids, 'Fully deductible business expense');
+    } finally {
+      setResolvingBatchId(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -279,7 +290,7 @@ function InboxTab() {
           {isBatchStart && <div className="bg-secondary/40 border border-border rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <button onClick={() => setCollapsedBatches(prev => ({ ...prev, [item.evidenceId!]: true }))} className="text-left flex items-center gap-2 cursor-pointer"><FileText className="w-4 h-4 text-primary" /><span className="text-sm font-medium">Imported batch · {batchName(item.evidenceId!)} ({batch.length} items)</span><ChevronUp className="w-4 h-4" /></button>
             {batch.every(batchItem => (batchItem.amount ?? 0) < 0)
-              ? <Button size="sm" variant="outline" className="cursor-pointer" onClick={() => batch.forEach(batchItem => resolveInboxItem(batchItem.id, 'Fully deductible business expense'))}>Resolve all as business expenses</Button>
+              ? <Button size="sm" variant="outline" className="cursor-pointer" disabled={resolvingBatchId === item.evidenceId} onClick={() => void resolveBatchAsExpenses(item.evidenceId!)}>{resolvingBatchId === item.evidenceId ? 'Resolving…' : 'Resolve all as business expenses'}</Button>
               : <span className="text-xs text-muted-foreground">This batch includes money in and out — review each row.</span>}
           </div>}
           <Card className="overflow-hidden shadow-sm">

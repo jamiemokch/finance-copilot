@@ -32,25 +32,60 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
   const body = z.object({ resolution: z.string().min(1) }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "resolution is required" }); return; }
 
+  let claimedInboxItemId: string | null = null;
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
 
-    const [item] = await db.select().from(inboxItemsTable).where(
+    const [existingItem] = await db.select().from(inboxItemsTable).where(
       and(eq(inboxItemsTable.id, req.params.itemId), eq(inboxItemsTable.profileId, profile.id))
     );
-    if (!item) { res.status(404).json({ error: "Inbox item not found" }); return; }
-    if (item.status === "resolved") { res.status(400).json({ error: "Already resolved" }); return; }
+    if (!existingItem) { res.status(404).json({ error: "Inbox item not found" }); return; }
+
+    // A client can retry after a response is lost. Returning the already
+    // persisted resolution keeps that retry idempotent instead of adding a
+    // second transaction.
+    if (existingItem.status === "resolved") {
+      res.json(existingItem);
+      return;
+    }
+
+    // Claim the item before any ledger write. This makes "resolve all" safe
+    // even when a user double-clicks or another request retries concurrently.
+    const [item] = await db.update(inboxItemsTable)
+      .set({ status: "resolving" })
+      .where(and(
+        eq(inboxItemsTable.id, existingItem.id),
+        eq(inboxItemsTable.profileId, profile.id),
+        eq(inboxItemsTable.status, "pending"),
+      ))
+      .returning();
+    if (!item) {
+      const [latestItem] = await db.select().from(inboxItemsTable).where(
+        and(eq(inboxItemsTable.id, existingItem.id), eq(inboxItemsTable.profileId, profile.id))
+      );
+      if (latestItem?.status === "resolved") {
+        res.json(latestItem);
+        return;
+      }
+      res.status(409).json({ error: "This Inbox item is already being resolved" });
+      return;
+    }
+    claimedInboxItemId = item.id;
 
     const { resolution } = body.data;
     const classification = classifyResolution(resolution);
     const pct = extractPercentage(resolution); // 0–100
     const evidenceTier = await tierForInboxEvidence(item.evidenceId);
 
+    // The financial write and terminal Inbox status commit together. If either
+    // fails, this transaction rolls back before the outer retry handler resets
+    // the temporary claim.
+    const resolutionResult = await db.transaction(async (tx) => {
     // Fetch current transactions to compute tax impact diff accurately
-    const existingTxns = await db.select().from(transactionsTable)
+    const existingTxns = await tx.select().from(transactionsTable)
       .where(eq(transactionsTable.profileId, profile.id));
-    const existingPendingAmounts = await db.select().from(inboxItemsTable)
+    const existingPendingAmounts = await tx.select().from(inboxItemsTable)
       .where(and(eq(inboxItemsTable.profileId, profile.id), eq(inboxItemsTable.status, "pending")));
     const pendingAmounts = existingPendingAmounts
       .filter((i) => i.id !== item.id)
@@ -63,12 +98,11 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
     if (classification === "income" && item.amount) {
       const signedAmount = item.sourceRowIndex != null ? item.amount : Math.abs(item.amount);
       // Income confirmed → positive transaction
-      await db.insert(transactionsTable).values({
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
         amount: signedAmount,
-        recordType: "income",
         category: "income",
         taxTreatment: "income",
         source: "manual",
@@ -92,12 +126,11 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
       const signedAmount = item.sourceRowIndex != null ? item.amount : -Math.abs(item.amount);
       // Deductible expense → negative transaction with allowable amount
       const allowableAmount = signedAmount * (pct / 100);
-      await db.insert(transactionsTable).values({
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
         amount: signedAmount,
-        recordType: "expense",
         category: "expense",
         taxTreatment: "deductible",
         source: "manual",
@@ -121,12 +154,11 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
     } else if (classification === "non_deductible" && item.amount) {
       const signedAmount = item.sourceRowIndex != null ? item.amount : -Math.abs(item.amount);
       // Non-deductible → record in ledger for transparency; zero tax impact
-      await db.insert(transactionsTable).values({
+      await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
         amount: signedAmount,
-        recordType: "expense",
         category: "expense",
         taxTreatment: "non_deductible",
         source: "manual",
@@ -142,20 +174,37 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
       taxImpact = 0;
     }
 
-    // Update SA checklist (inbox cleared) if applicable
-    if (classification !== null) {
-      await markInboxChecklistProgress(profile.id);
-    }
-
-    const [updated] = await db.update(inboxItemsTable).set({
+    const [updated] = await tx.update(inboxItemsTable).set({
       status: "resolved",
       resolution,
       taxImpact,
       resolvedAt: new Date(),
-    }).where(eq(inboxItemsTable.id, item.id)).returning();
+    }).where(and(
+      eq(inboxItemsTable.id, item.id),
+      eq(inboxItemsTable.status, "resolving"),
+    )).returning();
+    if (!updated) {
+      throw new Error("Failed to finalize Inbox resolution");
+    }
+    return updated;
+    });
 
-    res.json(updated);
+    // Checklist progress is non-financial and must never turn a committed
+    // resolution into a failed client response.
+    if (classification !== null) {
+      await markInboxChecklistProgress(profile.id);
+    }
+    res.json(resolutionResult);
   } catch (err) {
+    if (claimedInboxItemId) {
+      await db.update(inboxItemsTable)
+        .set({ status: "pending" })
+        .where(and(
+          eq(inboxItemsTable.id, claimedInboxItemId),
+          eq(inboxItemsTable.status, "resolving"),
+        ))
+        .catch(() => undefined);
+    }
     req.log.error(err);
     res.status(500).json({ error: "Failed to resolve inbox item" });
   }
