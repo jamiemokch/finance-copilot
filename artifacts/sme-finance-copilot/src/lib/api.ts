@@ -66,6 +66,7 @@ export interface APIProfile {
   taxReserve?: number | null;
   industry?: string;
   vatRegistered?: boolean;
+  accountingBasis?: string;
   cashAccounts?: unknown;
   arEntries?: unknown;
   apEntries?: unknown;
@@ -74,6 +75,8 @@ export interface APIProfile {
   openingDetails?: string | null;
   coverageStartDate?: string | null;
   coverageEndDate?: string | null;
+  otherTaxableIncome?: number | null;
+  otherTaxableIncomeTaxYear?: string | null;
   createdAt?: string;
 }
 
@@ -108,6 +111,8 @@ export const profilesApi = {
       openingDetails?: string | null;
       coverageStartDate?: string | null;
       coverageEndDate?: string | null;
+      otherTaxableIncome?: number | null;
+      otherTaxableIncomeTaxYear?: string | null;
     },
   ) =>
     apiFetch<APIProfile>(`/profiles/${profileId}`, {
@@ -373,6 +378,55 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {
       method: "PATCH", body: JSON.stringify({ evidenceId }),
     }),
+};
+
+// ── Income-tax estimate ───────────────────────────────────────────────────────
+
+export interface APIIncomeTaxBand {
+  label: string;
+  rate: number;
+  taxableAmount: number;
+  tax: number;
+}
+
+export interface APIIncomeTaxEstimate {
+  status: 'complete' | 'incomplete';
+  taxYear: string;
+  accountingBasis: 'cash' | 'accrual';
+  businessProfitInput: number;
+  otherTaxableIncome: number | null;
+  totalIncome: number | null;
+  personalAllowance: number | null;
+  taxableIncome: number | null;
+  estimatedIncomeTax: number | null;
+  bands: APIIncomeTaxBand[];
+  assumptions: string[];
+  missingInputs: string[];
+}
+
+export interface APIIncomeTaxEstimateResponse {
+  period: { start: string; end: string };
+  taxYear: string;
+  accountingBasis: 'cash' | 'accrual';
+  profitLoss: {
+    totalIncome: number;
+    totalExpenses: number;
+    profitLoss: number;
+    taxableBusinessProfit: number;
+    recordCount: number;
+  };
+  categories: Array<{
+    category: string;
+    recordType: 'income' | 'expense';
+    amount: number;
+    records: Array<{ id: string; date: string; description: string; amount: number }>;
+  }>;
+  estimate: APIIncomeTaxEstimate;
+}
+
+export const incomeTaxEstimateApi = {
+  get: (profileId: string) =>
+    apiFetch<APIIncomeTaxEstimateResponse>(`/profiles/${profileId}/income-tax-estimate`),
 };
 
 // ── Decisions ─────────────────────────────────────────────────────────────────

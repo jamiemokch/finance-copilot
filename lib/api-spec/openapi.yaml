@@ -24,6 +24,8 @@ tags:
     description: Inbox item review and resolution
   - name: Position
     description: Computed financial position and business ideas
+  - name: Tax
+    description: Estimated income-tax operations
   - name: Decisions
     description: Decision memory and SA checklist
   - name: Copilot
@@ -328,6 +330,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FinancialPosition'
+
+  /profiles/{profileId}/income-tax-estimate:
+    get:
+      tags: [Tax]
+      operationId: getIncomeTaxEstimate
+      summary: Get the live, current-tax-year estimated income-tax position
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: Tax estimate based on canonical Financial Memory records and saved profile inputs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncomeTaxEstimateResponse'
+        '404':
+          description: Profile not found or not owned by the current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 
   /profiles/{profileId}/evidence:
     get:
@@ -818,6 +841,12 @@ components:
           type: string
           nullable: true
           pattern: '^\d{4}-\d{2}-\d{2}$'
+        otherTaxableIncome:
+          type: number
+          nullable: true
+        otherTaxableIncomeTaxYear:
+          type: string
+          nullable: true
         createdAt:
           type: string
 
@@ -865,6 +894,140 @@ components:
           type: string
           nullable: true
           pattern: '^\d{4}-\d{2}-\d{2}$'
+        otherTaxableIncome:
+          type: number
+          nullable: true
+        otherTaxableIncomeTaxYear:
+          type: string
+          nullable: true
+
+    IncomeTaxEstimateResponse:
+      type: object
+      required: [period, taxYear, accountingBasis, profitLoss, categories, estimate]
+      properties:
+        period:
+          $ref: '#/components/schemas/TaxPeriod'
+        taxYear:
+          type: string
+        accountingBasis:
+          type: string
+          enum: [cash, accrual]
+        profitLoss:
+          $ref: '#/components/schemas/YtdProfitLoss'
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncomeTaxCategory'
+        estimate:
+          $ref: '#/components/schemas/IncomeTaxEstimate'
+
+    TaxPeriod:
+      type: object
+      required: [start, end]
+      properties:
+        start:
+          type: string
+        end:
+          type: string
+
+    YtdProfitLoss:
+      type: object
+      required: [totalIncome, totalExpenses, profitLoss, taxableBusinessProfit, recordCount]
+      properties:
+        totalIncome:
+          type: number
+        totalExpenses:
+          type: number
+        profitLoss:
+          type: number
+        taxableBusinessProfit:
+          type: number
+        recordCount:
+          type: number
+
+    IncomeTaxCategory:
+      type: object
+      required: [category, recordType, amount, records]
+      properties:
+        category:
+          type: string
+        recordType:
+          type: string
+          enum: [income, expense]
+        amount:
+          type: number
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncomeTaxRecord'
+
+    IncomeTaxRecord:
+      type: object
+      required: [id, date, description, amount]
+      properties:
+        id:
+          type: string
+        date:
+          type: string
+        description:
+          type: string
+        amount:
+          type: number
+
+    IncomeTaxEstimate:
+      type: object
+      required: [status, taxYear, accountingBasis, businessProfitInput, otherTaxableIncome, totalIncome, personalAllowance, taxableIncome, estimatedIncomeTax, bands, assumptions, missingInputs]
+      properties:
+        status:
+          type: string
+          enum: [complete, incomplete]
+        taxYear:
+          type: string
+        accountingBasis:
+          type: string
+          enum: [cash, accrual]
+        businessProfitInput:
+          type: number
+        otherTaxableIncome:
+          type: number
+          nullable: true
+        totalIncome:
+          type: number
+          nullable: true
+        personalAllowance:
+          type: number
+          nullable: true
+        taxableIncome:
+          type: number
+          nullable: true
+        estimatedIncomeTax:
+          type: number
+          nullable: true
+        bands:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncomeTaxBand'
+        assumptions:
+          type: array
+          items:
+            type: string
+        missingInputs:
+          type: array
+          items:
+            type: string
+
+    IncomeTaxBand:
+      type: object
+      required: [label, rate, taxableAmount, tax]
+      properties:
+        label:
+          type: string
+        rate:
+          type: number
+        taxableAmount:
+          type: number
+        tax:
+          type: number
 
     PLBreakdown:
       type: object

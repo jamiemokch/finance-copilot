@@ -20,6 +20,7 @@ import Copilot from '@/pages/copilot';
 import Match from '@/pages/match';
 import Settings from '@/pages/settings';
 import FinancialMemory from '@/pages/financial-memory';
+import TaxEstimate from '@/pages/tax-estimate';
 
 const queryClient = new QueryClient();
 
@@ -68,7 +69,7 @@ function Router() {
           <Route path="/position" component={Position} />
           <Route path="/business-ideas" component={BusinessIdeas} />
           <Route path="/decisions" component={BusinessIdeas} />
-          <Route path="/tax" component={BusinessIdeas} />
+          <Route path="/tax" component={TaxEstimate} />
           <Route path="/optimisation" component={BusinessIdeas} />
           <Route path="/tasks" component={Tasks} />
           <Route path="/compliance" component={Tasks} />

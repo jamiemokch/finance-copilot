@@ -180,6 +180,8 @@ export const ListProfilesResponseItem = zod.object({
   "openingDetails": zod.string().nullish(),
   "coverageStartDate": zod.string().regex(listProfilesResponseCoverageStartDateRegExp).nullish(),
   "coverageEndDate": zod.string().regex(listProfilesResponseCoverageEndDateRegExp).nullish(),
+  "otherTaxableIncome": zod.number().nullish(),
+  "otherTaxableIncomeTaxYear": zod.string().nullish(),
   "createdAt": zod.string()
 })
 export const ListProfilesResponse = zod.array(ListProfilesResponseItem)
@@ -215,6 +217,8 @@ export const CreateProfileResponse = zod.object({
   "openingDetails": zod.string().nullish(),
   "coverageStartDate": zod.string().regex(createProfileResponseCoverageStartDateRegExp).nullish(),
   "coverageEndDate": zod.string().regex(createProfileResponseCoverageEndDateRegExp).nullish(),
+  "otherTaxableIncome": zod.number().nullish(),
+  "otherTaxableIncomeTaxYear": zod.string().nullish(),
   "createdAt": zod.string()
 })
 
@@ -242,7 +246,9 @@ export const UpdateProfileBody = zod.object({
   "openingBalance": zod.number().nullish(),
   "openingDetails": zod.string().nullish(),
   "coverageStartDate": zod.string().regex(updateProfileBodyCoverageStartDateRegExp).nullish(),
-  "coverageEndDate": zod.string().regex(updateProfileBodyCoverageEndDateRegExp).nullish()
+  "coverageEndDate": zod.string().regex(updateProfileBodyCoverageEndDateRegExp).nullish(),
+  "otherTaxableIncome": zod.number().nullish(),
+  "otherTaxableIncomeTaxYear": zod.string().nullish()
 })
 
 export const updateProfileResponseCoverageStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
@@ -264,6 +270,8 @@ export const UpdateProfileResponse = zod.object({
   "openingDetails": zod.string().nullish(),
   "coverageStartDate": zod.string().regex(updateProfileResponseCoverageStartDateRegExp).nullish(),
   "coverageEndDate": zod.string().regex(updateProfileResponseCoverageEndDateRegExp).nullish(),
+  "otherTaxableIncome": zod.number().nullish(),
+  "otherTaxableIncomeTaxYear": zod.string().nullish(),
   "createdAt": zod.string()
 })
 
@@ -325,6 +333,60 @@ export const GetFinancialPositionResponse = zod.object({
   "totalCount": zod.number()
 }),
   "pendingInboxCount": zod.number()
+})
+
+
+/**
+ * @summary Get the live, current-tax-year estimated income-tax position
+ */
+export const GetIncomeTaxEstimateParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const GetIncomeTaxEstimateResponse = zod.object({
+  "period": zod.object({
+  "start": zod.string(),
+  "end": zod.string()
+}),
+  "taxYear": zod.string(),
+  "accountingBasis": zod.enum(['cash', 'accrual']),
+  "profitLoss": zod.object({
+  "totalIncome": zod.number(),
+  "totalExpenses": zod.number(),
+  "profitLoss": zod.number(),
+  "taxableBusinessProfit": zod.number(),
+  "recordCount": zod.number()
+}),
+  "categories": zod.array(zod.object({
+  "category": zod.string(),
+  "recordType": zod.enum(['income', 'expense']),
+  "amount": zod.number(),
+  "records": zod.array(zod.object({
+  "id": zod.string(),
+  "date": zod.string(),
+  "description": zod.string(),
+  "amount": zod.number()
+}))
+})),
+  "estimate": zod.object({
+  "status": zod.enum(['complete', 'incomplete']),
+  "taxYear": zod.string(),
+  "accountingBasis": zod.enum(['cash', 'accrual']),
+  "businessProfitInput": zod.number(),
+  "otherTaxableIncome": zod.number().nullable(),
+  "totalIncome": zod.number().nullable(),
+  "personalAllowance": zod.number().nullable(),
+  "taxableIncome": zod.number().nullable(),
+  "estimatedIncomeTax": zod.number().nullable(),
+  "bands": zod.array(zod.object({
+  "label": zod.string(),
+  "rate": zod.number(),
+  "taxableAmount": zod.number(),
+  "tax": zod.number()
+})),
+  "assumptions": zod.array(zod.string()),
+  "missingInputs": zod.array(zod.string())
+})
 })
 
 

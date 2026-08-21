@@ -88,6 +88,8 @@ router.patch("/profiles/:profileId", async (req, res) => {
     openingDetails: z.string().trim().max(2000).optional().nullable(),
     coverageStartDate: ISODateSchema.optional().nullable(),
     coverageEndDate: ISODateSchema.optional().nullable(),
+    otherTaxableIncome: z.number().min(0).finite().optional().nullable(),
+    otherTaxableIncomeTaxYear: z.string().regex(/^\d{4}\/\d{2}$/).optional().nullable(),
   }).safeParse(req.body);
 
   if (!body.success) { res.status(400).json({ error: "Invalid input", details: body.error.issues }); return; }
@@ -144,6 +146,8 @@ router.patch("/profiles/:profileId", async (req, res) => {
     if (body.data.openingDetails !== undefined) updates.openingDetails = body.data.openingDetails;
     if (body.data.coverageStartDate !== undefined) updates.coverageStartDate = body.data.coverageStartDate;
     if (body.data.coverageEndDate !== undefined) updates.coverageEndDate = body.data.coverageEndDate;
+    if (body.data.otherTaxableIncome !== undefined) updates.otherTaxableIncome = body.data.otherTaxableIncome;
+    if (body.data.otherTaxableIncomeTaxYear !== undefined) updates.otherTaxableIncomeTaxYear = body.data.otherTaxableIncomeTaxYear;
 
     const [updated] = await db.update(profilesTable)
       .set(updates as typeof profilesTable.$inferInsert)

@@ -42,6 +42,10 @@ export const profilesTable = pgTable('profiles', {
   openingDetails: text('opening_details'),
   coverageStartDate: text('coverage_start_date'),
   coverageEndDate: text('coverage_end_date'),
+  // Optional non-business income used only for an income-tax estimate.
+  // Null means the estimate must remain incomplete rather than assuming £0.
+  otherTaxableIncome: doublePrecision('other_taxable_income'),
+  otherTaxableIncomeTaxYear: text('other_taxable_income_tax_year'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .notNull()

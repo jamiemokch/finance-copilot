@@ -18,7 +18,7 @@ const INDUSTRIES = [
   { value: 'other',                 label: 'Other' },
 ];
 
-const TAX_YEARS = ['2023/24', '2024/25', '2025/26'];
+const TAX_YEARS = ['2023/24', '2024/25', '2025/26', '2026/27'];
 
 function currentUkTaxYearDates() {
   const now = new Date();
@@ -61,6 +61,10 @@ export default function Settings() {
   const defaultCoverage = currentUkTaxYearDates();
   const [coverageStartDate, setCoverageStartDate] = useState(activeProfile?.coverageStartDate ?? defaultCoverage.start);
   const [coverageEndDate, setCoverageEndDate] = useState(activeProfile?.coverageEndDate ?? defaultCoverage.end);
+  const [otherTaxableIncome, setOtherTaxableIncome] = useState(
+    activeProfile?.otherTaxableIncome == null || activeProfile.otherTaxableIncomeTaxYear !== taxYear
+      ? '' : String(activeProfile.otherTaxableIncome)
+  );
 
   const [saving, setSaving] = useState(false);
   const [saveOk, setSaveOk] = useState(false);
@@ -78,6 +82,10 @@ export default function Settings() {
     setOpeningDetails(activeProfile?.openingDetails ?? '');
     setCoverageStartDate(activeProfile?.coverageStartDate ?? coverage.start);
     setCoverageEndDate(activeProfile?.coverageEndDate ?? coverage.end);
+    setOtherTaxableIncome(
+      activeProfile?.otherTaxableIncome == null || activeProfile.otherTaxableIncomeTaxYear !== (activeProfile?.taxYear ?? '2024/25')
+        ? '' : String(activeProfile.otherTaxableIncome)
+    );
     setSaveError(null);
   }, [activeProfileId]);
 
@@ -93,8 +101,13 @@ export default function Settings() {
   const handleSave = async () => {
     if (!activeProfileId) return;
     const parsedOpeningBalance = openingBalance.trim() === '' ? null : Number(openingBalance);
+    const parsedOtherTaxableIncome = otherTaxableIncome.trim() === '' ? null : Number(otherTaxableIncome);
     if (parsedOpeningBalance !== null && !Number.isFinite(parsedOpeningBalance)) {
       setSaveError('Opening balance must be a valid number.');
+      return;
+    }
+    if (parsedOtherTaxableIncome !== null && (!Number.isFinite(parsedOtherTaxableIncome) || parsedOtherTaxableIncome < 0)) {
+      setSaveError('Other taxable income must be a valid amount of £0 or more.');
       return;
     }
     if ((coverageStartDate && !coverageEndDate) || (!coverageStartDate && coverageEndDate)) {
@@ -125,6 +138,8 @@ export default function Settings() {
         openingDetails: openingDetails.trim() || null,
         coverageStartDate: coverageStartDate || null,
         coverageEndDate: coverageEndDate || null,
+        otherTaxableIncome: parsedOtherTaxableIncome,
+        otherTaxableIncomeTaxYear: parsedOtherTaxableIncome === null ? null : taxYear,
       });
       setSaveOk(true);
       setTimeout(() => setSaveOk(false), 2500);
@@ -226,7 +241,10 @@ export default function Settings() {
                 {TAX_YEARS.map(yr => (
                   <button
                     key={yr}
-                    onClick={() => setTaxYear(yr)}
+                    onClick={() => {
+                      setTaxYear(yr);
+                      if (activeProfile?.otherTaxableIncomeTaxYear !== yr) setOtherTaxableIncome('');
+                    }}
                     className={`px-4 py-2 rounded-lg border-2 text-sm font-medium transition-all cursor-pointer ${
                       taxYear === yr ? 'border-primary bg-primary/5 text-primary' : 'border-border hover:border-primary/40'
                     }`}
@@ -387,6 +405,50 @@ export default function Settings() {
                   : saveOk
                     ? <><Check className="w-4 h-4" /> Saved!</>
                     : <><Save className="w-4 h-4" /> Save setup</>
+                }
+              </Button>
+            </div>
+          </Card>
+        </section>
+      )}
+
+      {/* ── Tax estimate details ── */}
+      {activeProfile && (
+        <section>
+          <h2 className="text-xl font-serif mb-1">Tax estimate details</h2>
+          <p className="text-muted-foreground text-sm mb-4">
+            A small amount of context helps keep your income-tax estimate honest. You can leave this blank until you know it.
+          </p>
+          <Card className="p-6 shadow-sm space-y-4">
+            <label className="block space-y-1.5">
+              <span className="text-sm font-medium">Other taxable income for {taxYear}</span>
+              <span className="block text-xs text-muted-foreground">
+                Include taxable income outside this business, such as employment or rental income. Enter £0 only if you have confirmed there is none.
+              </span>
+              <div className="relative max-w-sm">
+                <span className="absolute left-3 top-2.5 text-sm text-muted-foreground">£</span>
+                <input
+                  inputMode="decimal"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={otherTaxableIncome}
+                  onChange={event => setOtherTaxableIncome(event.target.value)}
+                  placeholder="Leave blank if not known yet"
+                  className="h-10 w-full rounded-md border border-input bg-background pl-7 pr-3 text-sm"
+                />
+              </div>
+            </label>
+            <p className="text-xs text-muted-foreground">
+              This is used only for the estimate. It does not change your Financial Memory records.
+            </p>
+            <div className="flex justify-end">
+              <Button onClick={handleSave} disabled={saving} className="cursor-pointer gap-2">
+                {saving
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+                  : saveOk
+                    ? <><Check className="w-4 h-4" /> Saved!</>
+                    : <><Save className="w-4 h-4" /> Save tax details</>
                 }
               </Button>
             </div>

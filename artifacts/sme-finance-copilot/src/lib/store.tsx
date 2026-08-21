@@ -26,6 +26,8 @@ export interface Profile {
   openingDetails?: string | null;
   coverageStartDate?: string | null;
   coverageEndDate?: string | null;
+  otherTaxableIncome?: number | null;
+  otherTaxableIncomeTaxYear?: string | null;
 }
 
 export interface SharedContext {
@@ -766,6 +768,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           openingDetails: p.openingDetails ?? null,
           coverageStartDate: p.coverageStartDate ?? null,
           coverageEndDate: p.coverageEndDate ?? null,
+          otherTaxableIncome: p.otherTaxableIncome ?? null,
+          otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
         });
         const mapped = profs.map(mapProfile);
         setProfiles(mapped);
@@ -841,6 +845,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: p.openingDetails ?? null,
       coverageStartDate: p.coverageStartDate ?? null,
       coverageEndDate: p.coverageEndDate ?? null,
+      otherTaxableIncome: p.otherTaxableIncome ?? null,
+      otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
     };
     setProfiles(prev => [...prev, newProfile]);
     return p.id;
@@ -858,6 +864,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: updates.openingDetails,
       coverageStartDate: updates.coverageStartDate,
       coverageEndDate: updates.coverageEndDate,
+      otherTaxableIncome: updates.otherTaxableIncome,
+      otherTaxableIncomeTaxYear: updates.otherTaxableIncomeTaxYear,
     });
     setProfiles(prev => prev.map(p =>
       p.id === id
@@ -872,6 +880,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             openingDetails: updated.openingDetails ?? null,
             coverageStartDate: updated.coverageStartDate ?? null,
             coverageEndDate: updated.coverageEndDate ?? null,
+            otherTaxableIncome: updated.otherTaxableIncome ?? null,
+            otherTaxableIncomeTaxYear: updated.otherTaxableIncomeTaxYear ?? null,
           }
         : p
     ));
@@ -1056,6 +1066,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: p.openingDetails ?? null,
       coverageStartDate: p.coverageStartDate ?? null,
       coverageEndDate: p.coverageEndDate ?? null,
+      otherTaxableIncome: p.otherTaxableIncome ?? null,
+      otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
     });
     setProfiles(profs.map(mapProfile));
     setActiveProfileId(profileId);

@@ -193,7 +193,7 @@ export default function Onboarding() {
             <div className="space-y-2">
               <label className="text-sm font-medium text-foreground">Tax year</label>
               <div className="grid grid-cols-3 gap-3">
-                {(['2023/24', '2024/25', '2025/26'] as const).map(yr => (
+                {(['2023/24', '2024/25', '2025/26', '2026/27'] as const).map(yr => (
                   <button
                     key={yr}
                     onClick={() => set('taxYear', yr)}

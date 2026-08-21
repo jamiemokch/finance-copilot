@@ -48,6 +48,7 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
       date: body.data.date,
       description: body.data.description,
       amount: body.data.amount,
+      recordType: body.data.amount > 0 ? "income" : "expense",
       category: body.data.category,
       taxTreatment: body.data.taxTreatment,
       source: "manual",

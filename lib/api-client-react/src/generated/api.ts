@@ -38,6 +38,7 @@ import type {
   HealthStatus,
   InboxItem,
   InboxResolveInput,
+  IncomeTaxEstimateResponse,
   LogoutBrowserSessionParams,
   LogoutSuccess,
   MobileTokenExchangeRequest,
@@ -1139,6 +1140,83 @@ export function useGetFinancialPosition<TData = Awaited<ReturnType<typeof getFin
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetFinancialPositionQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetIncomeTaxEstimateUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/income-tax-estimate`
+}
+
+/**
+ * @summary Get the live, current-tax-year estimated income-tax position
+ */
+export const getIncomeTaxEstimate = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<IncomeTaxEstimateResponse> => {
+
+  return customFetch<IncomeTaxEstimateResponse>(getGetIncomeTaxEstimateUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetIncomeTaxEstimateQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/income-tax-estimate`
+    ] as const;
+    }
+
+
+export const getGetIncomeTaxEstimateQueryOptions = <TData = Awaited<ReturnType<typeof getIncomeTaxEstimate>>, TError = ErrorType<ErrorEnvelope>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getIncomeTaxEstimate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetIncomeTaxEstimateQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getIncomeTaxEstimate>>> = ({ signal }) => getIncomeTaxEstimate(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getIncomeTaxEstimate>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetIncomeTaxEstimateQueryResult = NonNullable<Awaited<ReturnType<typeof getIncomeTaxEstimate>>>
+export type GetIncomeTaxEstimateQueryError = ErrorType<ErrorEnvelope>
+
+
+/**
+ * @summary Get the live, current-tax-year estimated income-tax position
+ */
+
+export function useGetIncomeTaxEstimate<TData = Awaited<ReturnType<typeof getIncomeTaxEstimate>>, TError = ErrorType<ErrorEnvelope>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getIncomeTaxEstimate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetIncomeTaxEstimateQueryOptions(profileId,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

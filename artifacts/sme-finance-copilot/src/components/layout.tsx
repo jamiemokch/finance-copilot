@@ -3,6 +3,7 @@ import {
   LayoutDashboard, WalletCards, Lightbulb, Settings,
   Menu, X, Bot, CheckSquare, UploadCloud, User, MessageSquare,
   RotateCcw, BookOpen,
+  Calculator,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -39,6 +40,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { href: '/memory',         label: 'Financial Memory', icon: BookOpen },
     { href: '/dashboard',      label: 'Home',             icon: LayoutDashboard },
     { href: '/position',       label: 'Finances',         icon: WalletCards },
+    { href: '/tax',            label: 'Tax estimate',     icon: Calculator },
     { href: '/business-ideas', label: 'Business Ideas',   icon: Lightbulb, count: newIdeas },
     { href: '/tasks',          label: 'Tasks & Timeline', icon: CheckSquare, count: pendingInbox },
     // Copilot removed from primary nav — use the floating button (always visible, bottom-right)
@@ -46,7 +48,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const getIsActive = (href: string) => {
     if (href === '/ingest') return ['/ingest', '/evidence'].includes(location);
-    if (href === '/business-ideas') return ['/business-ideas', '/decisions', '/tax', '/optimisation'].includes(location);
+    if (href === '/business-ideas') return ['/business-ideas', '/decisions', '/optimisation'].includes(location);
     if (href === '/tasks') return ['/tasks', '/compliance', '/inbox', '/year-end', '/exceptions'].includes(location);
     if (href === '/memory') return location === '/memory' || location.startsWith('/memory/');
     if (href === '/position') return location === '/position';

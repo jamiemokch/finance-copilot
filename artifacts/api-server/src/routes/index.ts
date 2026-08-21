@@ -10,6 +10,7 @@ import inboxRouter from "./inbox.js";
 import decisionsRouter from "./decisions.js";
 import copilotRouter from "./copilot.js";
 import demoRouter from "./demo.js";
+import incomeTaxEstimateRouter from "./income-tax-estimate.js";
 
 const router: IRouter = Router();
 
@@ -18,6 +19,7 @@ router.use(authRouter);
 router.use(storageRouter);
 router.use(profilesRouter);
 router.use(positionRouter);
+router.use(incomeTaxEstimateRouter);
 router.use(evidenceRouter);
 router.use(transactionsRouter);
 router.use(inboxRouter);

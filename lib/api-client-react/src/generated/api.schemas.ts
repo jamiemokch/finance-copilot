@@ -92,6 +92,8 @@ export interface Profile {
   coverageStartDate?: string | null;
   /** @pattern ^\d{4}-\d{2}-\d{2}$ */
   coverageEndDate?: string | null;
+  otherTaxableIncome?: number | null;
+  otherTaxableIncomeTaxYear?: string | null;
   createdAt: string;
 }
 
@@ -125,6 +127,98 @@ export interface ProfileUpdate {
   coverageStartDate?: string | null;
   /** @pattern ^\d{4}-\d{2}-\d{2}$ */
   coverageEndDate?: string | null;
+  otherTaxableIncome?: number | null;
+  otherTaxableIncomeTaxYear?: string | null;
+}
+
+export type IncomeTaxEstimateResponseAccountingBasis = typeof IncomeTaxEstimateResponseAccountingBasis[keyof typeof IncomeTaxEstimateResponseAccountingBasis];
+
+
+export const IncomeTaxEstimateResponseAccountingBasis = {
+  cash: 'cash',
+  accrual: 'accrual',
+} as const;
+
+export interface TaxPeriod {
+  start: string;
+  end: string;
+}
+
+export interface YtdProfitLoss {
+  totalIncome: number;
+  totalExpenses: number;
+  profitLoss: number;
+  taxableBusinessProfit: number;
+  recordCount: number;
+}
+
+export type IncomeTaxCategoryRecordType = typeof IncomeTaxCategoryRecordType[keyof typeof IncomeTaxCategoryRecordType];
+
+
+export const IncomeTaxCategoryRecordType = {
+  income: 'income',
+  expense: 'expense',
+} as const;
+
+export interface IncomeTaxRecord {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+}
+
+export interface IncomeTaxCategory {
+  category: string;
+  recordType: IncomeTaxCategoryRecordType;
+  amount: number;
+  records: IncomeTaxRecord[];
+}
+
+export type IncomeTaxEstimateStatus = typeof IncomeTaxEstimateStatus[keyof typeof IncomeTaxEstimateStatus];
+
+
+export const IncomeTaxEstimateStatus = {
+  complete: 'complete',
+  incomplete: 'incomplete',
+} as const;
+
+export type IncomeTaxEstimateAccountingBasis = typeof IncomeTaxEstimateAccountingBasis[keyof typeof IncomeTaxEstimateAccountingBasis];
+
+
+export const IncomeTaxEstimateAccountingBasis = {
+  cash: 'cash',
+  accrual: 'accrual',
+} as const;
+
+export interface IncomeTaxBand {
+  label: string;
+  rate: number;
+  taxableAmount: number;
+  tax: number;
+}
+
+export interface IncomeTaxEstimate {
+  status: IncomeTaxEstimateStatus;
+  taxYear: string;
+  accountingBasis: IncomeTaxEstimateAccountingBasis;
+  businessProfitInput: number;
+  otherTaxableIncome: number | null;
+  totalIncome: number | null;
+  personalAllowance: number | null;
+  taxableIncome: number | null;
+  estimatedIncomeTax: number | null;
+  bands: IncomeTaxBand[];
+  assumptions: string[];
+  missingInputs: string[];
+}
+
+export interface IncomeTaxEstimateResponse {
+  period: TaxPeriod;
+  taxYear: string;
+  accountingBasis: IncomeTaxEstimateResponseAccountingBasis;
+  profitLoss: YtdProfitLoss;
+  categories: IncomeTaxCategory[];
+  estimate: IncomeTaxEstimate;
 }
 
 export interface PLBreakdown {

@@ -212,6 +212,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
         amount: incomeAmount, // positive
+        recordType: "income",
         category: "income",
         taxTreatment: "income",
         source: "extracted",
@@ -242,6 +243,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
         amount: txAmount,
+        recordType: "expense",
         category: "expense",
         taxTreatment: "deductible",
         source: "extracted",
@@ -272,6 +274,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         date: extracted.date ?? new Date().toISOString().split("T")[0],
         description: extracted.description ?? evidenceItem.filename,
         amount: -nonDeductibleAmount,
+        recordType: "expense",
         category: "expense",
         taxTreatment: "non_deductible",
         source: "extracted",
@@ -546,7 +549,7 @@ function transactionFromExtracted(profileId: string, evidenceId: string, extract
   const allowable = Math.abs(amount) * (extracted.allowablePercentage / 100);
   return {
     profileId, evidenceId, date: extracted.date ?? row.date, description: extracted.description ?? row.description,
-    amount, category: isIncome ? "income" : "expense", taxTreatment: extracted.taxTreatment, source: "extracted",
+    amount, recordType: isIncome ? "income" : "expense", category: isIncome ? "income" : "expense", taxTreatment: extracted.taxTreatment, source: "extracted",
     evidenceTier, sourceRowIndex, rawRowData, classificationConfidence: extracted.confidence,
     accountingCategory: extracted.accountingCategory, allowablePercentage: isIncome ? 100 : extracted.allowablePercentage,
     allowableAmount: isIncome ? amount : extracted.taxTreatment === "non_deductible" ? 0 : -allowable,

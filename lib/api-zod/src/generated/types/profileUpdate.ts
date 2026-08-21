@@ -22,4 +22,6 @@ export interface ProfileUpdate {
   coverageStartDate?: string | null;
   /** @pattern ^\d{4}-\d{2}-\d{2}$ */
   coverageEndDate?: string | null;
+  otherTaxableIncome?: number | null;
+  otherTaxableIncomeTaxYear?: string | null;
 }
