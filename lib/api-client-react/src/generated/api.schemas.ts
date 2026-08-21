@@ -131,6 +131,133 @@ export interface ProfileUpdate {
   otherTaxableIncomeTaxYear?: string | null;
 }
 
+export interface SelfAssessmentIdentity {
+  /** Masked only. The raw UTR is never returned. */
+  utrMasked: string | null;
+  /** Masked only. The raw National Insurance number is never returned. */
+  nationalInsuranceNumberMasked: string | null;
+  hasUtr: boolean;
+  hasNationalInsuranceNumber: boolean;
+}
+
+export interface SelfAssessmentIdentityUpdate {
+  /** Write-only protected UTR. Never returned after save. */
+  utr?: string | null;
+  /** Write-only protected National Insurance number. Never returned after save. */
+  nationalInsuranceNumber?: string | null;
+}
+
+export interface SelfAssessmentSa100Context {
+  taxYear: string;
+  otherTaxableIncome: number | null;
+  allSelfEmploymentsDisclosed: boolean | null;
+  migrationConflict: boolean;
+}
+
+export interface SelfAssessmentSa100ContextUpdate {
+  /** @minimum 0 */
+  otherTaxableIncome?: number | null;
+  allSelfEmploymentsDisclosed?: boolean | null;
+}
+
+export interface SelfAssessmentSa103sContext {
+  profileId: string;
+  taxYear: string;
+  selfEmploymentStartDate: string | null;
+  businessDescription: string | null;
+  accountingPeriodEndDate: string | null;
+  accountingPeriodConfirmed: boolean | null;
+  recordsCompleteConfirmed: boolean | null;
+  derivedFiguresReviewed: boolean | null;
+}
+
+export interface SelfAssessmentSa103sContextUpdate {
+  selfEmploymentStartDate?: string | null;
+  businessDescription?: string | null;
+  accountingPeriodEndDate?: string | null;
+  accountingPeriodConfirmed?: boolean | null;
+  recordsCompleteConfirmed?: boolean | null;
+  derivedFiguresReviewed?: boolean | null;
+}
+
+export type SelfAssessmentReadinessConceptSection = typeof SelfAssessmentReadinessConceptSection[keyof typeof SelfAssessmentReadinessConceptSection];
+
+
+export const SelfAssessmentReadinessConceptSection = {
+  SA100: 'SA100',
+  SA103S: 'SA103S',
+  Return: 'Return',
+} as const;
+
+export type SelfAssessmentReadinessConceptStatus = typeof SelfAssessmentReadinessConceptStatus[keyof typeof SelfAssessmentReadinessConceptStatus];
+
+
+export const SelfAssessmentReadinessConceptStatus = {
+  complete: 'complete',
+  derived: 'derived',
+  missing: 'missing',
+  needs_confirmation: 'needs_confirmation',
+} as const;
+
+export interface SelfAssessmentReadinessConcept {
+  id: string;
+  section: SelfAssessmentReadinessConceptSection;
+  label: string;
+  status: SelfAssessmentReadinessConceptStatus;
+  value: unknown | null;
+  source: string;
+  explanation: string;
+}
+
+export interface SelfAssessmentReadinessGroups {
+  complete: SelfAssessmentReadinessConcept[];
+  derived: SelfAssessmentReadinessConcept[];
+  missing: SelfAssessmentReadinessConcept[];
+  needsConfirmation: SelfAssessmentReadinessConcept[];
+}
+
+export type SelfAssessmentReadinessReturnStructureBusinessSectionsItem = {
+  profileId: string;
+  businessName: string;
+  isActive: boolean;
+  hasBusinessContext: boolean;
+};
+
+export type SelfAssessmentReadinessReturnStructure = {
+  model: string;
+  activeBusinessProfileId: string;
+  businessSectionCount: number;
+  businessSections: SelfAssessmentReadinessReturnStructureBusinessSectionsItem[];
+  note: string;
+};
+
+export type SelfAssessmentReadinessFinancialCoverage = {
+  periodStart: string;
+  periodEnd: string;
+  hasStarted: boolean;
+  isYearToDate: boolean;
+  turnover: number;
+  totalExpenses: number;
+  allowableExpenses: number;
+  taxableBusinessProfit: number;
+  recordCount: number;
+};
+
+export interface SelfAssessmentReadiness {
+  schemaVersion: string;
+  taxYear: string;
+  returnStructure: SelfAssessmentReadinessReturnStructure;
+  financialCoverage: SelfAssessmentReadinessFinancialCoverage;
+  groups: SelfAssessmentReadinessGroups;
+}
+
+export interface SelfAssessmentReadinessResponse {
+  identity: SelfAssessmentIdentity;
+  sa100Context: SelfAssessmentSa100Context;
+  sa103sContext: SelfAssessmentSa103sContext | null;
+  readiness: SelfAssessmentReadiness;
+}
+
 export type IncomeTaxEstimateResponseAccountingBasis = typeof IncomeTaxEstimateResponseAccountingBasis[keyof typeof IncomeTaxEstimateResponseAccountingBasis];
 
 

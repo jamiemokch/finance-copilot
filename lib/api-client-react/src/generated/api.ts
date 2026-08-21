@@ -48,6 +48,13 @@ import type {
   ProfileUpdate,
   SAChecklistItem,
   SAChecklistUpdate,
+  SelfAssessmentIdentity,
+  SelfAssessmentIdentityUpdate,
+  SelfAssessmentReadinessResponse,
+  SelfAssessmentSa100Context,
+  SelfAssessmentSa100ContextUpdate,
+  SelfAssessmentSa103sContext,
+  SelfAssessmentSa103sContextUpdate,
   Transaction,
   TransactionInput,
   UploadUrlRequest,
@@ -1217,6 +1224,452 @@ export function useGetIncomeTaxEstimate<TData = Awaited<ReturnType<typeof getInc
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetIncomeTaxEstimateQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetSelfAssessmentIdentityUrl = () => {
+
+
+
+
+  return `/api/self-assessment/identity`
+}
+
+/**
+ * @summary Read masked Self Assessment identity status
+ */
+export const getSelfAssessmentIdentity = async ( options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentIdentity> => {
+
+  return customFetch<SelfAssessmentIdentity>(getGetSelfAssessmentIdentityUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSelfAssessmentIdentityQueryKey = () => {
+    return [
+    `/api/self-assessment/identity`
+    ] as const;
+    }
+
+
+export const getGetSelfAssessmentIdentityQueryOptions = <TData = Awaited<ReturnType<typeof getSelfAssessmentIdentity>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentIdentity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSelfAssessmentIdentityQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSelfAssessmentIdentity>>> = ({ signal }) => getSelfAssessmentIdentity({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentIdentity>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetSelfAssessmentIdentityQueryResult = NonNullable<Awaited<ReturnType<typeof getSelfAssessmentIdentity>>>
+export type GetSelfAssessmentIdentityQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read masked Self Assessment identity status
+ */
+
+export function useGetSelfAssessmentIdentity<TData = Awaited<ReturnType<typeof getSelfAssessmentIdentity>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentIdentity>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetSelfAssessmentIdentityQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUpdateSelfAssessmentIdentityUrl = () => {
+
+
+
+
+  return `/api/self-assessment/identity`
+}
+
+/**
+ * @summary Save protected Self Assessment identity values
+ */
+export const updateSelfAssessmentIdentity = async (selfAssessmentIdentityUpdate: SelfAssessmentIdentityUpdate, options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentIdentity> => {
+
+  return customFetch<SelfAssessmentIdentity>(getUpdateSelfAssessmentIdentityUrl(),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(selfAssessmentIdentityUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateSelfAssessmentIdentityMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>, TError,{data: BodyType<SelfAssessmentIdentityUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>, TError,{data: BodyType<SelfAssessmentIdentityUpdate>}, TContext> => {
+
+const mutationKey = ['updateSelfAssessmentIdentity'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>, {data: BodyType<SelfAssessmentIdentityUpdate>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  updateSelfAssessmentIdentity(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateSelfAssessmentIdentityMutationResult = NonNullable<Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>>
+    export type UpdateSelfAssessmentIdentityMutationBody = BodyType<SelfAssessmentIdentityUpdate>
+    export type UpdateSelfAssessmentIdentityMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Save protected Self Assessment identity values
+ */
+export const useUpdateSelfAssessmentIdentity = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>, TError,{data: BodyType<SelfAssessmentIdentityUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateSelfAssessmentIdentity>>,
+        TError,
+        {data: BodyType<SelfAssessmentIdentityUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateSelfAssessmentIdentityMutationOptions(options));
+    }
+
+export const getGetSelfAssessmentSa100ContextUrl = (taxYear: string,) => {
+
+
+
+
+  return `/api/self-assessment/sa100/${taxYear}`
+}
+
+/**
+ * @summary Read user-owned Self Assessment return context
+ */
+export const getSelfAssessmentSa100Context = async (taxYear: string, options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentSa100Context> => {
+
+  return customFetch<SelfAssessmentSa100Context>(getGetSelfAssessmentSa100ContextUrl(taxYear),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSelfAssessmentSa100ContextQueryKey = (taxYear: string,) => {
+    return [
+    `/api/self-assessment/sa100/${taxYear}`
+    ] as const;
+    }
+
+
+export const getGetSelfAssessmentSa100ContextQueryOptions = <TData = Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>, TError = ErrorType<unknown>>(taxYear: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSelfAssessmentSa100ContextQueryKey(taxYear);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>> = ({ signal }) => getSelfAssessmentSa100Context(taxYear, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: taxYear !== null && taxYear !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetSelfAssessmentSa100ContextQueryResult = NonNullable<Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>>
+export type GetSelfAssessmentSa100ContextQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read user-owned Self Assessment return context
+ */
+
+export function useGetSelfAssessmentSa100Context<TData = Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>, TError = ErrorType<unknown>>(
+ taxYear: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentSa100Context>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetSelfAssessmentSa100ContextQueryOptions(taxYear,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUpdateSelfAssessmentSa100ContextUrl = (taxYear: string,) => {
+
+
+
+
+  return `/api/self-assessment/sa100/${taxYear}`
+}
+
+/**
+ * @summary Update user-owned Self Assessment return context
+ */
+export const updateSelfAssessmentSa100Context = async (taxYear: string,
+    selfAssessmentSa100ContextUpdate: SelfAssessmentSa100ContextUpdate, options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentSa100Context> => {
+
+  return customFetch<SelfAssessmentSa100Context>(getUpdateSelfAssessmentSa100ContextUrl(taxYear),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(selfAssessmentSa100ContextUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateSelfAssessmentSa100ContextMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>, TError,{taxYear: string;data: BodyType<SelfAssessmentSa100ContextUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>, TError,{taxYear: string;data: BodyType<SelfAssessmentSa100ContextUpdate>}, TContext> => {
+
+const mutationKey = ['updateSelfAssessmentSa100Context'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>, {taxYear: string;data: BodyType<SelfAssessmentSa100ContextUpdate>}> = (props) => {
+          const {taxYear,data} = props ?? {};
+
+          return  updateSelfAssessmentSa100Context(taxYear,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateSelfAssessmentSa100ContextMutationResult = NonNullable<Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>>
+    export type UpdateSelfAssessmentSa100ContextMutationBody = BodyType<SelfAssessmentSa100ContextUpdate>
+    export type UpdateSelfAssessmentSa100ContextMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Update user-owned Self Assessment return context
+ */
+export const useUpdateSelfAssessmentSa100Context = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>, TError,{taxYear: string;data: BodyType<SelfAssessmentSa100ContextUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateSelfAssessmentSa100Context>>,
+        TError,
+        {taxYear: string;data: BodyType<SelfAssessmentSa100ContextUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateSelfAssessmentSa100ContextMutationOptions(options));
+    }
+
+export const getUpdateSelfAssessmentSa103sContextUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/self-assessment/sa103s`
+}
+
+/**
+ * @summary Update business-specific SA103S context
+ */
+export const updateSelfAssessmentSa103sContext = async (profileId: string,
+    selfAssessmentSa103sContextUpdate: SelfAssessmentSa103sContextUpdate, options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentSa103sContext> => {
+
+  return customFetch<SelfAssessmentSa103sContext>(getUpdateSelfAssessmentSa103sContextUrl(profileId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(selfAssessmentSa103sContextUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateSelfAssessmentSa103sContextMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>, TError,{profileId: string;data: BodyType<SelfAssessmentSa103sContextUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>, TError,{profileId: string;data: BodyType<SelfAssessmentSa103sContextUpdate>}, TContext> => {
+
+const mutationKey = ['updateSelfAssessmentSa103sContext'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>, {profileId: string;data: BodyType<SelfAssessmentSa103sContextUpdate>}> = (props) => {
+          const {profileId,data} = props ?? {};
+
+          return  updateSelfAssessmentSa103sContext(profileId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateSelfAssessmentSa103sContextMutationResult = NonNullable<Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>>
+    export type UpdateSelfAssessmentSa103sContextMutationBody = BodyType<SelfAssessmentSa103sContextUpdate>
+    export type UpdateSelfAssessmentSa103sContextMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Update business-specific SA103S context
+ */
+export const useUpdateSelfAssessmentSa103sContext = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>, TError,{profileId: string;data: BodyType<SelfAssessmentSa103sContextUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateSelfAssessmentSa103sContext>>,
+        TError,
+        {profileId: string;data: BodyType<SelfAssessmentSa103sContextUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateSelfAssessmentSa103sContextMutationOptions(options));
+    }
+
+export const getGetSelfAssessmentReadinessUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/self-assessment/readiness`
+}
+
+/**
+ * @summary Read combined Self Assessment return readiness for an active business profile
+ */
+export const getSelfAssessmentReadiness = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<SelfAssessmentReadinessResponse> => {
+
+  return customFetch<SelfAssessmentReadinessResponse>(getGetSelfAssessmentReadinessUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSelfAssessmentReadinessQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/self-assessment/readiness`
+    ] as const;
+    }
+
+
+export const getGetSelfAssessmentReadinessQueryOptions = <TData = Awaited<ReturnType<typeof getSelfAssessmentReadiness>>, TError = ErrorType<unknown>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentReadiness>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSelfAssessmentReadinessQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSelfAssessmentReadiness>>> = ({ signal }) => getSelfAssessmentReadiness(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentReadiness>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetSelfAssessmentReadinessQueryResult = NonNullable<Awaited<ReturnType<typeof getSelfAssessmentReadiness>>>
+export type GetSelfAssessmentReadinessQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read combined Self Assessment return readiness for an active business profile
+ */
+
+export function useGetSelfAssessmentReadiness<TData = Awaited<ReturnType<typeof getSelfAssessmentReadiness>>, TError = ErrorType<unknown>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSelfAssessmentReadiness>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetSelfAssessmentReadinessQueryOptions(profileId,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

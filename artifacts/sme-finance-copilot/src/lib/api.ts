@@ -2,6 +2,15 @@
  * Typed API client for the SME Finance Copilot backend.
  * All routes are relative to /api (the API server artifact path).
  */
+import type {
+  SelfAssessmentIdentity,
+  SelfAssessmentIdentityUpdate,
+  SelfAssessmentReadinessResponse,
+  SelfAssessmentSa100Context,
+  SelfAssessmentSa100ContextUpdate,
+  SelfAssessmentSa103sContext,
+  SelfAssessmentSa103sContextUpdate,
+} from '@workspace/api-client-react';
 
 const API = "/api";
 
@@ -427,6 +436,36 @@ export interface APIIncomeTaxEstimateResponse {
 export const incomeTaxEstimateApi = {
   get: (profileId: string) =>
     apiFetch<APIIncomeTaxEstimateResponse>(`/profiles/${profileId}/income-tax-estimate`),
+};
+
+// ── Self Assessment readiness ─────────────────────────────────────────────────
+
+export type APISelfAssessmentIdentity = SelfAssessmentIdentity;
+export type APISelfAssessmentSa100Context = SelfAssessmentSa100Context;
+export type APISelfAssessmentSa103sContext = SelfAssessmentSa103sContext;
+export type APISelfAssessmentReadinessResponse = SelfAssessmentReadinessResponse;
+
+export const selfAssessmentApi = {
+  getIdentity: () => apiFetch<SelfAssessmentIdentity>('/self-assessment/identity'),
+  updateIdentity: (data: SelfAssessmentIdentityUpdate) =>
+    apiFetch<SelfAssessmentIdentity>('/self-assessment/identity', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  getSa100Context: (taxYear: string) =>
+    apiFetch<SelfAssessmentSa100Context>(`/self-assessment/sa100/${encodeURIComponent(taxYear)}`),
+  updateSa100Context: (taxYear: string, data: SelfAssessmentSa100ContextUpdate) =>
+    apiFetch<SelfAssessmentSa100Context>(`/self-assessment/sa100/${encodeURIComponent(taxYear)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  updateSa103sContext: (profileId: string, data: SelfAssessmentSa103sContextUpdate) =>
+    apiFetch<SelfAssessmentSa103sContext>(`/profiles/${profileId}/self-assessment/sa103s`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  getReadiness: (profileId: string) =>
+    apiFetch<SelfAssessmentReadinessResponse>(`/profiles/${profileId}/self-assessment/readiness`),
 };
 
 // ── Decisions ─────────────────────────────────────────────────────────────────

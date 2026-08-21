@@ -4,6 +4,7 @@ import {
   Menu, X, Bot, CheckSquare, UploadCloud, User, MessageSquare,
   RotateCcw, BookOpen,
   Calculator,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -41,6 +42,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { href: '/dashboard',      label: 'Home',             icon: LayoutDashboard },
     { href: '/position',       label: 'Finances',         icon: WalletCards },
     { href: '/tax',            label: 'Tax estimate',     icon: Calculator },
+    { href: '/tax-readiness',  label: 'Tax return readiness', icon: ClipboardCheck },
     { href: '/business-ideas', label: 'Business Ideas',   icon: Lightbulb, count: newIdeas },
     { href: '/tasks',          label: 'Tasks & Timeline', icon: CheckSquare, count: pendingInbox },
     // Copilot removed from primary nav — use the floating button (always visible, bottom-right)

@@ -33,8 +33,6 @@ export interface Profile {
 export interface SharedContext {
   name: string;
   address: string;
-  utr: string;
-  niNumber: string;
 }
 
 export interface PositionItem {
@@ -691,7 +689,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // ── UI-only state
   const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
   const [peerCategory, setPeerCategory] = useState<PeerCategory | null>(null);
-  const [sharedContext, setSharedContext] = useState<SharedContext>({ name: '', address: '', utr: '', niNumber: '' });
+  const [sharedContext, setSharedContext] = useState<SharedContext>({ name: '', address: '' });
   const [copilotTrigger, setCopilotTrigger] = useState<string | null>(null);
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
   const resolvingInboxIds = useRef(new Set<string>());

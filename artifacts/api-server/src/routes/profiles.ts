@@ -3,8 +3,18 @@ import { db } from "@workspace/db";
 import { profilesTable } from "@workspace/db/schema";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
+import { getOrMigrateSa100Context, updateSa100Context } from "../lib/self-assessment-context.js";
 
 const router = Router();
+
+async function profileWithAnnualTaxContext(profile: typeof profilesTable.$inferSelect) {
+  const context = await getOrMigrateSa100Context(profile.userId, profile.taxYear);
+  return {
+    ...profile,
+    otherTaxableIncome: context?.otherTaxableIncome ?? null,
+    otherTaxableIncomeTaxYear: context?.otherTaxableIncome == null ? null : profile.taxYear,
+  };
+}
 
 // GET /profiles
 router.get("/profiles", async (req, res) => {
@@ -12,7 +22,7 @@ router.get("/profiles", async (req, res) => {
   try {
     const profiles = await db.select().from(profilesTable)
       .where(eq(profilesTable.userId, req.user.id));
-    res.json(profiles);
+    res.json(await Promise.all(profiles.map(profileWithAnnualTaxContext)));
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to list profiles" });
@@ -47,7 +57,7 @@ router.post("/profiles", async (req, res) => {
     const [profile] = await db.insert(profilesTable)
       .values(insertData as typeof profilesTable.$inferInsert)
       .returning();
-    res.status(201).json(profile);
+    res.status(201).json(await profileWithAnnualTaxContext(profile));
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to create profile" });
@@ -99,6 +109,15 @@ router.patch("/profiles/:profileId", async (req, res) => {
       and(eq(profilesTable.id, req.params.profileId), eq(profilesTable.userId, req.user.id))
     );
     if (!existing) { res.status(404).json({ error: "Profile not found" }); return; }
+    const effectiveTaxYear = body.data.taxYear === undefined ? existing.taxYear : body.data.taxYear;
+    if (
+      body.data.otherTaxableIncomeTaxYear !== undefined
+      && body.data.otherTaxableIncomeTaxYear !== null
+      && body.data.otherTaxableIncomeTaxYear !== effectiveTaxYear
+    ) {
+      res.status(400).json({ error: "Other taxable income must use the selected tax year" });
+      return;
+    }
 
     // Validate the complete resulting state rather than only the submitted
     // patch. Users may edit one coverage field or one opening detail at a time.
@@ -146,15 +165,20 @@ router.patch("/profiles/:profileId", async (req, res) => {
     if (body.data.openingDetails !== undefined) updates.openingDetails = body.data.openingDetails;
     if (body.data.coverageStartDate !== undefined) updates.coverageStartDate = body.data.coverageStartDate;
     if (body.data.coverageEndDate !== undefined) updates.coverageEndDate = body.data.coverageEndDate;
-    if (body.data.otherTaxableIncome !== undefined) updates.otherTaxableIncome = body.data.otherTaxableIncome;
-    if (body.data.otherTaxableIncomeTaxYear !== undefined) updates.otherTaxableIncomeTaxYear = body.data.otherTaxableIncomeTaxYear;
-
     const [updated] = await db.update(profilesTable)
       .set(updates as typeof profilesTable.$inferInsert)
       .where(and(eq(profilesTable.id, req.params.profileId), eq(profilesTable.userId, req.user.id)))
       .returning();
 
-    res.json(updated);
+    if (body.data.otherTaxableIncome !== undefined) {
+      const current = await getOrMigrateSa100Context(req.user.id, effectiveTaxYear);
+      await updateSa100Context(req.user.id, effectiveTaxYear, {
+        otherTaxableIncome: body.data.otherTaxableIncome,
+        allSelfEmploymentsDisclosed: current?.allSelfEmploymentsDisclosed ?? null,
+      });
+    }
+
+    res.json(await profileWithAnnualTaxContext(updated));
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to update profile" });

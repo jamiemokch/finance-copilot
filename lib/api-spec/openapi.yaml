@@ -352,6 +352,106 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
 
+  /self-assessment/identity:
+    get:
+      tags: [Tax]
+      operationId: getSelfAssessmentIdentity
+      summary: Read masked Self Assessment identity status
+      responses:
+        '200':
+          description: Masked identity status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentIdentity'
+    patch:
+      tags: [Tax]
+      operationId: updateSelfAssessmentIdentity
+      summary: Save protected Self Assessment identity values
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelfAssessmentIdentityUpdate'
+      responses:
+        '200':
+          description: Updated masked identity status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentIdentity'
+
+  /self-assessment/sa100/{taxYear}:
+    get:
+      tags: [Tax]
+      operationId: getSelfAssessmentSa100Context
+      summary: Read user-owned Self Assessment return context
+      parameters:
+        - $ref: '#/components/parameters/TaxYearParam'
+      responses:
+        '200':
+          description: User-owned SA100 context for a tax year.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentSa100Context'
+    patch:
+      tags: [Tax]
+      operationId: updateSelfAssessmentSa100Context
+      summary: Update user-owned Self Assessment return context
+      parameters:
+        - $ref: '#/components/parameters/TaxYearParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelfAssessmentSa100ContextUpdate'
+      responses:
+        '200':
+          description: Updated user-owned SA100 context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentSa100Context'
+
+  /profiles/{profileId}/self-assessment/sa103s:
+    patch:
+      tags: [Tax]
+      operationId: updateSelfAssessmentSa103sContext
+      summary: Update business-specific SA103S context
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelfAssessmentSa103sContextUpdate'
+      responses:
+        '200':
+          description: Updated business SA103S context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentSa103sContext'
+
+  /profiles/{profileId}/self-assessment/readiness:
+    get:
+      tags: [Tax]
+      operationId: getSelfAssessmentReadiness
+      summary: Read combined Self Assessment return readiness for an active business profile
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: Combined user SA100 and active business SA103S readiness.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfAssessmentReadinessResponse'
+
   /profiles/{profileId}/evidence:
     get:
       tags: [Evidence]
@@ -701,6 +801,13 @@ components:
       required: true
       schema:
         type: string
+    TaxYearParam:
+      name: taxYear
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^\d{4}/\d{2}$'
 
   schemas:
     HealthStatus:
@@ -900,6 +1007,226 @@ components:
         otherTaxableIncomeTaxYear:
           type: string
           nullable: true
+
+    SelfAssessmentIdentity:
+      type: object
+      required: [utrMasked, nationalInsuranceNumberMasked, hasUtr, hasNationalInsuranceNumber]
+      properties:
+        utrMasked:
+          type: string
+          nullable: true
+          description: Masked only. The raw UTR is never returned.
+        nationalInsuranceNumberMasked:
+          type: string
+          nullable: true
+          description: Masked only. The raw National Insurance number is never returned.
+        hasUtr:
+          type: boolean
+        hasNationalInsuranceNumber:
+          type: boolean
+
+    SelfAssessmentIdentityUpdate:
+      type: object
+      properties:
+        utr:
+          type: string
+          nullable: true
+          description: Write-only protected UTR. Never returned after save.
+        nationalInsuranceNumber:
+          type: string
+          nullable: true
+          description: Write-only protected National Insurance number. Never returned after save.
+
+    SelfAssessmentSa100Context:
+      type: object
+      required: [taxYear, otherTaxableIncome, allSelfEmploymentsDisclosed, migrationConflict]
+      properties:
+        taxYear:
+          type: string
+        otherTaxableIncome:
+          type: number
+          nullable: true
+        allSelfEmploymentsDisclosed:
+          type: boolean
+          nullable: true
+        migrationConflict:
+          type: boolean
+
+    SelfAssessmentSa100ContextUpdate:
+      type: object
+      properties:
+        otherTaxableIncome:
+          type: number
+          minimum: 0
+          nullable: true
+        allSelfEmploymentsDisclosed:
+          type: boolean
+          nullable: true
+
+    SelfAssessmentSa103sContext:
+      type: object
+      required: [profileId, taxYear, selfEmploymentStartDate, businessDescription, accountingPeriodEndDate, accountingPeriodConfirmed, recordsCompleteConfirmed, derivedFiguresReviewed]
+      properties:
+        profileId:
+          type: string
+        taxYear:
+          type: string
+        selfEmploymentStartDate:
+          type: string
+          nullable: true
+        businessDescription:
+          type: string
+          nullable: true
+        accountingPeriodEndDate:
+          type: string
+          nullable: true
+        accountingPeriodConfirmed:
+          type: boolean
+          nullable: true
+        recordsCompleteConfirmed:
+          type: boolean
+          nullable: true
+        derivedFiguresReviewed:
+          type: boolean
+          nullable: true
+
+    SelfAssessmentSa103sContextUpdate:
+      type: object
+      properties:
+        selfEmploymentStartDate:
+          type: string
+          nullable: true
+        businessDescription:
+          type: string
+          nullable: true
+        accountingPeriodEndDate:
+          type: string
+          nullable: true
+        accountingPeriodConfirmed:
+          type: boolean
+          nullable: true
+        recordsCompleteConfirmed:
+          type: boolean
+          nullable: true
+        derivedFiguresReviewed:
+          type: boolean
+          nullable: true
+
+    SelfAssessmentReadinessConcept:
+      type: object
+      required: [id, section, label, status, value, source, explanation]
+      properties:
+        id:
+          type: string
+        section:
+          type: string
+          enum: [SA100, SA103S, Return]
+        label:
+          type: string
+        status:
+          type: string
+          enum: [complete, derived, missing, needs_confirmation]
+        value:
+          nullable: true
+        source:
+          type: string
+        explanation:
+          type: string
+
+    SelfAssessmentReadinessGroups:
+      type: object
+      required: [complete, derived, missing, needsConfirmation]
+      properties:
+        complete:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfAssessmentReadinessConcept'
+        derived:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfAssessmentReadinessConcept'
+        missing:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfAssessmentReadinessConcept'
+        needsConfirmation:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfAssessmentReadinessConcept'
+
+    SelfAssessmentReadiness:
+      type: object
+      required: [schemaVersion, taxYear, returnStructure, financialCoverage, groups]
+      properties:
+        schemaVersion:
+          type: string
+        taxYear:
+          type: string
+        returnStructure:
+          type: object
+          required: [model, activeBusinessProfileId, businessSectionCount, businessSections, note]
+          properties:
+            model:
+              type: string
+            activeBusinessProfileId:
+              type: string
+            businessSectionCount:
+              type: number
+            businessSections:
+              type: array
+              items:
+                type: object
+                required: [profileId, businessName, isActive, hasBusinessContext]
+                properties:
+                  profileId:
+                    type: string
+                  businessName:
+                    type: string
+                  isActive:
+                    type: boolean
+                  hasBusinessContext:
+                    type: boolean
+            note:
+              type: string
+        financialCoverage:
+          type: object
+          required: [periodStart, periodEnd, hasStarted, isYearToDate, turnover, totalExpenses, allowableExpenses, taxableBusinessProfit, recordCount]
+          properties:
+            periodStart:
+              type: string
+            periodEnd:
+              type: string
+            hasStarted:
+              type: boolean
+            isYearToDate:
+              type: boolean
+            turnover:
+              type: number
+            totalExpenses:
+              type: number
+            allowableExpenses:
+              type: number
+            taxableBusinessProfit:
+              type: number
+            recordCount:
+              type: number
+        groups:
+          $ref: '#/components/schemas/SelfAssessmentReadinessGroups'
+
+    SelfAssessmentReadinessResponse:
+      type: object
+      required: [identity, sa100Context, sa103sContext, readiness]
+      properties:
+        identity:
+          $ref: '#/components/schemas/SelfAssessmentIdentity'
+        sa100Context:
+          $ref: '#/components/schemas/SelfAssessmentSa100Context'
+        sa103sContext:
+          anyOf:
+            - $ref: '#/components/schemas/SelfAssessmentSa103sContext'
+            - type: 'null'
+        readiness:
+          $ref: '#/components/schemas/SelfAssessmentReadiness'
 
     IncomeTaxEstimateResponse:
       type: object

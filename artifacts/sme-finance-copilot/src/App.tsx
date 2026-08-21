@@ -21,6 +21,7 @@ import Match from '@/pages/match';
 import Settings from '@/pages/settings';
 import FinancialMemory from '@/pages/financial-memory';
 import TaxEstimate from '@/pages/tax-estimate';
+import SelfAssessmentReadiness from '@/pages/self-assessment-readiness';
 
 const queryClient = new QueryClient();
 
@@ -70,6 +71,7 @@ function Router() {
           <Route path="/business-ideas" component={BusinessIdeas} />
           <Route path="/decisions" component={BusinessIdeas} />
           <Route path="/tax" component={TaxEstimate} />
+          <Route path="/tax-readiness" component={SelfAssessmentReadiness} />
           <Route path="/optimisation" component={BusinessIdeas} />
           <Route path="/tasks" component={Tasks} />
           <Route path="/compliance" component={Tasks} />

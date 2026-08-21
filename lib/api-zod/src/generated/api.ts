@@ -391,6 +391,204 @@ export const GetIncomeTaxEstimateResponse = zod.object({
 
 
 /**
+ * @summary Read masked Self Assessment identity status
+ */
+export const GetSelfAssessmentIdentityResponse = zod.object({
+  "utrMasked": zod.string().nullable().describe('Masked only. The raw UTR is never returned.'),
+  "nationalInsuranceNumberMasked": zod.string().nullable().describe('Masked only. The raw National Insurance number is never returned.'),
+  "hasUtr": zod.boolean(),
+  "hasNationalInsuranceNumber": zod.boolean()
+})
+
+
+/**
+ * @summary Save protected Self Assessment identity values
+ */
+export const UpdateSelfAssessmentIdentityBody = zod.object({
+  "utr": zod.string().nullish().describe('Write-only protected UTR. Never returned after save.'),
+  "nationalInsuranceNumber": zod.string().nullish().describe('Write-only protected National Insurance number. Never returned after save.')
+})
+
+export const UpdateSelfAssessmentIdentityResponse = zod.object({
+  "utrMasked": zod.string().nullable().describe('Masked only. The raw UTR is never returned.'),
+  "nationalInsuranceNumberMasked": zod.string().nullable().describe('Masked only. The raw National Insurance number is never returned.'),
+  "hasUtr": zod.boolean(),
+  "hasNationalInsuranceNumber": zod.boolean()
+})
+
+
+/**
+ * @summary Read user-owned Self Assessment return context
+ */
+export const getSelfAssessmentSa100ContextPathTaxYearRegExp = new RegExp('^\\d{4}/\\d{2}$');
+
+
+export const GetSelfAssessmentSa100ContextParams = zod.object({
+  "taxYear": zod.coerce.string().regex(getSelfAssessmentSa100ContextPathTaxYearRegExp)
+})
+
+export const GetSelfAssessmentSa100ContextResponse = zod.object({
+  "taxYear": zod.string(),
+  "otherTaxableIncome": zod.number().nullable(),
+  "allSelfEmploymentsDisclosed": zod.boolean().nullable(),
+  "migrationConflict": zod.boolean()
+})
+
+
+/**
+ * @summary Update user-owned Self Assessment return context
+ */
+export const updateSelfAssessmentSa100ContextPathTaxYearRegExp = new RegExp('^\\d{4}/\\d{2}$');
+
+
+export const UpdateSelfAssessmentSa100ContextParams = zod.object({
+  "taxYear": zod.coerce.string().regex(updateSelfAssessmentSa100ContextPathTaxYearRegExp)
+})
+
+export const updateSelfAssessmentSa100ContextBodyOtherTaxableIncomeMin = 0;
+
+
+
+export const UpdateSelfAssessmentSa100ContextBody = zod.object({
+  "otherTaxableIncome": zod.number().min(updateSelfAssessmentSa100ContextBodyOtherTaxableIncomeMin).nullish(),
+  "allSelfEmploymentsDisclosed": zod.boolean().nullish()
+})
+
+export const UpdateSelfAssessmentSa100ContextResponse = zod.object({
+  "taxYear": zod.string(),
+  "otherTaxableIncome": zod.number().nullable(),
+  "allSelfEmploymentsDisclosed": zod.boolean().nullable(),
+  "migrationConflict": zod.boolean()
+})
+
+
+/**
+ * @summary Update business-specific SA103S context
+ */
+export const UpdateSelfAssessmentSa103sContextParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const UpdateSelfAssessmentSa103sContextBody = zod.object({
+  "selfEmploymentStartDate": zod.string().nullish(),
+  "businessDescription": zod.string().nullish(),
+  "accountingPeriodEndDate": zod.string().nullish(),
+  "accountingPeriodConfirmed": zod.boolean().nullish(),
+  "recordsCompleteConfirmed": zod.boolean().nullish(),
+  "derivedFiguresReviewed": zod.boolean().nullish()
+})
+
+export const UpdateSelfAssessmentSa103sContextResponse = zod.object({
+  "profileId": zod.string(),
+  "taxYear": zod.string(),
+  "selfEmploymentStartDate": zod.string().nullable(),
+  "businessDescription": zod.string().nullable(),
+  "accountingPeriodEndDate": zod.string().nullable(),
+  "accountingPeriodConfirmed": zod.boolean().nullable(),
+  "recordsCompleteConfirmed": zod.boolean().nullable(),
+  "derivedFiguresReviewed": zod.boolean().nullable()
+})
+
+
+/**
+ * @summary Read combined Self Assessment return readiness for an active business profile
+ */
+export const GetSelfAssessmentReadinessParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const GetSelfAssessmentReadinessResponse = zod.object({
+  "identity": zod.object({
+  "utrMasked": zod.string().nullable().describe('Masked only. The raw UTR is never returned.'),
+  "nationalInsuranceNumberMasked": zod.string().nullable().describe('Masked only. The raw National Insurance number is never returned.'),
+  "hasUtr": zod.boolean(),
+  "hasNationalInsuranceNumber": zod.boolean()
+}),
+  "sa100Context": zod.object({
+  "taxYear": zod.string(),
+  "otherTaxableIncome": zod.number().nullable(),
+  "allSelfEmploymentsDisclosed": zod.boolean().nullable(),
+  "migrationConflict": zod.boolean()
+}),
+  "sa103sContext": zod.union([zod.object({
+  "profileId": zod.string(),
+  "taxYear": zod.string(),
+  "selfEmploymentStartDate": zod.string().nullable(),
+  "businessDescription": zod.string().nullable(),
+  "accountingPeriodEndDate": zod.string().nullable(),
+  "accountingPeriodConfirmed": zod.boolean().nullable(),
+  "recordsCompleteConfirmed": zod.boolean().nullable(),
+  "derivedFiguresReviewed": zod.boolean().nullable()
+}),zod.null()]),
+  "readiness": zod.object({
+  "schemaVersion": zod.string(),
+  "taxYear": zod.string(),
+  "returnStructure": zod.object({
+  "model": zod.string(),
+  "activeBusinessProfileId": zod.string(),
+  "businessSectionCount": zod.number(),
+  "businessSections": zod.array(zod.object({
+  "profileId": zod.string(),
+  "businessName": zod.string(),
+  "isActive": zod.boolean(),
+  "hasBusinessContext": zod.boolean()
+})),
+  "note": zod.string()
+}),
+  "financialCoverage": zod.object({
+  "periodStart": zod.string(),
+  "periodEnd": zod.string(),
+  "hasStarted": zod.boolean(),
+  "isYearToDate": zod.boolean(),
+  "turnover": zod.number(),
+  "totalExpenses": zod.number(),
+  "allowableExpenses": zod.number(),
+  "taxableBusinessProfit": zod.number(),
+  "recordCount": zod.number()
+}),
+  "groups": zod.object({
+  "complete": zod.array(zod.object({
+  "id": zod.string(),
+  "section": zod.enum(['SA100', 'SA103S', 'Return']),
+  "label": zod.string(),
+  "status": zod.enum(['complete', 'derived', 'missing', 'needs_confirmation']),
+  "value": zod.unknown().nullable(),
+  "source": zod.string(),
+  "explanation": zod.string()
+})),
+  "derived": zod.array(zod.object({
+  "id": zod.string(),
+  "section": zod.enum(['SA100', 'SA103S', 'Return']),
+  "label": zod.string(),
+  "status": zod.enum(['complete', 'derived', 'missing', 'needs_confirmation']),
+  "value": zod.unknown().nullable(),
+  "source": zod.string(),
+  "explanation": zod.string()
+})),
+  "missing": zod.array(zod.object({
+  "id": zod.string(),
+  "section": zod.enum(['SA100', 'SA103S', 'Return']),
+  "label": zod.string(),
+  "status": zod.enum(['complete', 'derived', 'missing', 'needs_confirmation']),
+  "value": zod.unknown().nullable(),
+  "source": zod.string(),
+  "explanation": zod.string()
+})),
+  "needsConfirmation": zod.array(zod.object({
+  "id": zod.string(),
+  "section": zod.enum(['SA100', 'SA103S', 'Return']),
+  "label": zod.string(),
+  "status": zod.enum(['complete', 'derived', 'missing', 'needs_confirmation']),
+  "value": zod.unknown().nullable(),
+  "source": zod.string(),
+  "explanation": zod.string()
+}))
+})
+})
+})
+
+
+/**
  * @summary List evidence items for a profile
  */
 export const ListEvidenceParams = zod.object({
