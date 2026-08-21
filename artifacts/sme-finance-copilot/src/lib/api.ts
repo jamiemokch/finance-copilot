@@ -311,6 +311,10 @@ export interface APIUploadUrl {
 export const evidenceApi = {
   list: (profileId: string) =>
     apiFetch<APIEvidenceItem[]>(`/profiles/${profileId}/evidence`),
+  discard: (profileId: string, evidenceId: string) =>
+    apiFetch<{ deleted: boolean }>(`/profiles/${profileId}/evidence/${evidenceId}`, {
+      method: "DELETE",
+    }),
   /** Upload file bytes directly through the API server (avoids GCS CORS) */
   uploadDirect: async (file: File): Promise<{ objectPath: string }> => {
     const buffer = await file.arrayBuffer();

@@ -1,9 +1,10 @@
 import { Router } from "express";
+import { randomUUID } from "crypto";
 import { db } from "@workspace/db";
 import {
   evidenceItemsTable, inboxItemsTable, transactionsTable, profilesTable,
 } from "@workspace/db/schema";
-import { eq, and, desc, inArray } from "drizzle-orm";
+import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import {
@@ -15,6 +16,7 @@ import { parseSpreadsheet, normaliseCell, mapSpreadsheetRow } from "../lib/sprea
 
 const router = Router();
 const storageService = new ObjectStorageService();
+const PROCESSING_LEASE_MS = 10 * 60 * 1000;
 const mappingSchemaInput = z.object({
   headerRow: z.number().int().nonnegative(),
   columns: z.object({
@@ -84,9 +86,65 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
   }
 });
 
+// DELETE /profiles/:profileId/evidence/:evidenceId — discard an unfinished upload
+router.delete("/profiles/:profileId/evidence/:evidenceId", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    type DiscardResult =
+      | { evidenceItem: typeof evidenceItemsTable.$inferSelect }
+      | { error: string; status: 404 | 409 };
+    const result: DiscardResult = await db.transaction(async (tx) => {
+      const [evidenceItem] = await tx.select().from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.id, req.params.evidenceId),
+        eq(evidenceItemsTable.profileId, profile.id),
+      )).for("update");
+      if (!evidenceItem) return { error: "Evidence item not found", status: 404 as const };
+      const now = new Date();
+      const activeLease = (evidenceItem.status === "processing" || evidenceItem.importStatus === "processing")
+        && (!evidenceItem.processingLeaseExpiresAt || evidenceItem.processingLeaseExpiresAt > now);
+      if (activeLease) {
+        return { error: "This upload is currently processing. Wait for it to finish before discarding it.", status: 409 as const };
+      }
+
+      const [[linkedTransaction], [linkedInboxItem]] = await Promise.all([
+        tx.select({ id: transactionsTable.id }).from(transactionsTable).where(and(
+          eq(transactionsTable.profileId, profile.id),
+          eq(transactionsTable.evidenceId, evidenceItem.id),
+        )).limit(1),
+        tx.select({ id: inboxItemsTable.id }).from(inboxItemsTable).where(and(
+          eq(inboxItemsTable.profileId, profile.id),
+          eq(inboxItemsTable.evidenceId, evidenceItem.id),
+        )).limit(1),
+      ]);
+      if (linkedTransaction || linkedInboxItem) {
+        return { error: "This upload already has financial records. Resolve or keep those records instead.", status: 409 as const };
+      }
+      if (evidenceItem.status === "processed" || evidenceItem.status === "needs_review" || evidenceItem.importStatus === "done") {
+        return { error: "This upload is already complete and cannot be discarded.", status: 409 as const };
+      }
+
+      await tx.delete(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceItem.id));
+      return { evidenceItem };
+    });
+    if ("error" in result) { res.status(result.status).json({ error: result.error }); return; }
+    // The database row is the source of truth for resuming. Clean up the
+    // corresponding object as best-effort after the row is safely removed.
+    await storageService.getObjectEntityFile(result.evidenceItem.objectPath)
+      .then(file => file.delete())
+      .catch(err => req.log.warn({ err }, "Could not remove discarded upload object"));
+    res.json({ deleted: true });
+  } catch (err) {
+    req.log.error(err, "Failed to discard evidence");
+    res.status(500).json({ error: "Failed to discard upload" });
+  }
+});
+
 // POST /profiles/:profileId/evidence/:evidenceId/process — AI extraction
 router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  let processingToken = "";
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
@@ -103,21 +161,45 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 
     // Claim the evidence item before reading the file. This also makes a
     // simultaneous retry explicit rather than letting two requests post twice.
+    const now = new Date();
+    processingToken = randomUUID();
     const [evidenceItem] = await db.update(evidenceItemsTable)
-      .set({ status: "processing" })
+      .set({
+        status: "processing",
+        processingToken,
+        processingLeaseExpiresAt: new Date(now.getTime() + PROCESSING_LEASE_MS),
+      })
       .where(and(
         eq(evidenceItemsTable.id, existingEvidence.id),
         eq(evidenceItemsTable.profileId, profile.id),
-        inArray(evidenceItemsTable.status, ["received", "error"]),
+        or(
+          inArray(evidenceItemsTable.status, ["received", "error"]),
+          and(eq(evidenceItemsTable.status, "processing"), or(
+            isNull(evidenceItemsTable.processingLeaseExpiresAt),
+            lt(evidenceItemsTable.processingLeaseExpiresAt, now),
+          )),
+        ),
       ))
       .returning();
     if (!evidenceItem) {
       res.status(409).json({ error: "This document is already being processed" });
       return;
     }
+    const respondWithLatestEvidence = async () => {
+      const latest = await getEvidenceItem(profile.id, evidenceItem.id);
+      if (latest) res.json(latest);
+      else res.status(409).json({ error: "This upload was reclaimed by another request" });
+    };
 
     if (!isConfigured()) {
       const [updated] = await db.transaction(async (tx) => {
+        const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.status, "processing"),
+          eq(evidenceItemsTable.processingToken, processingToken),
+        )).for("update");
+        if (!owned) return [];
         await tx.insert(inboxItemsTable).values({
           profileId: profile.id,
           evidenceId: evidenceItem.id,
@@ -135,10 +217,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         });
         return tx.update(evidenceItemsTable).set({
           status: "needs_review",
+          processingLeaseExpiresAt: null,
+          processingToken: null,
           aiReasoning: "AI not configured — classify manually.",
           confidence: 0,
-        }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+        }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
       return;
     }
@@ -188,8 +273,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
     } catch (extractErr) {
       req.log.error(extractErr, "Extraction failed");
       const [updated] = await db.update(evidenceItemsTable).set({
-        status: "error", aiReasoning: "Could not read or process the file.", confidence: 0,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+        status: "error", processingLeaseExpiresAt: null, processingToken: null, aiReasoning: "Could not read or process the file.", confidence: 0,
+      }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
       return;
     }
@@ -207,6 +293,11 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       // High-confidence income → auto-post as positive transaction
       const incomeAmount = extracted.amount;
       const [updated] = await db.transaction(async (tx) => {
+       const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+         eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+         eq(evidenceItemsTable.status, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+       )).for("update");
+       if (!owned) return [];
       await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
@@ -227,17 +318,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       });
       return tx.update(evidenceItemsTable).set({
         status: "processed",
+        processingLeaseExpiresAt: null,
+         processingToken: null,
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+       }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
 
     } else if (isHighConf && extracted.taxTreatment === "deductible" && extracted.amount) {
       // High-confidence deductible expense → auto-post as negative transaction
       const txAmount = -(extracted.amount); // store as negative
       const [updated] = await db.transaction(async (tx) => {
+       const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+         eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+         eq(evidenceItemsTable.status, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+       )).for("update");
+       if (!owned) return [];
       await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
@@ -258,17 +357,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       });
       return tx.update(evidenceItemsTable).set({
         status: "processed",
+        processingLeaseExpiresAt: null,
+         processingToken: null,
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+       }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
 
     } else if (isHighConf && extracted.taxTreatment === "non_deductible" && extracted.amount) {
       // High-confidence non-deductible → record in ledger (for transparency) but NOT deducted
       const nonDeductibleAmount = extracted.amount;
       const [updated] = await db.transaction(async (tx) => {
+       const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+         eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+         eq(evidenceItemsTable.status, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+       )).for("update");
+       if (!owned) return [];
       await tx.insert(transactionsTable).values({
         profileId: profile.id,
         date: extracted.date ?? new Date().toISOString().split("T")[0],
@@ -289,17 +396,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       });
       return tx.update(evidenceItemsTable).set({
         status: "processed",
+        processingLeaseExpiresAt: null,
+         processingToken: null,
         extractedData: extracted as unknown as Record<string, unknown>,
         confidence: extracted.confidence,
         aiReasoning: extracted.aiReasoning,
-      }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+       }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
 
     } else {
       // Low confidence or unclear → send to Inbox for user review
       const options = buildInboxOptions(extracted);
       const [updated] = await db.transaction(async (tx) => {
+        const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.status, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+        )).for("update");
+        if (!owned) return [];
         await tx.insert(inboxItemsTable).values({
           profileId: profile.id,
           evidenceId: evidenceItem.id,
@@ -312,15 +427,24 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         });
         return tx.update(evidenceItemsTable).set({
           status: "needs_review",
+          processingLeaseExpiresAt: null,
+          processingToken: null,
           extractedData: extracted as unknown as Record<string, unknown>,
           confidence: extracted.confidence,
           aiReasoning: extracted.aiReasoning,
-        }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+        }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
+      if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
     }
   } catch (err) {
     req.log.error(err);
+    await db.update(evidenceItemsTable).set({ status: "error", processingLeaseExpiresAt: null, processingToken: null }).where(and(
+      eq(evidenceItemsTable.id, req.params.evidenceId),
+      eq(evidenceItemsTable.profileId, req.params.profileId),
+      eq(evidenceItemsTable.status, "processing"),
+      eq(evidenceItemsTable.processingToken, processingToken),
+    )).catch(() => undefined);
     res.status(500).json({ error: "Failed to process evidence" });
   }
 });
@@ -333,17 +457,41 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    const now = new Date();
+    if (evidenceItem.importStatus === "processing"
+      && (!evidenceItem.processingLeaseExpiresAt || evidenceItem.processingLeaseExpiresAt > now)) {
+      res.status(409).json({ error: "This spreadsheet is still being processed" });
+      return;
+    }
     const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
     const [buffer] = await file.download();
     const rows = parseSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
     if (rows.length === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
-    const mappingSchema = await detectColumnSchema(rows.slice(0, 10), evidenceItem.filename, evidenceItem.mimeType);
+    // Keep a user-confirmed mapping when reopening a failed or interrupted
+    // import. Fresh uploads still get a new AI proposal.
+    const savedMapping = evidenceItem.mappingSchema as MappingSchema | null;
+    const mappingSchema = savedMapping && evidenceItem.importStatus !== "idle"
+      ? savedMapping
+      : await detectColumnSchema(rows.slice(0, 10), evidenceItem.filename, evidenceItem.mimeType);
     const previewRows = rows.slice(mappingSchema.headerRow + 1, mappingSchema.headerRow + 6);
-    await db.update(evidenceItemsTable).set({
+    const [reopened] = await db.update(evidenceItemsTable).set({
       mappingSchema: mappingSchema as unknown as Record<string, unknown>,
       importStatus: "mapping",
+      processingLeaseExpiresAt: null,
+      processingToken: null,
       totalRows: Math.max(0, rows.length - mappingSchema.headerRow - 1),
-    }).where(eq(evidenceItemsTable.id, evidenceItem.id));
+    }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      or(
+        inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
+        and(eq(evidenceItemsTable.importStatus, "processing"), or(
+          isNull(evidenceItemsTable.processingLeaseExpiresAt),
+          lt(evidenceItemsTable.processingLeaseExpiresAt, now),
+        )),
+      ),
+    )).returning();
+    if (!reopened) { res.status(409).json({ error: "This spreadsheet is still being processed" }); return; }
     res.json({ mappingSchema, previewRows });
   } catch (err) {
     req.log.error(err, "Failed to detect spreadsheet schema");
@@ -358,6 +506,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
   if (!body.success) {
     res.status(400).json({ error: "A valid confirmedMapping is required" }); return;
   }
+  let processingToken = "";
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
@@ -376,10 +525,22 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
     }
     // Atomically claim this evidence item. A second concurrent batch request sees
     // "processing" and cannot send the same source row to a different outcome.
-    const [claimed] = await db.update(evidenceItemsTable).set({ importStatus: "processing" }).where(and(
+    const now = new Date();
+    processingToken = randomUUID();
+    const [claimed] = await db.update(evidenceItemsTable).set({
+      importStatus: "processing",
+      processingToken,
+      processingLeaseExpiresAt: new Date(now.getTime() + PROCESSING_LEASE_MS),
+    }).where(and(
       eq(evidenceItemsTable.id, evidenceItem.id),
       eq(evidenceItemsTable.profileId, profile.id),
-      inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
+      or(
+        inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
+        and(eq(evidenceItemsTable.importStatus, "processing"), or(
+          isNull(evidenceItemsTable.processingLeaseExpiresAt),
+          lt(evidenceItemsTable.processingLeaseExpiresAt, now),
+        )),
+      ),
     )).returning();
     if (!claimed) { res.status(409).json({ error: "This spreadsheet is already being processed" }); return; }
     const existing = await db.select({
@@ -396,14 +557,32 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
 
     let processedRows = 0, autoPostedRows = 0, inboxRows = 0, skippedRows = 0;
     const totalRowCount = Math.max(0, rows.length - mapping.headerRow - 1);
-    await db.update(evidenceItemsTable).set({
+    const [prepared] = await db.update(evidenceItemsTable).set({
       evidenceType: bankCsv ? "bank_csv" : "ledger",
       mappingSchema: mapping as unknown as Record<string, unknown>,
       totalRows: totalRowCount,
       processedRows: 0, autoPostedRows: 0, inboxRows: 0, skippedRows: 0,
-    }).where(eq(evidenceItemsTable.id, evidenceItem.id));
+    }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      eq(evidenceItemsTable.importStatus, "processing"),
+      eq(evidenceItemsTable.processingToken, processingToken),
+    )).returning();
+    if (!prepared) { res.status(409).json({ error: "This spreadsheet was reclaimed by another request" }); return; }
 
     for (let index = mapping.headerRow + 1; index < rows.length; index += 1) {
+      // Long imports renew their lease as they make progress. If a different
+      // request reclaimed the file after an interruption, stop before touching
+      // the next source row.
+      const [renewed] = await db.update(evidenceItemsTable).set({
+        processingLeaseExpiresAt: new Date(Date.now() + PROCESSING_LEASE_MS),
+      }).where(and(
+        eq(evidenceItemsTable.id, evidenceItem.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.importStatus, "processing"),
+        eq(evidenceItemsTable.processingToken, processingToken),
+      )).returning({ id: evidenceItemsTable.id });
+      if (!renewed) { res.status(409).json({ error: "This spreadsheet was reclaimed by another request" }); return; }
       const row = rows[index];
       if (handledRowIndexes.has(index)) { skippedRows += 1; continue; }
       // The mapped header is always before this loop. Only blank rows are
@@ -424,23 +603,34 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
       const conflictsWithCashDirection =
         (confirmedRow.amount > 0 && extracted.taxTreatment !== "income") ||
         (confirmedRow.amount < 0 && extracted.taxTreatment === "income");
+      const wroteRow = await db.transaction(async (tx) => {
+        const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.importStatus, "processing"),
+          eq(evidenceItemsTable.processingToken, processingToken),
+        )).for("update");
+        if (!owned) return false;
+        if (highConfidence && !conflictsWithCashDirection) {
+          const transaction = transactionFromExtracted(profile.id, evidenceItem.id, extracted, confirmedRow, evidenceTier, index, row);
+          await tx.insert(transactionsTable).values(transaction);
+        } else {
+          await tx.insert(inboxItemsTable).values({
+            profileId: profile.id, evidenceId: evidenceItem.id, date: confirmedRow.date,
+            description: confirmedRow.description, amount: confirmedRow.amount,
+            aiReasoning: conflictsWithCashDirection
+              ? `${extracted.aiReasoning} The suggested classification conflicts with the bank debit/credit direction, so please review it.`
+              : extracted.aiReasoning,
+            options: buildInboxOptions(extracted), status: "pending",
+            sourceRowIndex: index, rawRowData: row,
+          });
+        }
+        return true;
+      });
+      if (!wroteRow) { res.status(409).json({ error: "This spreadsheet was reclaimed by another request" }); return; }
       processedRows += 1;
-      if (highConfidence && !conflictsWithCashDirection) {
-        const transaction = transactionFromExtracted(profile.id, evidenceItem.id, extracted, confirmedRow, evidenceTier, index, row);
-        await db.insert(transactionsTable).values(transaction);
-        autoPostedRows += 1;
-      } else {
-        await db.insert(inboxItemsTable).values({
-          profileId: profile.id, evidenceId: evidenceItem.id, date: confirmedRow.date,
-          description: confirmedRow.description, amount: confirmedRow.amount,
-          aiReasoning: conflictsWithCashDirection
-            ? `${extracted.aiReasoning} The suggested classification conflicts with the bank debit/credit direction, so please review it.`
-            : extracted.aiReasoning,
-          options: buildInboxOptions(extracted), status: "pending",
-          sourceRowIndex: index, rawRowData: row,
-        });
-        inboxRows += 1;
-      }
+      if (highConfidence && !conflictsWithCashDirection) autoPostedRows += 1;
+      else inboxRows += 1;
     }
     // Recompute from persisted source-row identities so a resumed import reports
     // the complete batch, not only the rows processed during its final retry.
@@ -468,12 +658,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
       autoPostedRows: autoPostedTotal,
       inboxRows: inboxTotal,
       skippedRows: skippedTotal,
-    }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+      processingLeaseExpiresAt: null,
+      processingToken: null,
+    }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      eq(evidenceItemsTable.importStatus, "processing"),
+      eq(evidenceItemsTable.processingToken, processingToken),
+    )).returning();
+    if (!updated) { res.status(409).json({ error: "This spreadsheet was reclaimed by another request" }); return; }
     res.json({ evidence: updated, processedRows: processedTotal, autoPostedRows: autoPostedTotal, inboxRows: inboxTotal, skippedRows: skippedTotal });
   } catch (err) {
     req.log.error(err, "Failed to process spreadsheet batch");
-    await db.update(evidenceItemsTable).set({ importStatus: "error" })
-      .where(eq(evidenceItemsTable.id, req.params.evidenceId)).catch(() => undefined);
+    await db.update(evidenceItemsTable).set({ importStatus: "error", processingLeaseExpiresAt: null, processingToken: null })
+      .where(and(
+        eq(evidenceItemsTable.id, req.params.evidenceId),
+        eq(evidenceItemsTable.profileId, req.params.profileId),
+        eq(evidenceItemsTable.importStatus, "processing"),
+        eq(evidenceItemsTable.processingToken, processingToken),
+      )).catch(() => undefined);
     res.status(500).json({ error: "Failed to process spreadsheet batch" });
   }
 });
@@ -498,6 +701,8 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
     const [updated] = await db.update(transactionsTable).set({
       evidenceId: evidenceItem.id, evidenceTier: tier,
     }).where(eq(transactionsTable.id, transaction.id)).returning();
+    await db.update(evidenceItemsTable).set({ status: "processed" })
+      .where(eq(evidenceItemsTable.id, evidenceItem.id));
     res.json(updated);
   } catch (err) {
     req.log.error(err, "Failed to attach evidence");

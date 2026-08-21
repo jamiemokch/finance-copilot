@@ -3,5 +3,6 @@
 - [SME Finance Copilot PM audit changes](sme-copilot-pm-audit.md) — summary of all PM audit changes applied (priority tiers, Decision Memory, tax gap, Evidence animation, nav, tasks)
 - [SME Finance Copilot debug findings](sme-copilot-debug-aug2026.md) — root causes and fixes: plBreakdown/taxCalculation now reactive; resolveInboxItem recalculates tax; PeerBenchmark starts collapsed
 - [SME Finance Copilot idempotency](sme-copilot-idempotency.md) — retries need durable source identities and atomic outcome writes, not only client-side double-submit guards
+- [Resumable evidence processing](resumable-evidence-processing.md) — recovery leases must be fenced by a claim token before any financial outcome is persisted
 - [Income-tax estimate safeguards](income-tax-estimate-safeguards.md) — estimates use allowable ledger profit; tax-year-scoped personal income and unsupported accrual timing stay incomplete
 - [OpenAPI Zod number compatibility](openapi-zod-number-compatibility.md) — this generator emits unavailable zod.int() for integer schemas; use number for count-like fields

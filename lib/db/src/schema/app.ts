@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { createInsertSchema } from 'drizzle-zod';
 import { z } from 'zod/v4';
 import { usersTable } from './auth';
@@ -88,6 +89,12 @@ export const evidenceItemsTable = pgTable('evidence_items', {
   mappingSchema: jsonb('mapping_schema'),
   // idle | mapping | processing | done | error
   importStatus: text('import_status').notNull().default('idle'),
+  // A processor holds this short lease while extracting or importing. Expired
+  // leases can be reclaimed after a browser/network interruption.
+  processingLeaseExpiresAt: timestamp('processing_lease_expires_at', { withTimezone: true }),
+  // Changes with every lease claim. Final writes must present this token, which
+  // fences an older worker after its interrupted lease has been reclaimed.
+  processingToken: text('processing_token'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -137,6 +144,12 @@ export const transactionsTable = pgTable('transactions', {
     .$onUpdate(() => new Date()),
 }, (table) => [
   uniqueIndex('transactions_evidence_row_unique').on(table.evidenceId, table.sourceRowIndex),
+  // A document creates one outcome, unlike a spreadsheet where each source row
+  // is independently identified. This prevents a stale processor from posting
+  // the same document twice after its lease has been reclaimed.
+  uniqueIndex('transactions_document_evidence_unique')
+    .on(table.evidenceId)
+    .where(sql`${table.evidenceId} is not null and ${table.sourceRowIndex} is null`),
   index('transactions_profile_date_idx').on(table.profileId, table.date, table.createdAt),
 ]);
 
@@ -173,6 +186,9 @@ export const inboxItemsTable = pgTable('inbox_items', {
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
 }, (table) => [
   uniqueIndex('inbox_evidence_row_unique').on(table.evidenceId, table.sourceRowIndex),
+  uniqueIndex('inbox_document_evidence_unique')
+    .on(table.evidenceId)
+    .where(sql`${table.evidenceId} is not null and ${table.sourceRowIndex} is null`),
 ]);
 
 export const insertInboxItemSchema = createInsertSchema(inboxItemsTable).omit({
