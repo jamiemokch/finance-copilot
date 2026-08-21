@@ -287,6 +287,33 @@ paths:
               schema:
                 $ref: '#/components/schemas/Profile'
 
+  /profiles/{profileId}:
+    patch:
+      tags: [Profiles]
+      operationId: updateProfile
+      summary: Update editable profile context and optional opening-position coverage
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: Profile not found or not owned by the current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
   /profiles/{profileId}/position:
     get:
       tags: [Position]
@@ -768,6 +795,29 @@ components:
           type: string
         taxReserve:
           type: number
+        industry:
+          type: string
+        vatRegistered:
+          type: boolean
+        accountingBasis:
+          type: string
+        openingPositionStatus:
+          type: string
+          enum: [not_started, skipped, complete]
+        openingBalance:
+          type: number
+          nullable: true
+        openingDetails:
+          type: string
+          nullable: true
+        coverageStartDate:
+          type: string
+          nullable: true
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        coverageEndDate:
+          type: string
+          nullable: true
+          pattern: '^\d{4}-\d{2}-\d{2}$'
         createdAt:
           type: string
 
@@ -781,6 +831,40 @@ components:
         type:
           type: string
           default: sole_trader
+
+    ProfileUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        industry:
+          type: string
+        vatRegistered:
+          type: boolean
+        taxYear:
+          type: string
+        accountingBasis:
+          type: string
+        taxReserve:
+          type: number
+        openingPositionStatus:
+          type: string
+          enum: [not_started, skipped, complete]
+        openingBalance:
+          type: number
+          nullable: true
+        openingDetails:
+          type: string
+          nullable: true
+        coverageStartDate:
+          type: string
+          nullable: true
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        coverageEndDate:
+          type: string
+          nullable: true
+          pattern: '^\d{4}-\d{2}-\d{2}$'
 
     PLBreakdown:
       type: object

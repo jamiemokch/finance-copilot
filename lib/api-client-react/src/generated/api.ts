@@ -44,6 +44,7 @@ import type {
   MobileTokenExchangeSuccess,
   Profile,
   ProfileInput,
+  ProfileUpdate,
   SAChecklistItem,
   SAChecklistUpdate,
   Transaction,
@@ -999,6 +1000,78 @@ export const useCreateProfile = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getCreateProfileMutationOptions(options));
+    }
+
+export const getUpdateProfileUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}`
+}
+
+/**
+ * @summary Update editable profile context and optional opening-position coverage
+ */
+export const updateProfile = async (profileId: string,
+    profileUpdate: ProfileUpdate, options?: Parameters<typeof customFetch>[1]): Promise<Profile> => {
+
+  return customFetch<Profile>(getUpdateProfileUrl(profileId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(profileUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateProfileMutationOptions = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateProfile>>, TError,{profileId: string;data: BodyType<ProfileUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateProfile>>, TError,{profileId: string;data: BodyType<ProfileUpdate>}, TContext> => {
+
+const mutationKey = ['updateProfile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateProfile>>, {profileId: string;data: BodyType<ProfileUpdate>}> = (props) => {
+          const {profileId,data} = props ?? {};
+
+          return  updateProfile(profileId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateProfileMutationResult = NonNullable<Awaited<ReturnType<typeof updateProfile>>>
+    export type UpdateProfileMutationBody = BodyType<ProfileUpdate>
+    export type UpdateProfileMutationError = ErrorType<ErrorEnvelope>
+
+    /**
+ * @summary Update editable profile context and optional opening-position coverage
+ */
+export const useUpdateProfile = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateProfile>>, TError,{profileId: string;data: BodyType<ProfileUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateProfile>>,
+        TError,
+        {profileId: string;data: BodyType<ProfileUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateProfileMutationOptions(options));
     }
 
 export const getGetFinancialPositionUrl = (profileId: string,) => {

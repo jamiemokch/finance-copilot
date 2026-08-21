@@ -36,6 +36,12 @@ export const profilesTable = pgTable('profiles', {
   vatRegistered: boolean('vat_registered').notNull().default(false),
   // Cash vs accrual accounting
   accountingBasis: text('accounting_basis').notNull().default('cash'),
+  // Optional opening-position setup for the current activity period
+  openingPositionStatus: text('opening_position_status').notNull().default('not_started'),
+  openingBalance: doublePrecision('opening_balance'),
+  openingDetails: text('opening_details'),
+  coverageStartDate: text('coverage_start_date'),
+  coverageEndDate: text('coverage_end_date'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .notNull()

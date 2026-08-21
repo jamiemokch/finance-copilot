@@ -21,6 +21,11 @@ export interface Profile {
   vatRegistered?: boolean;
   taxYear?: string;
   accountingBasis?: string;
+  openingPositionStatus?: 'not_started' | 'skipped' | 'complete';
+  openingBalance?: number | null;
+  openingDetails?: string | null;
+  coverageStartDate?: string | null;
+  coverageEndDate?: string | null;
 }
 
 export interface SharedContext {
@@ -773,6 +778,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
           taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
           accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+          openingPositionStatus: p.openingPositionStatus ?? 'not_started',
+          openingBalance: p.openingBalance ?? null,
+          openingDetails: p.openingDetails ?? null,
+          coverageStartDate: p.coverageStartDate ?? null,
+          coverageEndDate: p.coverageEndDate ?? null,
         });
         const mapped = profs.map(mapProfile);
         setProfiles(mapped);
@@ -844,6 +854,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
       taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
       accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+      openingPositionStatus: p.openingPositionStatus ?? 'not_started',
+      openingBalance: p.openingBalance ?? null,
+      openingDetails: p.openingDetails ?? null,
+      coverageStartDate: p.coverageStartDate ?? null,
+      coverageEndDate: p.coverageEndDate ?? null,
     };
     setProfiles(prev => [...prev, newProfile]);
     return p.id;
@@ -856,6 +871,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       vatRegistered: updates.vatRegistered,
       taxYear: updates.taxYear,
       accountingBasis: updates.accountingBasis,
+      openingPositionStatus: updates.openingPositionStatus,
+      openingBalance: updates.openingBalance,
+      openingDetails: updates.openingDetails,
+      coverageStartDate: updates.coverageStartDate,
+      coverageEndDate: updates.coverageEndDate,
     });
     setProfiles(prev => prev.map(p =>
       p.id === id
@@ -865,6 +885,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             name: updated.name,
             industry: (updated as Record<string, unknown>).industry as string | undefined,
             vatRegistered: (updated as Record<string, unknown>).vatRegistered as boolean | undefined,
+            openingPositionStatus: updated.openingPositionStatus ?? 'not_started',
+            openingBalance: updated.openingBalance ?? null,
+            openingDetails: updated.openingDetails ?? null,
+            coverageStartDate: updated.coverageStartDate ?? null,
+            coverageEndDate: updated.coverageEndDate ?? null,
           }
         : p
     ));
@@ -1049,6 +1074,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
       taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
       accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+      openingPositionStatus: p.openingPositionStatus ?? 'not_started',
+      openingBalance: p.openingBalance ?? null,
+      openingDetails: p.openingDetails ?? null,
+      coverageStartDate: p.coverageStartDate ?? null,
+      coverageEndDate: p.coverageEndDate ?? null,
     });
     setProfiles(profs.map(mapProfile));
     setActiveProfileId(profileId);

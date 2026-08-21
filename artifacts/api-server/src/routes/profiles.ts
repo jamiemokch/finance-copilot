@@ -66,6 +66,12 @@ router.patch("/profiles/:profileId", async (req, res) => {
   const APEntrySchema = z.object({
     name: z.string(), amount: z.number(), daysUntilDue: z.number().default(30),
   });
+  const ISODateSchema = z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD dates")
+    .refine((value) => {
+      const date = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+    }, "Use a real calendar date");
 
   const body = z.object({
     name: z.string().min(1).optional(),
@@ -77,6 +83,11 @@ router.patch("/profiles/:profileId", async (req, res) => {
     cashAccounts: z.array(CashAccountSchema).optional(),
     arEntries: z.array(AREntrySchema).optional(),
     apEntries: z.array(APEntrySchema).optional(),
+    openingPositionStatus: z.enum(["not_started", "skipped", "complete"]).optional(),
+    openingBalance: z.number().finite().optional().nullable(),
+    openingDetails: z.string().trim().max(2000).optional().nullable(),
+    coverageStartDate: ISODateSchema.optional().nullable(),
+    coverageEndDate: ISODateSchema.optional().nullable(),
   }).safeParse(req.body);
 
   if (!body.success) { res.status(400).json({ error: "Invalid input", details: body.error.issues }); return; }
@@ -86,6 +97,37 @@ router.patch("/profiles/:profileId", async (req, res) => {
       and(eq(profilesTable.id, req.params.profileId), eq(profilesTable.userId, req.user.id))
     );
     if (!existing) { res.status(404).json({ error: "Profile not found" }); return; }
+
+    // Validate the complete resulting state rather than only the submitted
+    // patch. Users may edit one coverage field or one opening detail at a time.
+    const effectiveCoverageStart = body.data.coverageStartDate === undefined
+      ? existing.coverageStartDate
+      : body.data.coverageStartDate;
+    const effectiveCoverageEnd = body.data.coverageEndDate === undefined
+      ? existing.coverageEndDate
+      : body.data.coverageEndDate;
+    const effectiveOpeningStatus = body.data.openingPositionStatus === undefined
+      ? existing.openingPositionStatus
+      : body.data.openingPositionStatus;
+    const effectiveOpeningBalance = body.data.openingBalance === undefined
+      ? existing.openingBalance
+      : body.data.openingBalance;
+    const effectiveOpeningDetails = body.data.openingDetails === undefined
+      ? existing.openingDetails
+      : body.data.openingDetails;
+
+    if (effectiveCoverageStart && effectiveCoverageEnd && effectiveCoverageStart > effectiveCoverageEnd) {
+      res.status(400).json({ error: "Coverage end date must be on or after the start date" });
+      return;
+    }
+    if (
+      effectiveOpeningStatus === "complete" &&
+      effectiveOpeningBalance == null &&
+      !effectiveOpeningDetails?.trim()
+    ) {
+      res.status(400).json({ error: "Add an opening balance or detail before marking this complete" });
+      return;
+    }
 
     const updates: Record<string, unknown> = {};
     if (body.data.name !== undefined) updates.name = body.data.name;
@@ -97,6 +139,11 @@ router.patch("/profiles/:profileId", async (req, res) => {
     if (body.data.vatRegistered !== undefined) updates.vatRegistered = body.data.vatRegistered;
     if (body.data.taxYear !== undefined) updates.taxYear = body.data.taxYear;
     if (body.data.accountingBasis !== undefined) updates.accountingBasis = body.data.accountingBasis;
+    if (body.data.openingPositionStatus !== undefined) updates.openingPositionStatus = body.data.openingPositionStatus;
+    if (body.data.openingBalance !== undefined) updates.openingBalance = body.data.openingBalance;
+    if (body.data.openingDetails !== undefined) updates.openingDetails = body.data.openingDetails;
+    if (body.data.coverageStartDate !== undefined) updates.coverageStartDate = body.data.coverageStartDate;
+    if (body.data.coverageEndDate !== undefined) updates.coverageEndDate = body.data.coverageEndDate;
 
     const [updated] = await db.update(profilesTable)
       .set(updates as typeof profilesTable.$inferInsert)

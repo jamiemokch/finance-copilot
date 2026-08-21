@@ -4,7 +4,7 @@ import {
   Briefcase, Building2, UserCircle, Check, ShieldCheck,
   RotateCcw, Database, Save, Loader2,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 const INDUSTRIES = [
   { value: 'freelance_tech',        label: 'Technology / Freelance Tech' },
@@ -19,6 +19,17 @@ const INDUSTRIES = [
 ];
 
 const TAX_YEARS = ['2023/24', '2024/25', '2025/26'];
+
+function currentUkTaxYearDates() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const hasStarted = now.getMonth() > 3 || (now.getMonth() === 3 && now.getDate() >= 6);
+  const startYear = hasStarted ? year : year - 1;
+  return {
+    start: `${startYear}-04-06`,
+    end: `${startYear + 1}-04-05`,
+  };
+}
 
 export default function Settings() {
   const {
@@ -40,10 +51,35 @@ export default function Settings() {
   const [accountingBasis, setAccountingBasis] = useState(
     (activeProfile as Record<string, unknown>)?.accountingBasis as string ?? 'cash'
   );
+  const [openingPositionStatus, setOpeningPositionStatus] = useState(
+    activeProfile?.openingPositionStatus ?? 'not_started'
+  );
+  const [openingBalance, setOpeningBalance] = useState(
+    activeProfile?.openingBalance == null ? '' : String(activeProfile.openingBalance)
+  );
+  const [openingDetails, setOpeningDetails] = useState(activeProfile?.openingDetails ?? '');
+  const defaultCoverage = currentUkTaxYearDates();
+  const [coverageStartDate, setCoverageStartDate] = useState(activeProfile?.coverageStartDate ?? defaultCoverage.start);
+  const [coverageEndDate, setCoverageEndDate] = useState(activeProfile?.coverageEndDate ?? defaultCoverage.end);
 
   const [saving, setSaving] = useState(false);
   const [saveOk, setSaveOk] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState<'sample' | 'reset' | null>(null);
+
+  useEffect(() => {
+    const coverage = currentUkTaxYearDates();
+    setIndustry(activeProfile?.industry ?? 'other');
+    setVatRegistered(activeProfile?.vatRegistered ?? false);
+    setTaxYear(activeProfile?.taxYear ?? '2024/25');
+    setAccountingBasis(activeProfile?.accountingBasis ?? 'cash');
+    setOpeningPositionStatus(activeProfile?.openingPositionStatus ?? 'not_started');
+    setOpeningBalance(activeProfile?.openingBalance == null ? '' : String(activeProfile.openingBalance));
+    setOpeningDetails(activeProfile?.openingDetails ?? '');
+    setCoverageStartDate(activeProfile?.coverageStartDate ?? coverage.start);
+    setCoverageEndDate(activeProfile?.coverageEndDate ?? coverage.end);
+    setSaveError(null);
+  }, [activeProfileId]);
 
   const getTypeIcon = (type: string) => {
     if (type === 'company') return <Building2 className="w-5 h-5 text-purple-500" />;
@@ -56,15 +92,45 @@ export default function Settings() {
 
   const handleSave = async () => {
     if (!activeProfileId) return;
+    const parsedOpeningBalance = openingBalance.trim() === '' ? null : Number(openingBalance);
+    if (parsedOpeningBalance !== null && !Number.isFinite(parsedOpeningBalance)) {
+      setSaveError('Opening balance must be a valid number.');
+      return;
+    }
+    if ((coverageStartDate && !coverageEndDate) || (!coverageStartDate && coverageEndDate)) {
+      setSaveError('Add both coverage dates, or leave both for later.');
+      return;
+    }
+    if (coverageStartDate && coverageEndDate && coverageStartDate > coverageEndDate) {
+      setSaveError('Coverage end date must be on or after the start date.');
+      return;
+    }
+    if (openingPositionStatus === 'complete' && parsedOpeningBalance === null && !openingDetails.trim()) {
+      setSaveError('Add an opening balance or a short detail before marking this complete.');
+      return;
+    }
+
+    setSaveError(null);
     setSaving(true);
     try {
       // updateProfile persists to API and updates the store's profiles array in one step,
       // so derived values (tax deadline, SA year label, etc.) reflect the new values immediately.
-      await updateProfile(activeProfileId, { industry, vatRegistered, taxYear, accountingBasis });
+      await updateProfile(activeProfileId, {
+        industry,
+        vatRegistered,
+        taxYear,
+        accountingBasis,
+        openingPositionStatus,
+        openingBalance: parsedOpeningBalance,
+        openingDetails: openingDetails.trim() || null,
+        coverageStartDate: coverageStartDate || null,
+        coverageEndDate: coverageEndDate || null,
+      });
       setSaveOk(true);
       setTimeout(() => setSaveOk(false), 2500);
     } catch (err) {
       console.error('Settings save failed:', err);
+      setSaveError('Could not save your changes. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -224,6 +290,103 @@ export default function Settings() {
                   : saveOk
                     ? <><Check className="w-4 h-4" /> Saved!</>
                     : <><Save className="w-4 h-4" /> Save changes</>
+                }
+              </Button>
+            </div>
+          </Card>
+        </section>
+      )}
+
+      {/* ── Opening position & activity coverage ── */}
+      {activeProfile && (
+        <section>
+          <h2 className="text-xl font-serif mb-1">Opening position &amp; activity coverage</h2>
+          <p className="text-muted-foreground text-sm mb-4">
+            Record the period your current-year records cover. Opening details are optional and can be completed later.
+          </p>
+          <Card className="p-6 shadow-sm space-y-6">
+            <div>
+              <label className="text-sm font-medium block mb-2">Business activity covered by these records</label>
+              <p className="text-xs text-muted-foreground mb-3">
+                Confirm the period for the current UK tax year. You can edit this whenever your records change.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Coverage start date</span>
+                  <input
+                    type="date"
+                    value={coverageStartDate}
+                    onChange={event => setCoverageStartDate(event.target.value)}
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Coverage end date</span>
+                  <input
+                    type="date"
+                    value={coverageEndDate}
+                    onChange={event => setCoverageEndDate(event.target.value)}
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="border-t border-border pt-6">
+              <label className="text-sm font-medium block mb-2">Opening position</label>
+              <p className="text-xs text-muted-foreground mb-3">
+                This is optional context for the start of the covered period. It does not change your saved records.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Setup status</span>
+                  <select
+                    value={openingPositionStatus}
+                    onChange={event => setOpeningPositionStatus(event.target.value as 'not_started' | 'skipped' | 'complete')}
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="not_started">Not set up yet</option>
+                    <option value="skipped">I’ll add this later</option>
+                    <option value="complete">Opening details added</option>
+                  </select>
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Opening balance (optional)</span>
+                  <input
+                    inputMode="decimal"
+                    type="number"
+                    step="0.01"
+                    value={openingBalance}
+                    onChange={event => setOpeningBalance(event.target.value)}
+                    placeholder="0.00"
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  />
+                </label>
+              </div>
+              <label className="block mt-4 space-y-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Opening details (optional)</span>
+                <textarea
+                  value={openingDetails}
+                  onChange={event => setOpeningDetails(event.target.value)}
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="For example, money held for the business at the start of this period."
+                  className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+              </label>
+            </div>
+
+            {saveError && (
+              <p className="text-sm text-destructive" role="alert">{saveError}</p>
+            )}
+
+            <div className="flex justify-end">
+              <Button onClick={handleSave} disabled={saving} className="cursor-pointer gap-2">
+                {saving
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+                  : saveOk
+                    ? <><Check className="w-4 h-4" /> Saved!</>
+                    : <><Save className="w-4 h-4" /> Save setup</>
                 }
               </Button>
             </div>

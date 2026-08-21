@@ -5,24 +5,21 @@
  * SME Finance Copilot API
  * OpenAPI spec version: 0.1.0
  */
-import type { ProfileOpeningPositionStatus } from './profileOpeningPositionStatus';
+import type { ProfileUpdateOpeningPositionStatus } from './profileUpdateOpeningPositionStatus';
 
-export interface Profile {
-  id: string;
-  userId: string;
-  name: string;
-  type: string;
-  taxYear: string;
-  taxReserve?: number;
+export interface ProfileUpdate {
+  /** @minLength 1 */
+  name?: string;
   industry?: string;
   vatRegistered?: boolean;
+  taxYear?: string;
   accountingBasis?: string;
-  openingPositionStatus?: ProfileOpeningPositionStatus;
+  taxReserve?: number;
+  openingPositionStatus?: ProfileUpdateOpeningPositionStatus;
   openingBalance?: number | null;
   openingDetails?: string | null;
   /** @pattern ^\d{4}-\d{2}-\d{2}$ */
   coverageStartDate?: string | null;
   /** @pattern ^\d{4}-\d{2}-\d{2}$ */
   coverageEndDate?: string | null;
-  createdAt: string;
 }

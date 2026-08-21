@@ -34,6 +34,11 @@ description: Architecture decisions for the full-stack SME Finance Copilot — w
 - Explicit ledger classification is canonical; conventions such as an amount’s sign are legacy fallback only.
   **Why:** Bank or spreadsheet inputs can retain a positive cash value even when explicitly classified as an expense.
   **How to apply:** New ledger writers must persist the semantic type, and readers must prefer it whenever it exists.
+
+### Profile setup boundaries
+- Opening-position and business-activity coverage are optional profile metadata, never financial-memory entries or calculation inputs.
+  **Why:** Users need a lightweight, skippable way to describe record coverage without changing their saved ledger or being blocked from normal work.
+  **How to apply:** Keep this information profile-owned and editable in setup/review UI; do not derive totals, warnings, or transaction changes from it unless a later scoped feature explicitly requires that.
 - mapPLBreakdown: uses allowableAmount for deductible expenses (not raw amount)
 - nonDeductibleExpenses: separate PLBreakdown array, shown in UI but excluded from profit
 - monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal: all exposed from store

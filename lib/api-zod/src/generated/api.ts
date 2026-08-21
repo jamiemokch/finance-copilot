@@ -161,6 +161,10 @@ export const GetStorageObjectResponse = zod.unknown()
 /**
  * @summary List the authenticated user's profiles
  */
+export const listProfilesResponseCoverageStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const listProfilesResponseCoverageEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
 export const ListProfilesResponseItem = zod.object({
   "id": zod.string(),
   "userId": zod.string(),
@@ -168,6 +172,14 @@ export const ListProfilesResponseItem = zod.object({
   "type": zod.string(),
   "taxYear": zod.string(),
   "taxReserve": zod.number().optional(),
+  "industry": zod.string().optional(),
+  "vatRegistered": zod.boolean().optional(),
+  "accountingBasis": zod.string().optional(),
+  "openingPositionStatus": zod.enum(['not_started', 'skipped', 'complete']).optional(),
+  "openingBalance": zod.number().nullish(),
+  "openingDetails": zod.string().nullish(),
+  "coverageStartDate": zod.string().regex(listProfilesResponseCoverageStartDateRegExp).nullish(),
+  "coverageEndDate": zod.string().regex(listProfilesResponseCoverageEndDateRegExp).nullish(),
   "createdAt": zod.string()
 })
 export const ListProfilesResponse = zod.array(ListProfilesResponseItem)
@@ -184,6 +196,10 @@ export const CreateProfileBody = zod.object({
   "type": zod.string().default(createProfileBodyTypeDefault)
 })
 
+export const createProfileResponseCoverageStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const createProfileResponseCoverageEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
 export const CreateProfileResponse = zod.object({
   "id": zod.string(),
   "userId": zod.string(),
@@ -191,6 +207,63 @@ export const CreateProfileResponse = zod.object({
   "type": zod.string(),
   "taxYear": zod.string(),
   "taxReserve": zod.number().optional(),
+  "industry": zod.string().optional(),
+  "vatRegistered": zod.boolean().optional(),
+  "accountingBasis": zod.string().optional(),
+  "openingPositionStatus": zod.enum(['not_started', 'skipped', 'complete']).optional(),
+  "openingBalance": zod.number().nullish(),
+  "openingDetails": zod.string().nullish(),
+  "coverageStartDate": zod.string().regex(createProfileResponseCoverageStartDateRegExp).nullish(),
+  "coverageEndDate": zod.string().regex(createProfileResponseCoverageEndDateRegExp).nullish(),
+  "createdAt": zod.string()
+})
+
+
+/**
+ * @summary Update editable profile context and optional opening-position coverage
+ */
+export const UpdateProfileParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+
+export const updateProfileBodyCoverageStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const updateProfileBodyCoverageEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
+export const UpdateProfileBody = zod.object({
+  "name": zod.string().min(1).optional(),
+  "industry": zod.string().optional(),
+  "vatRegistered": zod.boolean().optional(),
+  "taxYear": zod.string().optional(),
+  "accountingBasis": zod.string().optional(),
+  "taxReserve": zod.number().optional(),
+  "openingPositionStatus": zod.enum(['not_started', 'skipped', 'complete']).optional(),
+  "openingBalance": zod.number().nullish(),
+  "openingDetails": zod.string().nullish(),
+  "coverageStartDate": zod.string().regex(updateProfileBodyCoverageStartDateRegExp).nullish(),
+  "coverageEndDate": zod.string().regex(updateProfileBodyCoverageEndDateRegExp).nullish()
+})
+
+export const updateProfileResponseCoverageStartDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const updateProfileResponseCoverageEndDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
+export const UpdateProfileResponse = zod.object({
+  "id": zod.string(),
+  "userId": zod.string(),
+  "name": zod.string(),
+  "type": zod.string(),
+  "taxYear": zod.string(),
+  "taxReserve": zod.number().optional(),
+  "industry": zod.string().optional(),
+  "vatRegistered": zod.boolean().optional(),
+  "accountingBasis": zod.string().optional(),
+  "openingPositionStatus": zod.enum(['not_started', 'skipped', 'complete']).optional(),
+  "openingBalance": zod.number().nullish(),
+  "openingDetails": zod.string().nullish(),
+  "coverageStartDate": zod.string().regex(updateProfileResponseCoverageStartDateRegExp).nullish(),
+  "coverageEndDate": zod.string().regex(updateProfileResponseCoverageEndDateRegExp).nullish(),
   "createdAt": zod.string()
 })
 

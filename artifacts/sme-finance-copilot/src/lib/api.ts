@@ -70,6 +70,11 @@ export interface APIProfile {
   cashAccounts?: unknown;
   arEntries?: unknown;
   apEntries?: unknown;
+  openingPositionStatus?: 'not_started' | 'skipped' | 'complete' | null;
+  openingBalance?: number | null;
+  openingDetails?: string | null;
+  coverageStartDate?: string | null;
+  coverageEndDate?: string | null;
   createdAt?: string;
 }
 
@@ -99,6 +104,11 @@ export const profilesApi = {
       cashAccounts?: Array<{ name: string; balance: number }>;
       arEntries?: Array<{ name: string; amount: number; daysPastDue?: number; invoiceCount?: number }>;
       apEntries?: Array<{ name: string; amount: number; daysUntilDue?: number }>;
+      openingPositionStatus?: 'not_started' | 'skipped' | 'complete';
+      openingBalance?: number | null;
+      openingDetails?: string | null;
+      coverageStartDate?: string | null;
+      coverageEndDate?: string | null;
     },
   ) =>
     apiFetch<APIProfile>(`/profiles/${profileId}`, {

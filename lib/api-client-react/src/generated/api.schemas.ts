@@ -66,6 +66,15 @@ export interface UploadUrlResponse {
   metadata?: UploadUrlRequest;
 }
 
+export type ProfileOpeningPositionStatus = typeof ProfileOpeningPositionStatus[keyof typeof ProfileOpeningPositionStatus];
+
+
+export const ProfileOpeningPositionStatus = {
+  not_started: 'not_started',
+  skipped: 'skipped',
+  complete: 'complete',
+} as const;
+
 export interface Profile {
   id: string;
   userId: string;
@@ -73,6 +82,16 @@ export interface Profile {
   type: string;
   taxYear: string;
   taxReserve?: number;
+  industry?: string;
+  vatRegistered?: boolean;
+  accountingBasis?: string;
+  openingPositionStatus?: ProfileOpeningPositionStatus;
+  openingBalance?: number | null;
+  openingDetails?: string | null;
+  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+  coverageStartDate?: string | null;
+  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+  coverageEndDate?: string | null;
   createdAt: string;
 }
 
@@ -80,6 +99,32 @@ export interface ProfileInput {
   /** @minLength 1 */
   name: string;
   type?: string;
+}
+
+export type ProfileUpdateOpeningPositionStatus = typeof ProfileUpdateOpeningPositionStatus[keyof typeof ProfileUpdateOpeningPositionStatus];
+
+
+export const ProfileUpdateOpeningPositionStatus = {
+  not_started: 'not_started',
+  skipped: 'skipped',
+  complete: 'complete',
+} as const;
+
+export interface ProfileUpdate {
+  /** @minLength 1 */
+  name?: string;
+  industry?: string;
+  vatRegistered?: boolean;
+  taxYear?: string;
+  accountingBasis?: string;
+  taxReserve?: number;
+  openingPositionStatus?: ProfileUpdateOpeningPositionStatus;
+  openingBalance?: number | null;
+  openingDetails?: string | null;
+  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+  coverageStartDate?: string | null;
+  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+  coverageEndDate?: string | null;
 }
 
 export interface PLBreakdown {
