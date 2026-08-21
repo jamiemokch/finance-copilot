@@ -240,6 +240,7 @@ export interface PLExpense {
   basis: string;
   evidenceRef?: string;
   isPending?: boolean;
+  inboxItemId?: string;   // links to InboxItem.id so we can remove on resolve
 }
 
 export interface PLBreakdown {
@@ -806,8 +807,8 @@ const initialPLBreakdown: PLBreakdown = {
     { label: 'Travel (client meetings)', amount: 420, category: 'Travel', basis: '15 journeys — rail and TfL receipts', evidenceRef: 'Rail + TfL receipts (15 items)' },
   ],
   pendingExpenses: [
-    { label: 'Apple Store purchase', amount: 1249, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: hardware vs software affects deductibility', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox' },
-    { label: 'Client meeting room hire', amount: 150, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: room hire vs entertainment affects allowability', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox' },
+    { label: 'Apple Store purchase', amount: 1249, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: hardware vs software affects deductibility', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox', inboxItemId: '1' },
+    { label: 'Client meeting room hire', amount: 150, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: room hire vs entertainment affects allowability', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox', inboxItemId: '3' },
   ],
 };
 
@@ -865,6 +866,40 @@ const initialCashBreakdown: CashBreakdown = {
   ],
 };
 
+// ─── Tax recalculator (pure — no side effects) ────────────────────────────────
+//  All UK 2023/24 constants kept here so they're easy to update.
+
+const TAX_CONFIG = {
+  propertyIncome:    10200,   // estimate pending Q3 upload
+  personalAllowance: 12570,
+  basicRate:         0.20,
+  niClass4Rate:      0.09,
+  niClass2:          179,
+  poaPaid:           1800,    // payments on account already made
+} as const;
+
+function computeTaxFromProfit(tradingProfit: number) {
+  const totalIncome    = tradingProfit + TAX_CONFIG.propertyIncome;
+  const taxableIncome  = Math.max(0, totalIncome - TAX_CONFIG.personalAllowance);
+  const incomeTax      = Math.round(taxableIncome * TAX_CONFIG.basicRate);
+  const niBase         = Math.max(0, tradingProfit - TAX_CONFIG.personalAllowance);
+  const niClass4       = Math.round(niBase * TAX_CONFIG.niClass4Rate);
+  const grossLiability = incomeTax + niClass4 + TAX_CONFIG.niClass2;
+  const balanceDue     = Math.max(0, grossLiability - TAX_CONFIG.poaPaid);
+  return { taxableIncome, incomeTax, niClass4, grossLiability, balanceDue };
+}
+
+/** Classify an inbox resolution text into its financial effect */
+function classifyResolution(res: string): 'deductible' | 'personal' {
+  const lower = res.toLowerCase();
+  if (lower.includes('personal') || lower.includes('not a business') || lower.includes('not business')) {
+    return 'personal';
+  }
+  // Everything else that the user explicitly selected is treated as a business deduction.
+  // AIA capital assets (hardware) are also 100% deductible via Annual Investment Allowance in year of purchase.
+  return 'deductible';
+}
+
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 const StoreContext = createContext<AppState | undefined>(undefined);
@@ -875,7 +910,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [sharedContext, setSharedContext] = useState<SharedContext>({
     name: 'Priya Shah', address: 'Flat 4, London, E8 2PC', utr: '1234567890', niNumber: 'AB123456C',
   });
-  const [positionItems] = useState(initialPositionItems);
+  const [positionItems, setPositionItems] = useState(initialPositionItems);
+  const [plBreakdown, setPlBreakdown] = useState(initialPLBreakdown);
+  const [taxCalculation, setTaxCalculation] = useState(initialTaxCalculation);
   const [inboxItems, setInboxItems] = useState(initialInboxItems);
   const [evidenceItems, setEvidenceItems] = useState(initialEvidenceItems);
   const [transactions, setTransactions] = useState(initialTransactions);
@@ -909,8 +946,89 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return id;
     },
     inboxItems,
-    resolveInboxItem: (id, res) =>
-      setInboxItems(prev => prev.map(i => i.id === id ? { ...i, status: 'resolved', customAnswer: res } : i)),
+    resolveInboxItem: (id, res) => {
+      // 1. Mark inbox item as resolved
+      const item = inboxItems.find(i => i.id === id);
+      setInboxItems(prev => prev.map(i => i.id === id ? { ...i, status: 'resolved', customAnswer: res } : i));
+
+      // 2. Auto-mark SA checklist sa3 done when ALL p2 inbox items have been resolved
+      const otherPending = inboxItems.filter(i => i.profileId === item?.profileId && i.id !== id && i.status === 'pending');
+      if (otherPending.length === 0) {
+        setSAChecklist(prev => prev.map(sa => sa.id === 'sa3' ? { ...sa, status: 'done' as const } : sa));
+      }
+
+      // 3. If item has no amount, nothing more to do
+      if (!item?.amount) return;
+
+      // 4. Classify resolution
+      const effect = classifyResolution(res);
+      if (effect === 'personal') return; // personal — no financial change
+
+      // 5. Compute updated P&L
+      const amount = item.amount;
+      const totalRevenue = plBreakdown.revenues.reduce((s, r) => s + r.amount, 0);
+
+      const newConfirmedExpenses: PLExpense[] = [
+        ...plBreakdown.confirmedExpenses,
+        {
+          label: item.description,
+          amount,
+          category: res.toLowerCase().includes('hardware') || res.toLowerCase().includes('laptop') || res.toLowerCase().includes('phone')
+            ? 'Equipment (AIA — fully deductible year of purchase)'
+            : 'Business expense — resolved from Inbox',
+          basis: `Inbox classification: "${res}"`,
+          evidenceRef: 'Inbox resolved',
+        },
+      ];
+      const newPendingExpenses = plBreakdown.pendingExpenses.filter(e => e.inboxItemId !== id);
+      const newConfirmedTotal = newConfirmedExpenses.reduce((s, e) => s + e.amount, 0);
+      const newTradingProfit  = totalRevenue - newConfirmedTotal;
+
+      setPlBreakdown(prev => ({
+        ...prev,
+        confirmedExpenses: newConfirmedExpenses,
+        pendingExpenses: newPendingExpenses,
+      }));
+
+      // 6. Recalculate tax from new profit
+      const tax = computeTaxFromProfit(newTradingProfit);
+
+      setTaxCalculation(prev => ({
+        ...prev,
+        lines: [
+          { label: 'Trading profit (Design Consulting)', amount: `£${newTradingProfit.toLocaleString()}`, note: `Revenue £${totalRevenue.toLocaleString()} − confirmed expenses £${newConfirmedTotal.toLocaleString()}` },
+          { label: 'Property rental profit', amount: '£10,200', note: 'Gross rental £12,000 − letting agent fees £1,800 (Q3 estimate pending)' },
+          { label: 'Personal allowance', amount: '−£12,570', note: 'Standard 2023/24 personal allowance' },
+          { label: 'Taxable income', amount: `£${tax.taxableIncome.toLocaleString()}`, note: `£${newTradingProfit.toLocaleString()} + £10,200 − £12,570` },
+          { label: 'Income tax (Basic Rate 20%)', amount: `£${tax.incomeTax.toLocaleString()}`, note: `£${tax.taxableIncome.toLocaleString()} × 20%` },
+          { label: 'Class 4 NI (9% on profit above £12,570)', amount: `£${tax.niClass4.toLocaleString()}`, note: `(£${newTradingProfit.toLocaleString()} − £12,570) × 9%` },
+          { label: 'Class 2 NI', amount: `£${TAX_CONFIG.niClass2}`, note: 'Flat rate 2023/24' },
+          { label: 'Total estimated liability', amount: `£${tax.grossLiability.toLocaleString()}`, note: '' },
+          { label: 'Less: Prior payments on account', amount: `−£${TAX_CONFIG.poaPaid.toLocaleString()}`, note: 'Paid Jan and Jul 2024' },
+          { label: 'Balance due 31 Jan 2025', amount: `~£${tax.balanceDue.toLocaleString()}` },
+        ],
+        unresolvedItems: prev.unresolvedItems.filter(u =>
+          !(item.description && u.toLowerCase().includes(item.description.toLowerCase().slice(0, 12)))
+        ),
+      }));
+
+      // 7. Update KPI positionItems so Dashboard and Finances reflect the change immediately
+      setPositionItems(prev => prev.map(p => {
+        if (p.id === 'kpi1') return {
+          ...p,
+          value: `£${newTradingProfit.toLocaleString()}`,
+          rawValue: newTradingProfit,
+          basis: `Revenue £${totalRevenue.toLocaleString()} minus confirmed expenses £${newConfirmedTotal.toLocaleString()}. "${item.description}" resolved as: ${res}.`,
+        };
+        if (p.id === 'kpi2') return {
+          ...p,
+          value: `£${tax.balanceDue.toLocaleString()}`,
+          rawValue: tax.balanceDue,
+          basis: `Updated after resolving Inbox: "${item.description}" → ${res}. Taxable income £${tax.taxableIncome.toLocaleString()}.`,
+        };
+        return p;
+      }));
+    },
     chatHistory,
     addChatMessage: (sessionId, msg) =>
       setChatHistory(prev =>
@@ -963,8 +1081,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setSAChecklist(prev => prev.map(i => i.id === id ? { ...i, status } : i)),
     yearEndPackGenerated,
     setYearEndPackGenerated,
-    plBreakdown: initialPLBreakdown,
-    taxCalculation: initialTaxCalculation,
+    plBreakdown,           // reactive — updated by resolveInboxItem
+    taxCalculation,        // reactive — updated by resolveInboxItem
     arEntries: initialAREntries,
     apEntries: initialAPEntries,
     cashBreakdown: initialCashBreakdown,

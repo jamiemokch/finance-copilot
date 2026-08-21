@@ -784,7 +784,8 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
 function PeerBenchmarkSection() {
   const { peerCategory, benchmarks, updatePeerCategory } = useStore();
   const [isEditing, setIsEditing] = useState(false);
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  // Start collapsed — keeps ideas immediately visible without scrolling
+  const [isCollapsed, setIsCollapsed] = useState(true);
   const [editDraft, setEditDraft] = useState<typeof peerCategory | null>(null);
 
   if (!peerCategory) return null;

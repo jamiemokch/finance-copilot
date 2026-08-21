@@ -42,9 +42,10 @@ export default function Dashboard() {
 
   // Dashboard shows only "Do now" tier ideas with impact numbers
   const previewIdeas = activeIdeas.filter(i => i.priorityTier === 'do_now').slice(0, 3);
-  const taxBalanceDue = 6900;   // canonical: IT £6,526 + NI − PoA paid
-  const taxReserve = 3500;
-  const taxReserveGap = taxBalanceDue - taxReserve;
+  // Read tax gap from live store state — updates when inbox items are resolved
+  const taxBalanceDue = taxKpi?.rawValue ?? 6900;
+  const taxReserve = cashBreakdown.taxReserve;
+  const taxReserveGap = Math.max(0, taxBalanceDue - taxReserve);
 
   const urgentCompliance = activeComplianceItems
     .filter(c => c.status === 'due-soon' || c.status === 'overdue')

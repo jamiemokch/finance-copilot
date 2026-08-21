@@ -181,7 +181,10 @@ function InboxTab() {
   };
 
   const handleResolve = (item: InboxItem) => {
-    const answer = selectedOptions[item.id];
+    const primary = selectedOptions[item.id];
+    const sub = selectedOptions[`${item.id}_sub`];
+    // Include sub-option text so the store gets the full classification context
+    const answer = sub ? `${primary} — ${sub}` : primary;
     if (answer) resolveInboxItem(item.id, answer);
   };
 
@@ -344,7 +347,7 @@ function InboxTab() {
 // ─── Year-End Tab ─────────────────────────────────────────────────────────────
 
 function YearEndTab() {
-  const { saChecklist, updateSAChecklistItem, inboxItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems } = useStore();
+  const { saChecklist, updateSAChecklistItem, inboxItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems, plBreakdown } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeChecklist = saChecklist.filter(i => i.profileId === activeProfileId);
   const activeInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending');
@@ -503,8 +506,8 @@ function YearEndTab() {
                   {[
                     ['Entity', activeProfile?.name ?? '—'],
                     ['Period', '06 Apr 2023 – 05 Apr 2024'],
-                    ['Total Income', '£42,000'],
-                    ['Allowable Expenses', '£17,500'],
+                    ['Total Income', `£${plBreakdown.revenues.reduce((s, r) => s + r.amount, 0).toLocaleString()}`],
+                    ['Allowable Expenses', `£${plBreakdown.confirmedExpenses.reduce((s, e) => s + e.amount, 0).toLocaleString()}`],
                   ].map(([k, v]) => (
                     <div key={k} className="flex justify-between border-b border-border pb-2">
                       <dt className="text-muted-foreground">{k}</dt>
