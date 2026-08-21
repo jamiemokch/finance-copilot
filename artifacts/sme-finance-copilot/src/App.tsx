@@ -13,13 +13,10 @@ import Welcome from '@/pages/welcome';
 import Onboarding from '@/pages/onboarding';
 import Dashboard from '@/pages/dashboard';
 import Position from '@/pages/position';
-import Decisions from '@/pages/decisions';
-import Compliance from '@/pages/compliance';
+import BusinessIdeas from '@/pages/business-ideas';
+import Tasks from '@/pages/tasks';
 import Ingest from '@/pages/ingest';
 import Copilot from '@/pages/copilot';
-import Tax from '@/pages/tax';
-import Inbox from '@/pages/inbox';
-import YearEnd from '@/pages/year-end';
 import Match from '@/pages/match';
 import Settings from '@/pages/settings';
 
@@ -45,17 +42,21 @@ function Router() {
         <Switch>
           <Route path="/dashboard" component={Dashboard} />
           <Route path="/position" component={Position} />
-          <Route path="/decisions" component={Decisions} />
-          <Route path="/compliance" component={Compliance} />
-          <Route path="/inbox" component={Inbox} />
+          {/* Business Ideas — merges old /decisions and /tax */}
+          <Route path="/business-ideas" component={BusinessIdeas} />
+          <Route path="/decisions" component={BusinessIdeas} />
+          <Route path="/tax" component={BusinessIdeas} />
+          <Route path="/optimisation" component={BusinessIdeas} />
+          {/* Tasks — merges old /compliance, /inbox, /year-end */}
+          <Route path="/tasks" component={Tasks} />
+          <Route path="/compliance" component={Tasks} />
+          <Route path="/inbox" component={Tasks} />
+          <Route path="/year-end" component={Tasks} />
+          <Route path="/exceptions" component={Tasks} />
+          {/* Other */}
           <Route path="/copilot" component={Copilot} />
-          <Route path="/tax" component={Tax} />
-          <Route path="/year-end" component={YearEnd} />
           <Route path="/settings" component={Settings} />
-          {/* Kept aliases for compatibility if requested, but linking to the new views */}
           <Route path="/memory" component={Position} />
-          <Route path="/exceptions" component={Inbox} />
-          <Route path="/optimisation" component={Tax} />
           <Route path="/ingest" component={Ingest} />
           <Route path="/match" component={Match} />
           <Route component={NotFound} />

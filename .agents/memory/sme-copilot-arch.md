@@ -1,37 +1,41 @@
 ---
 name: SME Finance Copilot architecture
-description: Key decisions and patterns for the sme-finance-copilot artifact
+description: Core design decisions for the frontend prototype — store shape, routing, page structure, and what types exist/don't exist
 ---
 
-## Architecture
-- Artifact: artifacts/sme-finance-copilot (React + Vite, TypeScript strict)
-- State: single StoreProvider in lib/store.tsx — all data is local state, no backend
-- Routing: wouter, base path from import.meta.env.BASE_URL
-- UI: custom component library at @/components/ui (Card, Badge, Button, Input, Label, etc.)
-- TypeScript: strict mode — always annotate .map() / .reduce() callback params explicitly
-- Badge variants available: default, secondary, outline, destructive — no 'warning' or 'success' variants
+## What it is
+Frontend-only React/Vite prototype for UK sole traders / landlords / micro limited companies.
+No backend, no real AI, all fictional data. Local state via `StoreProvider` (`src/lib/store.tsx`).
 
-## Pages & routes
-- /dashboard — cash-first KPIs, deadline, 2 decision card previews
-- /position — clickable KPIs with full drilldowns (P&L, tax calc, AR, AP, cash)
-- /inbox — guided AI resolution with sub-options
-- /copilot — chat history + split view
-- /tax — tax idea cards with status actions
-- /decisions — peer benchmarks + decision cards with full scenario comparison
-- /compliance — chronological compliance timeline
-- /year-end — checklist + locked Build Pack action
-- /settings — multi-profile switcher, shared context editor
-- FloatingCopilot in layout.tsx — driven by copilotTrigger state in store (cross-component)
+## Route map
+- `/` → Onboarding (landing)
+- `/dashboard` → Dashboard
+- `/position` → Financial Position (Finances)
+- `/business-ideas` → Business Ideas (merged Decisions + Tax Ideas)
+- `/tasks` → Tasks & Timeline (merged Inbox + Compliance + Year-End)
+- `/copilot` → Copilot history/search
+- `/settings` → Settings/Profile
+- `/ingest` → Upload records
+- `/decisions`, `/tax`, `/year-end` → stub files (route in App.tsx redirects to new pages)
 
-## Key store patterns
-- copilotTrigger / setCopilotTrigger: used by Decision Cards to pre-fill the floating Copilot chat
-- All drilldown data (plBreakdown, taxCalculation, arEntries, apEntries, cashBreakdown) is static prototype data in store; only decisionCards and inboxItems have mutable state
-- peerCategory and benchmarks are static for p2 (sole trader); not yet implemented for p1
+## Store types (current — post-restructure)
+### Present
+- `BusinessIdea` — replaces old `DecisionCard` + `TaxIdea`; has `editableAssumptions: AssumptionField[]`, `status: 'new'|'saved'|'actioned'|'dismissed'`, `category: BusinessIdeaCategory`
+- `AssumptionField` — name, label, value, unit, min, max, step
+- `DecisionMemoryEntry` — committed decisions with expectedPLImpact/cashImpact/taxImpact
+- `SAChecklistItem` — year-end readiness checklist
+- `BenchmarkMetric` — expanded with sourceFull, peerDefinition, sampleSize, isIllustrative
+- All benchmark data flagged `isIllustrative: true`
 
-**Why no backend:** This is a clickable product prototype only. Real HMRC filing, Open Banking, and AI inference are explicitly out of scope.
+### Removed (do NOT use — will cause TS errors)
+- `DecisionCard`, `TaxIdea` — deleted from store
+- `decisionCards`, `taxIdeas`, `yearEndReadiness` — removed from AppState
+- `updateDecisionCard`, `updateTaxIdeaStatus` — removed actions
 
-## Data model summary (store.tsx exported types)
-- Profile, SharedContext, PositionItem, InboxItem, TaxIdea, ChatMessage, ChatSession, TransactionItem
-- PeerCategory, BenchmarkMetric, DecisionCard (+ DecisionScenario), ComplianceItem
-- PLRevenue, PLExpense, PLBreakdown, TaxLine, TaxCalculation
-- AREntry, APEntry, CashAccount, CashFlow, CashBreakdown
+## Key architecture decisions
+- Scenario computation is a pure function `computeScenario(ideaId, assumptions)` in `business-ideas.tsx` — reruns on every assumption change, not stored in state
+- Committing a decision writes to `decisionMemory[]`; Financial Position reads this to show forecast impact
+- `copilot.tsx` labels all system messages with a "Demo" badge; floating copilot in layout.tsx also labels "Demo response"
+- Nav badges: Business Ideas shows count of new/saved ideas; Tasks shows pending inbox items
+
+**Why:** TypeScript narrowing quirk — do not add `disabled={idea.status === 'actioned'}` inside a block already guarded by `idea.status !== 'actioned'`; the types have no overlap and TS2367 fires.

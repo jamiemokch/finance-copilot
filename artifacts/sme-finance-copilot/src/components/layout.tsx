@@ -2,39 +2,42 @@ import { Link, useLocation } from 'wouter';
 import { 
   LayoutDashboard, 
   WalletCards, 
-  Inbox as InboxIcon, 
   MessageSquare, 
   Lightbulb, 
-  CalendarCheck,
   Settings,
   Menu,
   X,
   Bot,
-  BrainCircuit,
-  Clock as ClockIcon
+  CheckSquare,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
-import { Button, Card, Badge, Input } from '@/components/ui';
+import { Button, Card, Input } from '@/components/ui';
 import { useStore } from '@/lib/store';
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { inboxItems, activeProfileId, decisionCards } = useStore();
-  const activeInboxCount = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
-  const newDecisionsCount = decisionCards.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
+  const { inboxItems, activeProfileId, businessIdeas } = useStore();
+  const pendingInbox = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
+  const newIdeas = businessIdeas.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
+  const tasksCount = pendingInbox; // surface inbox count on Tasks
 
   const navItems = [
-    { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/position', label: 'Financial position', icon: WalletCards },
-    { href: '/inbox', label: 'Inbox', icon: InboxIcon, count: activeInboxCount },
+    { href: '/dashboard', label: 'Home', icon: LayoutDashboard },
+    { href: '/position', label: 'Finances', icon: WalletCards },
+    { href: '/business-ideas', label: 'Business Ideas', icon: Lightbulb, count: newIdeas },
+    { href: '/tasks', label: 'Tasks & Timeline', icon: CheckSquare, count: tasksCount },
     { href: '/copilot', label: 'Copilot', icon: MessageSquare },
-    { href: '/tax', label: 'Tax ideas', icon: Lightbulb },
-    { href: '/decisions', label: 'Decisions', icon: BrainCircuit, count: newDecisionsCount },
-    { href: '/year-end', label: 'Year-End', icon: CalendarCheck },
-    { href: '/compliance', label: 'Timeline', icon: ClockIcon },
   ];
+
+  // Determine which nav item is active (handle aliased routes)
+  const getIsActive = (href: string) => {
+    if (href === '/business-ideas') return ['/business-ideas', '/decisions', '/tax', '/optimisation'].includes(location);
+    if (href === '/tasks') return ['/tasks', '/compliance', '/inbox', '/year-end', '/exceptions'].includes(location);
+    if (href === '/position') return ['/position', '/memory'].includes(location);
+    return location === href;
+  };
 
   return (
     <div className="min-h-screen bg-background flex flex-col md:flex-row font-sans">
@@ -62,7 +65,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 px-4 py-4 md:py-0 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const active = location === item.href;
+            const active = getIsActive(item.href);
             return (
               <Link 
                 key={item.href} 
@@ -121,7 +124,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <main className="flex-1 flex flex-col min-w-0 relative">
         <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
           <div className="mb-6 rounded-lg bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 p-3 text-sm text-amber-800 dark:text-amber-200 flex items-center justify-center font-medium shadow-sm">
-            Prototype mode — fictional sample data
+            Prototype — fictional sample data. Copilot responses are mocked.
           </div>
           {children}
         </div>
@@ -137,7 +140,7 @@ function FloatingCopilot() {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([
-    { role: 'system', content: 'Hi! I am your finance companion. I have your full context. How can I help?' }
+    { role: 'system', content: 'Hi! I have your financial context ready. What would you like to know?' }
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -160,12 +163,16 @@ function FloatingCopilot() {
 
   const handleSend = () => {
     if (!input.trim()) return;
-    setMessages(prev => [...prev, { role: 'user', content: input }]);
+    const userMsg = input;
+    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setInput('');
     setIsTyping(true);
 
     setTimeout(() => {
-      setMessages(prev => [...prev, { role: 'system', content: "I'm a prototype companion, but I've saved that question to your history. In a real scenario, I'd give you a conservative, well-researched answer based on your exact financial position." }]);
+      setMessages(prev => [...prev, { 
+        role: 'system', 
+        content: "This is a demo response. When connected to a live AI, I would read your Financial Memory, relevant tax rules, benchmark data, and Decision Memory — then give you a sourced, conservative answer with calculation basis and any caveats flagged."
+      }]);
       setIsTyping(false);
     }, 1000);
   };
@@ -186,7 +193,12 @@ function FloatingCopilot() {
             
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-background text-sm">
               {messages.map((msg, i) => (
-                <div key={i} className={cn("flex max-w-[85%]", msg.role === 'user' ? "ml-auto" : "")}>
+                <div key={i} className={cn("flex flex-col max-w-[85%]", msg.role === 'user' ? "ml-auto items-end" : "items-start")}>
+                  {msg.role === 'system' && (
+                    <span className="text-[10px] text-muted-foreground mb-1 flex items-center gap-1">
+                      <Bot className="w-3 h-3" /> Demo response
+                    </span>
+                  )}
                   <div className={cn(
                     "p-2.5 rounded-xl leading-relaxed",
                     msg.role === 'user' 

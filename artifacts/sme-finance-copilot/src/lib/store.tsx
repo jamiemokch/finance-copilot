@@ -46,19 +46,6 @@ export interface InboxItem {
   customAnswer?: string;
 }
 
-export interface TaxIdea {
-  id: string;
-  profileId: string;
-  title: string;
-  description: string;
-  impact: string;
-  confidence: 'high' | 'medium' | 'low';
-  status: 'new' | 'saved' | 'dismissed' | 'actioned';
-  assumptions: string[];
-  missingData?: string[];
-  deadlines?: string[];
-}
-
 export interface ChatMessage {
   id: string;
   role: 'user' | 'system';
@@ -104,41 +91,67 @@ export interface BenchmarkMetric {
   userCurrent: string;
   userStatus: 'above' | 'inline' | 'below' | 'unknown';
   source: string;
+  sourceFull: string;   // full citation
   dataPeriod: string;
   geography: string;
+  peerDefinition: string;
+  sampleSize: string;
   confidence: 'high' | 'medium' | 'low';
   freshness: string;
+  isIllustrative: boolean; // true = sample/illustrative, false = researched external figure
+  relevanceToIdea?: string; // which business idea this benchmark supports
 }
 
-// ─── Decision cards ───────────────────────────────────────────────────────────
+// ─── Business Ideas (merged Decisions + Tax Ideas) ───────────────────────────
 
-export interface DecisionScenario {
+export type BusinessIdeaCategory = 'tax' | 'cash' | 'growth' | 'operations' | 'hiring' | 'pricing' | 'assets';
+
+export interface AssumptionField {
+  key: string;
   label: string;
-  cashImpactOneOff: string;
-  cashImpactOngoing: string;
-  plImpact: string;
-  taxImpact: string;
-  benchmarkEffect: string;
-  paybackPeriod: string;
-  downsideCase: string;
+  value: number;
+  unit: string;
+  min: number;
+  max: number;
+  step: number;
 }
 
-export interface DecisionCard {
+export interface BusinessIdea {
   id: string;
   profileId: string;
+  category: BusinessIdeaCategory;
   title: string;
-  category: 'hiring' | 'asset' | 'pricing' | 'collection' | 'cost' | 'timing';
   summary: string;
   triggerBenchmark?: string;
+  benchmarkGap?: string;
   currentPosition: string;
   proposedAction: string;
-  scenarios: DecisionScenario[];
-  assumptions: string[];
-  confidence: 'high' | 'medium' | 'low';
+  editableAssumptions: AssumptionField[];
   whatMustBeTrue: string[];
-  status: 'new' | 'comparing' | 'saved' | 'actioned' | 'dismissed';
-  savedDecision?: string;
-  savedRationale?: string;
+  source: string;
+  confidence: 'high' | 'medium' | 'low';
+  impactLabel: string;
+  deadlines?: string[];
+  status: 'new' | 'saved' | 'actioned' | 'dismissed';
+  committedDecisionId?: string;
+}
+
+// ─── Decision Memory ──────────────────────────────────────────────────────────
+
+export interface DecisionMemoryEntry {
+  id: string;
+  profileId: string;
+  ideaId: string;
+  ideaTitle: string;
+  ideaCategory: BusinessIdeaCategory;
+  date: string;
+  assumptionsSnapshot: AssumptionField[];
+  userDecision: string;
+  userRationale: string;
+  expectedPLImpact: number;
+  expectedCashImpact: number;
+  expectedTaxImpact: number;
+  status: 'committed' | 'monitoring' | 'completed' | 'abandoned';
 }
 
 // ─── Compliance timeline ──────────────────────────────────────────────────────
@@ -156,6 +169,19 @@ export interface ComplianceItem {
   actionsRequired: string[];
   category: 'tax' | 'vat' | 'filing' | 'payroll' | 'accounts';
   periodCovered: string;
+}
+
+// ─── Self-Assessment checklist ────────────────────────────────────────────────
+
+export type SAChecklistCategory = 'data' | 'inbox' | 'filing' | 'payment';
+
+export interface SAChecklistItem {
+  id: string;
+  profileId: string;
+  label: string;
+  detail: string;
+  status: 'done' | 'pending' | 'blocked';
+  category: SAChecklistCategory;
 }
 
 // ─── Financial drilldown types ────────────────────────────────────────────────
@@ -246,32 +272,34 @@ export interface AppState {
   inboxItems: InboxItem[];
   resolveInboxItem: (id: string, resolution: string) => void;
 
-  taxIdeas: TaxIdea[];
-  updateTaxIdeaStatus: (id: string, status: TaxIdea['status']) => void;
-
   chatHistory: ChatSession[];
   addChatMessage: (sessionId: string, message: Omit<ChatMessage, 'id'>) => void;
   createChatSession: (title: string, initialMessage?: Omit<ChatMessage, 'id'>) => string;
-
-  yearEndPackGenerated: boolean;
-  setYearEndPackGenerated: (val: boolean) => void;
-  yearEndReadiness: {
-    evidenceMissing: number;
-    tasksRemaining: number;
-    deadline: string;
-  };
 
   // Peer benchmarking
   peerCategory: PeerCategory | null;
   updatePeerCategory: (data: Partial<PeerCategory>) => void;
   benchmarks: BenchmarkMetric[];
 
-  // Decision cards
-  decisionCards: DecisionCard[];
-  updateDecisionCard: (id: string, updates: Partial<DecisionCard>) => void;
+  // Business Ideas (merged decisions + tax ideas)
+  businessIdeas: BusinessIdea[];
+  updateBusinessIdea: (id: string, updates: Partial<BusinessIdea>) => void;
+  updateIdeaAssumption: (ideaId: string, key: string, value: number) => void;
+
+  // Decision Memory
+  decisionMemory: DecisionMemoryEntry[];
+  commitDecision: (entry: Omit<DecisionMemoryEntry, 'id'>) => string;
+  updateDecisionMemoryStatus: (id: string, status: DecisionMemoryEntry['status']) => void;
 
   // Compliance timeline
   complianceItems: ComplianceItem[];
+
+  // SA Checklist
+  saChecklist: SAChecklistItem[];
+  updateSAChecklistItem: (id: string, status: SAChecklistItem['status']) => void;
+
+  yearEndPackGenerated: boolean;
+  setYearEndPackGenerated: (val: boolean) => void;
 
   // Financial drilldowns
   plBreakdown: PLBreakdown;
@@ -359,24 +387,6 @@ const initialInboxItems: InboxItem[] = [
   },
 ];
 
-const initialTaxIdeas: TaxIdea[] = [
-  {
-    id: '1', profileId: 'p2', title: 'Claim Working From Home Allowance',
-    description: 'Since you work 4 days a week from home, you can claim a portion of your household bills or a flat rate to reduce your taxable profit.',
-    impact: '~£312 tax saved', confidence: 'high', status: 'new',
-    assumptions: ['You do not have a separate dedicated office space outside your home.'],
-    missingData: ['Actual household utility bills for the year (if claiming apportioned method)'],
-    deadlines: ['Action before 31 Jan 2025 (Self-Assessment deadline)'],
-  },
-  {
-    id: '2', profileId: 'p2', title: 'Accelerate Equipment Purchases',
-    description: "You have room in your basic rate band. Buying planned equipment before April 5th will reduce this year's tax bill.",
-    impact: 'Up to £900 tax delayed/saved', confidence: 'medium', status: 'new',
-    assumptions: ['You intend to make equipment purchases soon anyway.'],
-    deadlines: ['Must purchase before 5 April 2024'],
-  },
-];
-
 const initialTransactions: TransactionItem[] = [
   { id: 't1', date: '2024-03-01', description: 'Adobe Creative Cloud', amount: -49.99, category: 'Software', source: 'bank' },
   { id: 't2', date: '2024-03-05', description: 'Client Invoice #1042', amount: 3400, category: 'Sales', source: 'bank' },
@@ -405,7 +415,7 @@ const initialPeerCategory: PeerCategory = {
   id: 'pc1',
   profileId: 'p2',
   sector: 'Creative & Design Services',
-  geography: 'UK (London & South East)',
+  geography: 'UK — London & South East',
   sizeBand: 'Solo / 1–2 employees',
   customerType: 'B2B (Agency & Corporate clients)',
   revenueModel: 'Project fees + retainers',
@@ -414,121 +424,187 @@ const initialPeerCategory: PeerCategory = {
 
 const initialBenchmarks: BenchmarkMetric[] = [
   {
-    id: 'b1', categoryId: 'pc1', label: 'Revenue per Employee',
+    id: 'b1', categoryId: 'pc1',
+    label: 'Revenue per Employee',
     peerMedian: '£65,000', peerRange: '£42k–£95k', userCurrent: '~£36,500',
     userStatus: 'below',
-    source: 'Sample — ONS UK Business Survey 2022 (Creative sector, <10 employees)',
-    dataPeriod: '2022', geography: 'UK', confidence: 'medium',
-    freshness: '2022 data — live refresh is a future feature',
+    source: 'ONS UK Business Survey 2022 (Creative sector, <10 employees) — illustrative sample',
+    sourceFull: 'Office for National Statistics, Annual Business Survey 2022, Creative Industries sub-sector, micro-businesses',
+    dataPeriod: '2022',
+    geography: 'UK (England)',
+    peerDefinition: 'Solo / micro creative businesses, <2 employees, project-fee model, UK-registered',
+    sampleSize: 'n ≈ 2,400 (ONS survey — actual figures are illustrative for prototype)',
+    confidence: 'low',
+    freshness: '2022 data — 2–3 years old. Live benchmark refresh is a planned feature.',
+    isIllustrative: true,
+    relevanceToIdea: 'bi1',
   },
   {
-    id: 'b2', categoryId: 'pc1', label: 'Gross Margin',
+    id: 'b2', categoryId: 'pc1',
+    label: 'Gross Margin',
     peerMedian: '72%', peerRange: '58–85%', userCurrent: '~88%',
     userStatus: 'above',
-    source: 'Sample — Companies House micro-entity benchmarks 2022–23',
-    dataPeriod: '2022–23', geography: 'UK', confidence: 'medium',
-    freshness: '2022–23 data — live refresh is a future feature',
+    source: 'Companies House micro-entity benchmarks 2022–23 — illustrative sample',
+    sourceFull: 'Companies House / HMRC small company accounts analysis, creative sector micro-entities, 2022–23',
+    dataPeriod: '2022–23',
+    geography: 'UK',
+    peerDefinition: 'Micro limited companies and sole traders, creative/design services, £20k–£100k revenue',
+    sampleSize: 'Not disclosed (illustrative for prototype)',
+    confidence: 'low',
+    freshness: '2022–23 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true,
+    relevanceToIdea: undefined,
   },
   {
-    id: 'b3', categoryId: 'pc1', label: 'Operating Margin',
+    id: 'b3', categoryId: 'pc1',
+    label: 'Operating Margin',
     peerMedian: '28%', peerRange: '15–45%', userCurrent: '~67%',
     userStatus: 'above',
-    source: 'Sample — ICAEW SME benchmarking data 2023',
-    dataPeriod: '2023', geography: 'UK', confidence: 'medium',
-    freshness: '2023 data — live refresh is a future feature',
+    source: 'ICAEW SME benchmarking data 2023 — illustrative sample',
+    sourceFull: 'Institute of Chartered Accountants in England and Wales, SME Business Conditions Survey 2023, creative services segment',
+    dataPeriod: '2023',
+    geography: 'UK',
+    peerDefinition: 'Sole trader and micro limited company design/creative consultants, B2B clients',
+    sampleSize: 'Not disclosed (illustrative for prototype)',
+    confidence: 'low',
+    freshness: '2023 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true,
+    relevanceToIdea: undefined,
   },
   {
-    id: 'b4', categoryId: 'pc1', label: 'Debtor Days',
+    id: 'b4', categoryId: 'pc1',
+    label: 'Debtor Days',
     peerMedian: '28 days', peerRange: '14–55 days', userCurrent: '~34 days',
     userStatus: 'below',
-    source: 'Sample — Xero Small Business Insights UK 2023',
-    dataPeriod: '2023', geography: 'UK', confidence: 'high',
-    freshness: '2023 data — live refresh is a future feature',
+    source: 'Xero Small Business Insights UK 2023 — illustrative sample',
+    sourceFull: 'Xero Small Business Insights, UK, Q3 2023 — Services sector, <10 employees',
+    dataPeriod: '2023',
+    geography: 'UK',
+    peerDefinition: 'UK small service businesses, B2B invoicing model, <10 employees',
+    sampleSize: 'Not disclosed (illustrative for prototype)',
+    confidence: 'medium',
+    freshness: '2023 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true,
+    relevanceToIdea: 'bi2',
   },
 ];
 
-// ─── Decision cards ───────────────────────────────────────────────────────────
+// ─── Business Ideas ───────────────────────────────────────────────────────────
 
-const initialDecisionCards: DecisionCard[] = [
+const initialBusinessIdeas: BusinessIdea[] = [
   {
-    id: 'd1', profileId: 'p2', category: 'hiring',
-    title: 'Hire a junior designer / VA',
-    summary: 'Your revenue per employee sits below the peer median. Taking on one part-time hire could extend capacity and grow revenue without proportionally growing costs.',
+    id: 'bi1',
+    profileId: 'p2',
+    category: 'hiring',
+    title: 'Hire a junior designer or VA',
+    summary: 'Your revenue per employee sits well below the peer median. A part-time hire could extend capacity and grow revenue — but only if the pipeline supports it.',
     triggerBenchmark: 'Revenue per Employee',
-    currentPosition: 'You are billing ~£36,500 this year as a solo. Peer median for your category is £65,000 per employee.',
-    proposedAction: 'Hire one part-time junior designer or VA at ~£18,000/yr (0.5 FTE)',
-    scenarios: [
-      {
-        label: 'Base case (revenue grows 35%)',
-        cashImpactOneOff: '-£1,200 (recruitment, onboarding)',
-        cashImpactOngoing: '-£18,000/yr salary, +£12,750 incremental revenue = net -£5,250 in year 1',
-        plImpact: 'Salary is fully deductible — reduces taxable profit by £18,000',
-        taxImpact: 'Tax saving ~£3,600 in year 1 (basic rate 20%)',
-        benchmarkEffect: 'Revenue per employee moves from £36,500 to ~£49,250 — narrows gap to peer median',
-        paybackPeriod: '~18 months if revenue grows as projected',
-        downsideCase: 'If revenue does not grow, net cost is £18,000/yr. Ensure you have 6 months of salary in reserves before hiring.',
-      },
-      {
-        label: 'Conservative case (revenue grows 15%)',
-        cashImpactOneOff: '-£1,200',
-        cashImpactOngoing: '-£18,000/yr salary, +£5,475 incremental revenue = net -£12,525/yr',
-        plImpact: 'Still tax-deductible — saves ~£3,600 in tax',
-        taxImpact: 'Tax saving ~£3,600',
-        benchmarkEffect: 'Revenue per employee reaches ~£42,975 — approaches peer lower quartile',
-        paybackPeriod: 'Breakeven requires ~30% revenue growth',
-        downsideCase: 'Cash buffer required: £12,525/yr shortfall. With current £8,240 cash, runway is ~8 months before needing new revenue.',
-      },
+    benchmarkGap: '44% below peer median of £65,000',
+    currentPosition: 'You are billing ~£36,500 this year as a solo. Peer median for Creative & Design, solo/micro category is £65,000 per employee (illustrative — see benchmark detail).',
+    proposedAction: 'Hire one part-time junior designer or VA (~0.5 FTE)',
+    editableAssumptions: [
+      { key: 'salary', label: 'Annual salary', value: 18000, unit: '£', min: 12000, max: 30000, step: 500 },
+      { key: 'revenueGrowth', label: 'Expected revenue growth', value: 35, unit: '%', min: 0, max: 100, step: 5 },
+      { key: 'recruitmentCost', label: 'One-off recruitment cost', value: 1200, unit: '£', min: 0, max: 5000, step: 100 },
     ],
-    assumptions: ['Revenue will grow proportionally with added capacity', 'Salary at £18,000 for 0.5 FTE junior', 'You retain existing clients throughout the transition'],
+    whatMustBeTrue: [
+      'You have a consistent pipeline of more work than you can handle alone',
+      'Cash reserves can cover at least 6 months of salary before incremental revenue arrives',
+      'You have capacity to manage and train a junior hire',
+    ],
+    source: 'Financial Memory (YTD revenue) + ONS UK Business Survey 2022 (illustrative benchmark)',
     confidence: 'medium',
-    whatMustBeTrue: ['You have a consistent pipeline of more work than you can handle alone', 'Your cash reserves can cover at least 6 months of salary before incremental revenue arrives'],
+    impactLabel: 'Revenue growth + tax deduction',
     status: 'new',
   },
   {
-    id: 'd2', profileId: 'p2', category: 'collection',
+    id: 'bi2',
+    profileId: 'p2',
+    category: 'cash',
     title: 'Reduce debtor days',
-    summary: 'Your customers take ~34 days to pay on average — slightly above the peer median of 28 days. Tightening payment terms could free up ~£700 in working capital.',
+    summary: 'Your customers are taking ~34 days to pay — 6 days above the peer median. Tighter payment terms could free up working capital immediately.',
     triggerBenchmark: 'Debtor Days',
-    currentPosition: '£3,400 outstanding across 2 invoices. Current debtor days ~34. Peer median is 28 days.',
-    proposedAction: 'Switch to 14-day payment terms on new contracts; send payment reminders at day 10',
-    scenarios: [
-      {
-        label: 'Tighten terms to 14 days',
-        cashImpactOneOff: '+£700 cash freed immediately (estimated early collection)',
-        cashImpactOngoing: '+£700 permanent improvement in working capital cycle',
-        plImpact: 'No direct P&L impact',
-        taxImpact: 'No direct tax impact',
-        benchmarkEffect: 'Debtor days moves from ~34 to ~20 — above peer median',
-        paybackPeriod: 'Immediate — within 1 billing cycle',
-        downsideCase: 'Some clients may push back on shorter terms. Offer a 2% early-payment discount as incentive if needed.',
-      },
+    benchmarkGap: '6 days above peer median of 28 days',
+    currentPosition: '£3,400 outstanding across 2 invoices. Current debtor days ~34. Peer median for your category is 28 days (illustrative).',
+    proposedAction: 'Switch to 14-day payment terms on new contracts; automated reminders at day 10',
+    editableAssumptions: [
+      { key: 'targetDebtorDays', label: 'Target debtor days', value: 14, unit: 'days', min: 7, max: 30, step: 1 },
+      { key: 'earlyPaymentDiscount', label: 'Early payment discount to offer', value: 0, unit: '%', min: 0, max: 3, step: 0.5 },
     ],
-    assumptions: ['Existing clients will accept updated terms', 'No bad debts on current outstanding invoices'],
+    whatMustBeTrue: [
+      'New contract terms updated and communicated to clients',
+      'Invoice template updated with new payment terms',
+      'Automated reminder sequence set up',
+    ],
+    source: 'Financial Memory (AR balance, invoice dates) + Xero Small Business Insights UK 2023 (illustrative benchmark)',
     confidence: 'high',
-    whatMustBeTrue: ['New contract terms updated', 'Invoice template and payment reminder sequence set up'],
+    impactLabel: 'Working capital release',
     status: 'new',
   },
   {
-    id: 'd3', profileId: 'p2', category: 'asset',
+    id: 'bi3',
+    profileId: 'p2',
+    category: 'assets',
     title: 'Buy a professional display before year end',
-    summary: 'A professional display qualifies for Annual Investment Allowance, reducing your tax bill this year. Must be purchased before 5 April 2024.',
-    currentPosition: 'You use a standard laptop. Professional displays (£800–£1,500) are standard in your peer category and fully deductible in year of purchase under AIA.',
-    proposedAction: 'Purchase a professional display (e.g. £1,100) before 5 April 2024',
-    scenarios: [
-      {
-        label: 'Purchase before year end',
-        cashImpactOneOff: '-£1,100 cash',
-        cashImpactOngoing: 'No ongoing cost',
-        plImpact: 'Full £1,100 deducted from taxable profit via AIA',
-        taxImpact: '-£220 tax liability this year (basic rate 20%)',
-        benchmarkEffect: 'Not directly benchmarked — quality improvement for colour-critical work',
-        paybackPeriod: 'Tax saving is immediate (in your Jan 2025 return). Equipment payback depends on productivity gain.',
-        downsideCase: 'If profits fall below the basic rate threshold, tax saving reduces. Verify your profit estimate before purchase.',
-      },
+    summary: 'Annual Investment Allowance lets you deduct the full purchase price from this year\'s profit — reducing your January tax bill.',
+    currentPosition: 'You use a standard laptop. A professional display (£800–£1,500) qualifies for AIA — the full cost is deductible in the year of purchase under current HMRC rules.',
+    proposedAction: 'Purchase a professional display before 5 April 2024 to claim in the 23/24 return',
+    editableAssumptions: [
+      { key: 'purchasePrice', label: 'Purchase price', value: 1100, unit: '£', min: 500, max: 2500, step: 50 },
     ],
-    assumptions: ['Your profits remain ~£24,500 for the year', 'Purchase made before 5 April 2024'],
+    whatMustBeTrue: [
+      'You genuinely need the asset for business use (HMRC "wholly and exclusively" test)',
+      'Profits are sufficient to benefit from the deduction',
+      'Purchase must be made before 5 April 2024',
+    ],
+    source: 'HMRC Capital Allowances — Annual Investment Allowance 2023/24 (gov.uk)',
     confidence: 'high',
-    whatMustBeTrue: ['You genuinely need the asset for business use', 'Profits are sufficient to absorb the expense'],
+    impactLabel: 'Tax saving via AIA deduction',
+    deadlines: ['Purchase before 5 April 2024'],
+    status: 'new',
+  },
+  {
+    id: 'bi4',
+    profileId: 'p2',
+    category: 'tax',
+    title: 'Claim Working From Home allowance',
+    summary: 'Working from home regularly qualifies you for HMRC\'s flat-rate WFH allowance — a simple annual claim that reduces your taxable profit.',
+    currentPosition: 'You work from home approximately 4 days per week. HMRC\'s flat rate applies when you work from home 25+ hours/month and covers a proportion of household costs.',
+    proposedAction: 'Claim HMRC flat-rate WFH allowance in your Self-Assessment return',
+    editableAssumptions: [
+      { key: 'daysPerWeek', label: 'Days working from home per week', value: 4, unit: 'days', min: 1, max: 5, step: 1 },
+    ],
+    whatMustBeTrue: [
+      'You genuinely work from home those days (keep a log if HMRC requests evidence)',
+      'No separate rented office — the allowance reduces if you also rent workspace',
+      'Must be claimed in your Self-Assessment return by the filing deadline',
+    ],
+    source: 'HMRC EIM32760 — Working from Home expenses, flat-rate allowances 2023/24 (gov.uk)',
+    confidence: 'high',
+    impactLabel: 'Tax saving via WFH allowance',
+    deadlines: ['Claim in Self-Assessment by 31 Jan 2025'],
+    status: 'new',
+  },
+  {
+    id: 'bi5',
+    profileId: 'p2',
+    category: 'tax',
+    title: 'Accelerate planned equipment purchase',
+    summary: 'If you\'re planning equipment purchases anyway, buying before 5 April brings the tax deduction forward — reducing this year\'s bill rather than next year\'s.',
+    currentPosition: 'You have room in your basic rate band. Any equipment purchased before year-end is fully deductible via Annual Investment Allowance (up to £1m/yr).',
+    proposedAction: 'Bring forward planned equipment purchases to before 5 April 2024',
+    editableAssumptions: [
+      { key: 'equipmentBudget', label: 'Equipment budget', value: 1100, unit: '£', min: 500, max: 5000, step: 100 },
+    ],
+    whatMustBeTrue: [
+      'You genuinely intend to make these purchases — not solely for tax purposes',
+      'Your profits this year are sufficient to benefit from the deduction',
+      'Purchase must be made before 5 April 2024',
+    ],
+    source: 'HMRC Capital Allowances — AIA 2023/24 (gov.uk)',
+    confidence: 'medium',
+    impactLabel: 'Tax saving — timing benefit',
+    deadlines: ['Purchase before 5 April 2024'],
     status: 'new',
   },
 ];
@@ -592,6 +668,19 @@ const initialComplianceItems: ComplianceItem[] = [
   },
 ];
 
+// ─── SA Checklist ─────────────────────────────────────────────────────────────
+
+const initialSAChecklist: SAChecklistItem[] = [
+  { id: 'sa1', profileId: 'p2', label: 'Personal details verified', detail: 'UTR, NI number, address confirmed against HMRC records.', status: 'done', category: 'data' },
+  { id: 'sa2', profileId: 'p2', label: 'Bank reconciliation complete', detail: 'All synced accounts balance — 142 transactions matched.', status: 'done', category: 'data' },
+  { id: 'sa3', profileId: 'p2', label: 'Resolve Inbox items (2 pending)', detail: 'Apple Store £1,249 and meeting room £150 need classification before tax figure is final.', status: 'pending', category: 'inbox' },
+  { id: 'sa4', profileId: 'p2', label: 'Upload missing receipts', detail: '3 transactions over £100 have no linked receipt in your records.', status: 'pending', category: 'data' },
+  { id: 'sa5', profileId: 'p2', label: 'Confirm rental income figures', detail: 'Q3 letting agent statement not yet uploaded — rental profit estimate may change.', status: 'pending', category: 'data' },
+  { id: 'sa6', profileId: 'p2', label: 'Complete SA100 & SA103 forms', detail: 'Self-assessment form and self-employment supplementary pages.', status: 'pending', category: 'filing' },
+  { id: 'sa7', profileId: 'p2', label: 'Submit return by 31 Jan 2025', detail: 'Online filing deadline for 2023/24 tax year.', status: 'pending', category: 'filing' },
+  { id: 'sa8', profileId: 'p2', label: 'Pay balance + first payment on account', detail: '~£5,800 balance due + ~£2,900 first PoA — both due 31 Jan 2025.', status: 'pending', category: 'payment' },
+];
+
 // ─── Financial drilldown data ─────────────────────────────────────────────────
 
 const initialPLBreakdown: PLBreakdown = {
@@ -625,13 +714,13 @@ const initialTaxCalculation: TaxCalculation = {
     { label: 'Balance due 31 Jan 2025', amount: '~£5,800' },
   ],
   unresolvedItems: [
-    'Apple Store £1,249 (Inbox) — if Hardware: small capital adjustment; if Software: deductible in full — could change tax by up to £250',
+    'Apple Store £1,249 (Inbox) — if Hardware: capital adjustment; if Software: fully deductible — could change tax by up to £250',
     'Meeting room £150 (Inbox) — if disallowable: adds ~£30 to tax bill',
   ],
   assumptions: [
     'Trading profit figure excludes the 2 pending Inbox items',
     'No further equipment purchases before 5 April 2024',
-    'Student Loan repayment not shown (repaid via HMRC separately)',
+    'Student Loan repayment not shown (handled via HMRC separately)',
   ],
   taxBasis: 'UK Income Tax and National Insurance 2023/24 — Basic Rate band',
 };
@@ -674,12 +763,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   });
   const [positionItems] = useState(initialPositionItems);
   const [inboxItems, setInboxItems] = useState(initialInboxItems);
-  const [taxIdeas, setTaxIdeas] = useState(initialTaxIdeas);
   const [transactions, setTransactions] = useState(initialTransactions);
   const [chatHistory, setChatHistory] = useState(initialChatHistory);
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
   const [peerCategory, setPeerCategory] = useState<PeerCategory>(initialPeerCategory);
-  const [decisionCards, setDecisionCards] = useState(initialDecisionCards);
+  const [businessIdeas, setBusinessIdeas] = useState(initialBusinessIdeas);
+  const [decisionMemory, setDecisionMemory] = useState<DecisionMemoryEntry[]>([]);
+  const [saChecklist, setSAChecklist] = useState(initialSAChecklist);
   const [copilotTrigger, setCopilotTrigger] = useState<string | null>(null);
 
   const value: AppState = {
@@ -687,7 +777,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     activeProfileId,
     setActiveProfileId,
     addProfile: (p) => {
-      const id = Math.random().toString();
+      const id = Math.random().toString(36).slice(2);
       setProfiles(prev => [...prev, { ...p, id }]);
       return id;
     },
@@ -696,34 +786,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     positionItems,
     transactions,
     addTransaction: (transaction) =>
-      setTransactions(prev => [{ ...transaction, id: Math.random().toString() }, ...prev]),
+      setTransactions(prev => [{ ...transaction, id: Math.random().toString(36).slice(2) }, ...prev]),
     inboxItems,
     resolveInboxItem: (id, res) =>
       setInboxItems(prev => prev.map(i => i.id === id ? { ...i, status: 'resolved', customAnswer: res } : i)),
-    taxIdeas,
-    updateTaxIdeaStatus: (id, status) =>
-      setTaxIdeas(prev => prev.map(t => t.id === id ? { ...t, status } : t)),
     chatHistory,
     addChatMessage: (sessionId, msg) =>
       setChatHistory(prev =>
         prev.map(s =>
           s.id === sessionId
-            ? { ...s, messages: [...s.messages, { ...msg, id: Math.random().toString() }] }
+            ? { ...s, messages: [...s.messages, { ...msg, id: Math.random().toString(36).slice(2) }] }
             : s
         )
       ),
     createChatSession: (title, initialMsg) => {
-      const id = Math.random().toString();
-      const messages = initialMsg ? [{ ...initialMsg, id: Math.random().toString() }] : [];
+      const id = Math.random().toString(36).slice(2);
+      const messages = initialMsg ? [{ ...initialMsg, id: Math.random().toString(36).slice(2) }] : [];
       setChatHistory(prev => [{ id, title, date: new Date().toISOString().split('T')[0], messages }, ...prev]);
       return id;
-    },
-    yearEndPackGenerated,
-    setYearEndPackGenerated,
-    yearEndReadiness: {
-      evidenceMissing: 2,
-      tasksRemaining: inboxItems.filter(i => i.status === 'pending').length + 2,
-      deadline: '31 Jan 2025',
     },
 
     // Peer benchmarking
@@ -731,13 +811,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     updatePeerCategory: (data) => setPeerCategory(prev => ({ ...prev, ...data })),
     benchmarks: initialBenchmarks,
 
-    // Decision cards
-    decisionCards,
-    updateDecisionCard: (id, updates) =>
-      setDecisionCards(prev => prev.map(d => d.id === id ? { ...d, ...updates } : d)),
+    // Business Ideas
+    businessIdeas,
+    updateBusinessIdea: (id, updates) =>
+      setBusinessIdeas(prev => prev.map(b => b.id === id ? { ...b, ...updates } : b)),
+    updateIdeaAssumption: (ideaId, key, value) =>
+      setBusinessIdeas(prev => prev.map(b =>
+        b.id === ideaId
+          ? { ...b, editableAssumptions: b.editableAssumptions.map(a => a.key === key ? { ...a, value } : a) }
+          : b
+      )),
+
+    // Decision Memory
+    decisionMemory,
+    commitDecision: (entry) => {
+      const id = Math.random().toString(36).slice(2);
+      setDecisionMemory(prev => [{ ...entry, id }, ...prev]);
+      // Mark the idea as saved
+      setBusinessIdeas(prev => prev.map(b =>
+        b.id === entry.ideaId ? { ...b, status: 'saved', committedDecisionId: id } : b
+      ));
+      return id;
+    },
+    updateDecisionMemoryStatus: (id, status) =>
+      setDecisionMemory(prev => prev.map(d => d.id === id ? { ...d, status } : d)),
 
     // Compliance
     complianceItems: initialComplianceItems,
+
+    // SA Checklist
+    saChecklist,
+    updateSAChecklistItem: (id, status) =>
+      setSAChecklist(prev => prev.map(i => i.id === id ? { ...i, status } : i)),
+
+    yearEndPackGenerated,
+    setYearEndPackGenerated,
 
     // Drilldowns (static for prototype)
     plBreakdown: initialPLBreakdown,
