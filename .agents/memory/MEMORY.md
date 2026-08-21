@@ -1,0 +1,1 @@
+- [SME Finance Copilot architecture](sme-copilot-arch.md) — frontend-only React/Vite prototype, local state via StoreProvider; no backend, no real AI, fictional data only

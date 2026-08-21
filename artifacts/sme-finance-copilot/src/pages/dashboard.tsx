@@ -1,16 +1,33 @@
 import { Card, Badge, Button } from '@/components/ui';
 import { useStore } from '@/lib/store';
-import { WalletCards, Clock, CheckCircle2, ChevronRight, Inbox as InboxIcon } from 'lucide-react';
+import { WalletCards, Clock, CheckCircle2, ChevronRight, Inbox as InboxIcon, BrainCircuit } from 'lucide-react';
 import { Link } from 'wouter';
 
 export default function Dashboard() {
-  const { positionItems, activeProfileId, profiles, inboxItems } = useStore();
+  const { positionItems, activeProfileId, profiles, inboxItems, decisionCards, complianceItems } = useStore();
   
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activePositionItems = positionItems.filter(i => i.profileId === activeProfileId);
   const activeInboxItems = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending');
+  const activeDecisionCards = decisionCards.filter(d => d.profileId === activeProfileId);
+  const activeComplianceItems = complianceItems.filter(c => c.profileId === activeProfileId);
 
-  const mainKpis = activePositionItems.filter(i => i.type === 'kpi').slice(0, 4);
+  const mainKpis = activePositionItems.filter(i => 
+    i.type === 'kpi' && ['Available Cash', 'YTD Profit/Loss', 'Estimated Tax'].includes(i.title)
+  ).sort((a, b) => {
+    const order = ['Available Cash', 'YTD Profit/Loss', 'Estimated Tax'];
+    return order.indexOf(a.title) - order.indexOf(b.title);
+  });
+
+  const secondaryKpis = activePositionItems.filter(i => 
+    i.type === 'kpi' && ['Accounts Receivable', 'Accounts Payable'].includes(i.title)
+  );
+
+  const urgentDecisions = activeDecisionCards.filter(d => d.status === 'new').slice(0, 2);
+
+  const urgentCompliance = activeComplianceItems
+    .filter(c => c.status === 'due-soon' || c.status === 'overdue')
+    .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())[0];
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
@@ -41,7 +58,7 @@ export default function Dashboard() {
             View details <ChevronRight className="w-4 h-4" />
           </Link>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {mainKpis.map(kpi => (
             <Link key={kpi.id} href="/position">
               <Card className="p-5 cursor-pointer hover:border-primary/50 transition-colors group h-full flex flex-col bg-card shadow-sm">
@@ -56,65 +73,85 @@ export default function Dashboard() {
             </Link>
           ))}
         </div>
+        
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          {secondaryKpis.map(kpi => (
+            <Link key={kpi.id} href="/position">
+              <Card className="p-4 cursor-pointer hover:border-primary/50 transition-colors flex items-center justify-between bg-card shadow-sm">
+                <span className="text-sm text-muted-foreground font-medium">{kpi.title}</span>
+                <span className="text-lg font-serif text-foreground">{kpi.value}</span>
+              </Card>
+            </Link>
+          ))}
+        </div>
       </section>
 
       <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-4">
-          <h2 className="text-xl font-serif font-medium">Upcoming deadlines</h2>
-          <Card className="p-0 overflow-hidden shadow-sm">
-            <div className="divide-y divide-border">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-serif font-medium">Upcoming deadline</h2>
+            <Link href="/compliance" className="text-sm text-primary font-medium flex items-center gap-1 hover:underline cursor-pointer">
+              Timeline <ChevronRight className="w-4 h-4" />
+            </Link>
+          </div>
+          {urgentCompliance ? (
+            <Card className="p-0 overflow-hidden shadow-sm">
               <div className="p-5 flex items-start gap-4 hover:bg-secondary/30 transition-colors">
-                <div className="w-10 h-10 rounded-full bg-accent text-accent-foreground flex items-center justify-center shrink-0">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${urgentCompliance.status === 'overdue' ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-600'}`}>
                   <Clock className="w-5 h-5" />
                 </div>
                 <div className="flex-1">
                   <div className="flex justify-between items-start">
-                    <h3 className="font-medium text-foreground">Self-Assessment Tax Return</h3>
-                    <span className="text-sm font-medium text-foreground bg-secondary px-2 py-1 rounded-md">31 Jan</span>
+                    <h3 className="font-medium text-foreground">{urgentCompliance.title}</h3>
+                    <Badge variant={urgentCompliance.status === 'overdue' ? 'destructive' : 'secondary'} className={urgentCompliance.status !== 'overdue' ? 'bg-amber-100 text-amber-800 border-amber-200' : ''}>
+                      {new Date(urgentCompliance.dueDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                    </Badge>
                   </div>
-                  <p className="text-sm text-muted-foreground mt-1">For the 23/24 tax year. You have 3 tasks remaining to build your pack.</p>
-                  <Link href="/year-end">
-                    <Button variant="ghost" className="px-0 h-auto py-2 text-primary font-medium cursor-pointer hover:bg-transparent">
-                      View Year-End checklist &rarr;
+                  <p className="text-sm text-muted-foreground mt-1">{urgentCompliance.description}</p>
+                  <Link href="/compliance">
+                    <Button variant="ghost" className="px-0 h-auto py-2 text-primary font-medium cursor-pointer hover:bg-transparent mt-2">
+                      View details &rarr;
                     </Button>
                   </Link>
                 </div>
               </div>
-              <div className="p-5 flex items-start gap-4 hover:bg-secondary/30 transition-colors opacity-70">
-                <div className="w-10 h-10 rounded-full bg-secondary text-muted-foreground flex items-center justify-center shrink-0">
-                  <Clock className="w-5 h-5" />
-                </div>
-                <div className="flex-1">
-                  <div className="flex justify-between items-start">
-                    <h3 className="font-medium text-foreground">VAT Quarter 1</h3>
-                    <span className="text-sm font-medium text-muted-foreground bg-secondary px-2 py-1 rounded-md">07 May</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground mt-1">Quarterly return.</p>
-                </div>
-              </div>
-            </div>
-          </Card>
+            </Card>
+          ) : (
+            <Card className="p-5 text-center text-muted-foreground bg-secondary/20 shadow-sm border-dashed">
+              <CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-emerald-500 opacity-60" />
+              <p>No urgent deadlines approaching.</p>
+            </Card>
+          )}
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-xl font-serif font-medium">Quick actions</h2>
-          <Card className="p-5 shadow-sm space-y-3">
-            <Link href="/position">
-              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
-                <WalletCards className="w-5 h-5 mr-3 text-primary" /> View basis for financial position
-              </Button>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-serif font-medium">Key decisions</h2>
+            <Link href="/decisions" className="text-sm text-primary font-medium flex items-center gap-1 hover:underline cursor-pointer">
+              See all <ChevronRight className="w-4 h-4" />
             </Link>
-            <Link href="/inbox">
-              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
-                <InboxIcon className="w-5 h-5 mr-3 text-primary" /> Review {activeInboxItems.length} pending inbox items
-              </Button>
-            </Link>
-            <Link href="/tax">
-              <Button variant="outline" className="w-full justify-start h-12 text-base font-normal cursor-pointer bg-background hover:bg-secondary/50">
-                <Clock className="w-5 h-5 mr-3 text-primary" /> Explore proactive tax ideas
-              </Button>
-            </Link>
-          </Card>
+          </div>
+          
+          <div className="space-y-3">
+            {urgentDecisions.map(decision => (
+              <Link key={decision.id} href="/decisions">
+                <Card className="p-4 cursor-pointer hover:border-primary/50 transition-colors flex items-start gap-3 shadow-sm bg-card group">
+                  <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+                    <BrainCircuit className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-sm text-foreground">{decision.title}</h3>
+                    <p className="text-xs text-muted-foreground mt-1 line-clamp-1">{decision.summary}</p>
+                  </div>
+                </Card>
+              </Link>
+            ))}
+            {urgentDecisions.length === 0 && (
+              <Card className="p-5 text-center text-muted-foreground bg-secondary/20 shadow-sm border-dashed">
+                <p>No new decisions to review.</p>
+              </Card>
+            )}
+          </div>
         </div>
       </section>
     </div>

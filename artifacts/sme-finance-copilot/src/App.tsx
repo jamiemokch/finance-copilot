@@ -13,6 +13,8 @@ import Welcome from '@/pages/welcome';
 import Onboarding from '@/pages/onboarding';
 import Dashboard from '@/pages/dashboard';
 import Position from '@/pages/position';
+import Decisions from '@/pages/decisions';
+import Compliance from '@/pages/compliance';
 import Ingest from '@/pages/ingest';
 import Copilot from '@/pages/copilot';
 import Tax from '@/pages/tax';
@@ -43,6 +45,8 @@ function Router() {
         <Switch>
           <Route path="/dashboard" component={Dashboard} />
           <Route path="/position" component={Position} />
+          <Route path="/decisions" component={Decisions} />
+          <Route path="/compliance" component={Compliance} />
           <Route path="/inbox" component={Inbox} />
           <Route path="/copilot" component={Copilot} />
           <Route path="/tax" component={Tax} />

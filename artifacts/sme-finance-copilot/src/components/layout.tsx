@@ -9,7 +9,9 @@ import {
   Settings,
   Menu,
   X,
-  Bot
+  Bot,
+  BrainCircuit,
+  Clock as ClockIcon
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -19,8 +21,9 @@ import { useStore } from '@/lib/store';
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { inboxItems, activeProfileId } = useStore();
+  const { inboxItems, activeProfileId, decisionCards } = useStore();
   const activeInboxCount = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
+  const newDecisionsCount = decisionCards.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
 
   const navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -28,7 +31,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
     { href: '/inbox', label: 'Inbox', icon: InboxIcon, count: activeInboxCount },
     { href: '/copilot', label: 'Copilot', icon: MessageSquare },
     { href: '/tax', label: 'Tax ideas', icon: Lightbulb },
+    { href: '/decisions', label: 'Decisions', icon: BrainCircuit, count: newDecisionsCount },
     { href: '/year-end', label: 'Year-End', icon: CalendarCheck },
+    { href: '/compliance', label: 'Timeline', icon: ClockIcon },
   ];
 
   return (
@@ -115,6 +120,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 relative">
         <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
+          <div className="mb-6 rounded-lg bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 p-3 text-sm text-amber-800 dark:text-amber-200 flex items-center justify-center font-medium shadow-sm">
+            Prototype mode — fictional sample data
+          </div>
           {children}
         </div>
         
@@ -133,12 +141,22 @@ function FloatingCopilot() {
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  
+  const { copilotTrigger, setCopilotTrigger } = useStore();
+
+  useEffect(() => {
+    if (copilotTrigger) {
+      setIsOpen(true);
+      setInput(copilotTrigger);
+      setCopilotTrigger(null);
+    }
+  }, [copilotTrigger, setCopilotTrigger]);
 
   useEffect(() => {
     if (isOpen) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, isTyping, isOpen]);
+  }, [messages, isTyping, isOpen, input]);
 
   const handleSend = () => {
     if (!input.trim()) return;
