@@ -25,15 +25,28 @@ router.post("/profiles", async (req, res) => {
   const body = z.object({
     name: z.string().min(1),
     type: z.string().default("sole_trader"),
-    industry: z.string().default("other"),
+    industry: z.string().optional().default("other"),
+    vatRegistered: z.boolean().optional().default(false),
+    taxYear: z.string().optional().default("2024/25"),
+    accountingBasis: z.string().optional().default("cash"),
   }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "name is required" }); return; }
   try {
-    const [profile] = await db.insert(profilesTable).values({
+    const insertData: Record<string, unknown> = {
       userId: req.user.id,
       name: body.data.name,
       type: body.data.type,
-    }).returning();
+      industry: body.data.industry,
+      vatRegistered: body.data.vatRegistered,
+      taxYear: body.data.taxYear,
+    };
+    // accountingBasis handled via cast — column added in migration
+    if (body.data.accountingBasis) {
+      insertData.accountingBasis = body.data.accountingBasis;
+    }
+    const [profile] = await db.insert(profilesTable)
+      .values(insertData as typeof profilesTable.$inferInsert)
+      .returning();
     res.status(201).json(profile);
   } catch (err) {
     req.log.error(err);
@@ -58,6 +71,8 @@ router.patch("/profiles/:profileId", async (req, res) => {
     name: z.string().min(1).optional(),
     industry: z.string().optional(),
     vatRegistered: z.boolean().optional(),
+    taxYear: z.string().optional(),
+    accountingBasis: z.string().optional(),
     taxReserve: z.number().min(0).optional(),
     cashAccounts: z.array(CashAccountSchema).optional(),
     arEntries: z.array(AREntrySchema).optional(),
@@ -72,20 +87,19 @@ router.patch("/profiles/:profileId", async (req, res) => {
     );
     if (!existing) { res.status(404).json({ error: "Profile not found" }); return; }
 
-    const updates: Partial<typeof profilesTable.$inferInsert> = {};
+    const updates: Record<string, unknown> = {};
     if (body.data.name !== undefined) updates.name = body.data.name;
     if (body.data.taxReserve !== undefined) updates.taxReserve = body.data.taxReserve;
     if (body.data.cashAccounts !== undefined) updates.cashAccounts = body.data.cashAccounts;
     if (body.data.arEntries !== undefined) updates.arEntries = body.data.arEntries;
     if (body.data.apEntries !== undefined) updates.apEntries = body.data.apEntries;
-
-    // Handle new columns via type cast (schema fields added via migration)
-    const extUpdates = updates as Record<string, unknown>;
-    if (body.data.industry !== undefined) extUpdates.industry = body.data.industry;
-    if (body.data.vatRegistered !== undefined) extUpdates.vatRegistered = body.data.vatRegistered;
+    if (body.data.industry !== undefined) updates.industry = body.data.industry;
+    if (body.data.vatRegistered !== undefined) updates.vatRegistered = body.data.vatRegistered;
+    if (body.data.taxYear !== undefined) updates.taxYear = body.data.taxYear;
+    if (body.data.accountingBasis !== undefined) updates.accountingBasis = body.data.accountingBasis;
 
     const [updated] = await db.update(profilesTable)
-      .set(extUpdates as typeof profilesTable.$inferInsert)
+      .set(updates as typeof profilesTable.$inferInsert)
       .where(and(eq(profilesTable.id, req.params.profileId), eq(profilesTable.userId, req.user.id)))
       .returning();
 

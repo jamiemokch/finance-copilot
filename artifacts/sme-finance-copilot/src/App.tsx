@@ -23,53 +23,57 @@ import Settings from '@/pages/settings';
 const queryClient = new QueryClient();
 
 function Router() {
-  const [location, navigate] = useLocation();
-  const { isAuthenticated, isLoading } = useStore();
+  const [location] = useLocation();
+  const { isAuthenticated, isLoading, profiles, profilesLoaded } = useStore();
 
-  const isPublicRoute = location === '/' || location === '/welcome' || location === '/onboarding';
-
-  // Show loading spinner while auth resolves
+  // Block while auth resolves
   if (isLoading) return null;
 
-  // Auto-redirect authenticated users away from welcome screen
-  if (isAuthenticated && isPublicRoute) {
-    return <Redirect to="/dashboard" />;
-  }
+  // Block while authenticated — profile list is still loading from API
+  if (isAuthenticated && !profilesLoaded) return null;
 
-  // Auth gate: send unauthenticated users to welcome/login
-  if (!isAuthenticated && !isPublicRoute) {
-    return <Redirect to="/" />;
-  }
+  const isPublicRoute = location === '/' || location === '/welcome';
 
-  if (isPublicRoute) {
+  // ── Unauthenticated ──────────────────────────────────────────────────────────
+  if (!isAuthenticated) {
+    // Lock all non-public routes to Welcome
+    if (!isPublicRoute) return <Redirect to="/" />;
     return (
       <Switch>
         <Route path="/" component={Welcome} />
         <Route path="/welcome" component={Welcome} />
-        <Route path="/onboarding" component={Onboarding} />
-        <Route component={NotFound} />
+        <Route component={Welcome} />
       </Switch>
     );
   }
 
+  // ── Authenticated, no profile → onboarding ───────────────────────────────────
+  if (profiles.length === 0) {
+    if (location !== '/onboarding') return <Redirect to="/onboarding" />;
+    return <Onboarding />;
+  }
+
+  // ── Authenticated with profile, on a public/onboarding route → dashboard ─────
+  if (isPublicRoute || location === '/onboarding') {
+    return <Redirect to="/dashboard" />;
+  }
+
+  // ── Authenticated with profile → full app ─────────────────────────────────────
   return (
     <Layout>
       <RoutedErrorBoundary>
         <Switch>
           <Route path="/dashboard" component={Dashboard} />
           <Route path="/position" component={Position} />
-          {/* Business Ideas — merges old /decisions and /tax */}
           <Route path="/business-ideas" component={BusinessIdeas} />
           <Route path="/decisions" component={BusinessIdeas} />
           <Route path="/tax" component={BusinessIdeas} />
           <Route path="/optimisation" component={BusinessIdeas} />
-          {/* Tasks — merges old /compliance, /inbox, /year-end */}
           <Route path="/tasks" component={Tasks} />
           <Route path="/compliance" component={Tasks} />
           <Route path="/inbox" component={Tasks} />
           <Route path="/year-end" component={Tasks} />
           <Route path="/exceptions" component={Tasks} />
-          {/* Other */}
           <Route path="/copilot" component={Copilot} />
           <Route path="/settings" component={Settings} />
           <Route path="/memory" component={Position} />

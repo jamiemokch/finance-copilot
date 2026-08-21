@@ -74,7 +74,14 @@ export interface APIProfile {
 
 export const profilesApi = {
   list: () => apiFetch<APIProfile[]>("/profiles"),
-  create: (data: { name: string; type?: string; industry?: string }) =>
+  create: (data: {
+    name: string;
+    type?: string;
+    industry?: string;
+    vatRegistered?: boolean;
+    taxYear?: string;
+    accountingBasis?: string;
+  }) =>
     apiFetch<APIProfile>("/profiles", {
       method: "POST",
       body: JSON.stringify(data),
@@ -85,6 +92,8 @@ export const profilesApi = {
       name?: string;
       industry?: string;
       vatRegistered?: boolean;
+      taxYear?: string;
+      accountingBasis?: string;
       taxReserve?: number;
       cashAccounts?: Array<{ name: string; balance: number }>;
       arEntries?: Array<{ name: string; amount: number; daysPastDue?: number; invoiceCount?: number }>;
@@ -413,4 +422,6 @@ export const copilotApi = {
 export const demoApi = {
   seed: () => apiFetch<{ profileId: string; message: string }>("/demo/seed", { method: "POST" }),
   reset: () => apiFetch<{ profileId: string; message: string }>("/demo/reset", { method: "POST" }),
+  seedTransactions: (profileId: string) =>
+    apiFetch<{ success: boolean; message: string }>(`/demo/seed-transactions/${profileId}`, { method: "POST" }),
 };

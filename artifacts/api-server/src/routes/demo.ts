@@ -12,7 +12,7 @@ import {
   evidenceItemsTable,
   decisionMemoryTable,
 } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   DEMO_PROFILE_DEFAULTS,
   getDemoTransactions,
@@ -111,6 +111,37 @@ router.post("/demo/seed", async (req, res) => {
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to seed demo" });
+  }
+});
+
+// POST /demo/seed-transactions/:profileId — seed demo transactions into an existing profile
+router.post("/demo/seed-transactions/:profileId", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const userId = req.user.id;
+    const profileId = req.params.profileId;
+
+    // Verify the profile belongs to this user
+    const [profile] = await db.select().from(profilesTable).where(
+      and(eq(profilesTable.id, profileId), eq(profilesTable.userId, userId))
+    );
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+
+    // Seed transactions, inbox items, and SA checklist into the existing profile
+    const [transactions, inboxItems, checklist] = await Promise.all([
+      db.insert(transactionsTable).values(getDemoTransactions(profileId)).returning(),
+      db.insert(inboxItemsTable).values(getDemoInboxItems(profileId)).returning(),
+      db.insert(saChecklistItemsTable).values(getDemoSAChecklist(profileId)).returning(),
+    ]);
+
+    req.log.info({ profileId, userId }, "Demo transactions seeded to existing profile");
+    res.json({
+      success: true,
+      message: `Loaded ${transactions.length} transactions, ${inboxItems.length} inbox items, ${checklist.length} checklist items.`,
+    });
+  } catch (err) {
+    req.log.error(err);
+    res.status(500).json({ error: "Failed to seed transactions" });
   }
 });
 

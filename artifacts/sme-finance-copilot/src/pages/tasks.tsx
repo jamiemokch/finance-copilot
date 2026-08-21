@@ -370,8 +370,16 @@ function InboxTab() {
 // ─── Year-End Tab ─────────────────────────────────────────────────────────────
 
 function YearEndTab() {
-  const { saChecklist, updateSAChecklistItem, inboxItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems, plBreakdown } = useStore();
+  const { saChecklist, updateSAChecklistItem, inboxItems, evidenceItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems, plBreakdown } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
+
+  // ── Tax-year derived helpers ────────────────────────────────────────────────
+  const taxYear = (activeProfile as Record<string, unknown>)?.taxYear as string | undefined ?? '2024/25';
+  const saYearLabel = taxYear.slice(2); // '2024/25' → '24/25'
+  const startYear = parseInt(taxYear.split('/')[0], 10);
+  const taxPeriod = `6 Apr ${startYear} – 5 Apr ${startYear + 1}`; // '6 Apr 2024 – 5 Apr 2025'
+
+  const profileEvidenceItems = evidenceItems.filter(e => e.profileId === activeProfileId);
   const activeChecklist = saChecklist.filter(i => i.profileId === activeProfileId);
   const activeInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending');
   const saDeadline = complianceItems.find(c => c.profileId === activeProfileId && c.category === 'filing' && c.status !== 'done');
@@ -399,7 +407,7 @@ function YearEndTab() {
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <CalendarClock className="w-5 h-5 text-primary" />
-              <h2 className="text-xl font-medium">Self-Assessment 23/24 Readiness</h2>
+              <h2 className="text-xl font-medium">Self-Assessment {saYearLabel} Readiness</h2>
             </div>
             {saDeadline && (
               <p className="text-sm text-muted-foreground">
@@ -514,10 +522,10 @@ function YearEndTab() {
                 <Briefcase className="w-5 h-5 text-primary" /> Pack Preview
               </h2>
               <div className="flex gap-2">
-                <Button variant="outline" className="gap-2 cursor-pointer text-sm">
+                <Button variant="outline" className="gap-2 text-sm opacity-50 cursor-not-allowed" disabled title="Coming soon">
                   <Eye className="w-4 h-4" /> Accountant Review
                 </Button>
-                <Button className="gap-2 cursor-pointer text-sm bg-primary">
+                <Button className="gap-2 text-sm bg-primary opacity-50 cursor-not-allowed" disabled title="Coming soon">
                   <Download className="w-4 h-4" /> Download ZIP
                 </Button>
               </div>
@@ -528,7 +536,7 @@ function YearEndTab() {
                 <dl className="space-y-3 text-sm">
                   {[
                     ['Entity', activeProfile?.name ?? '—'],
-                    ['Period', '06 Apr 2023 – 05 Apr 2024'],
+                    ['Period', taxPeriod],
                     ['Total Income', `£${plBreakdown.revenues.reduce((s, r) => s + r.amount, 0).toLocaleString()}`],
                     ['Allowable Expenses', `£${plBreakdown.confirmedExpenses.reduce((s, e) => s + e.amount, 0).toLocaleString()}`],
                   ].map(([k, v]) => (
@@ -542,7 +550,12 @@ function YearEndTab() {
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-4">Contents</h3>
                 <ul className="space-y-2 text-sm">
-                  {['General Ledger (CSV)', 'Profit & Loss Statement (PDF)', 'Evidence Archive (42 receipts)', 'Assumptions & AI Reasoning Log'].map(f => (
+                  {[
+                    'General Ledger (CSV)',
+                    'Profit & Loss Statement (PDF)',
+                    `Evidence Archive (${profileEvidenceItems.length} file${profileEvidenceItems.length !== 1 ? 's' : ''})`,
+                    'Assumptions & AI Reasoning Log',
+                  ].map(f => (
                     <li key={f} className="flex items-center gap-3 p-2 rounded hover:bg-secondary/50">
                       <FileText className="w-4 h-4 text-primary" /> {f}
                     </li>

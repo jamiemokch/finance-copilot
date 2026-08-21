@@ -16,6 +16,10 @@ export interface Profile {
   id: string;
   type: ProfileType;
   name: string;
+  industry?: string;
+  vatRegistered?: boolean;
+  taxYear?: string;
+  accountingBasis?: string;
 }
 
 export interface SharedContext {
@@ -319,7 +323,11 @@ export interface AppState {
   profiles: Profile[];
   activeProfileId: string;
   setActiveProfileId: (id: string) => void;
-  addProfile: (profile: Omit<Profile, 'id'>) => string;
+  addProfile: (profile: Omit<Profile, 'id'>) => Promise<string>;
+  profilesLoaded: boolean;
+  updateProfile: (id: string, updates: Partial<Omit<Profile, 'id'>>) => Promise<void>;
+  refreshData: () => Promise<void>;
+  loadSampleData: () => Promise<void>;
 
   sharedContext: SharedContext;
   updateSharedContext: (data: Partial<SharedContext>) => void;
@@ -373,7 +381,7 @@ export interface AppState {
   copilotTrigger: string | null;
   setCopilotTrigger: (msg: string | null) => void;
 
-  resetDemoData: () => void;
+  resetDemoData: () => Promise<void>;
 }
 
 // ─── Mappers — API format → frontend format ───────────────────────────────────
@@ -633,6 +641,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // ── Profiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState('');
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
 
   // ── API data (raw, for computing derived types)
   const [rawPosition, setRawPosition] = useState<APIFinancialPosition | null>(null);
@@ -691,19 +700,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (authLoading || !authUser) return;
     (async () => {
       try {
-        // Seed demo on first login, then load profiles
-        await demoApi.seed().catch(() => {});
         const profs = await profilesApi.list().catch(() => []);
-        if (profs.length === 0) return;
-        const mapped: Profile[] = profs.map(p => ({
-          id: p.id, type: (p.type as ProfileType) || 'sole_trader', name: p.name,
-        }));
+        if (profs.length === 0) {
+          // New user — no profiles yet; signal routing to redirect to /onboarding
+          setProfilesLoaded(true);
+          return;
+        }
+        const mapProfile = (p: typeof profs[0]): Profile => ({
+          id: p.id,
+          type: (p.type as ProfileType) || 'sole_trader',
+          name: p.name,
+          industry: (p as Record<string, unknown>).industry as string | undefined,
+          vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
+          taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
+          accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+        });
+        const mapped = profs.map(mapProfile);
         setProfiles(mapped);
         const firstId = profs[0].id;
         setActiveProfileId(firstId);
         await fetchAll(firstId);
+        setProfilesLoaded(true);
       } catch (err) {
         console.error('[store] init failed', err);
+        setProfilesLoaded(true); // Unblock routing even on error
       }
     })();
   }, [authUser, authLoading, fetchAll]);
@@ -742,14 +762,58 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // ── Mutations
 
-  const addProfile = useCallback((profile: Omit<Profile, 'id'>): string => {
-    const tempId = Math.random().toString(36).slice(2);
-    profilesApi.create({ name: profile.name, type: profile.type }).then(p => {
-      setProfiles(prev => [...prev, { id: p.id, type: (p.type as ProfileType), name: p.name }]);
-      return p.id;
+  const addProfile = useCallback(async (profile: Omit<Profile, 'id'>): Promise<string> => {
+    const p = await profilesApi.create({
+      name: profile.name,
+      type: profile.type,
+      industry: profile.industry,
+      vatRegistered: profile.vatRegistered,
+      taxYear: profile.taxYear ?? '2024/25',
+      accountingBasis: profile.accountingBasis ?? 'cash',
     });
-    return tempId;
+    const newProfile: Profile = {
+      id: p.id,
+      type: (p.type as ProfileType) || 'sole_trader',
+      name: p.name,
+      industry: (p as Record<string, unknown>).industry as string | undefined,
+      vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
+      taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
+      accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+    };
+    setProfiles(prev => [...prev, newProfile]);
+    return p.id;
   }, []);
+
+  const updateProfile = useCallback(async (id: string, updates: Partial<Omit<Profile, 'id'>>): Promise<void> => {
+    const updated = await profilesApi.update(id, {
+      name: updates.name,
+      industry: updates.industry,
+      vatRegistered: updates.vatRegistered,
+      taxYear: updates.taxYear,
+      accountingBasis: updates.accountingBasis,
+    });
+    setProfiles(prev => prev.map(p =>
+      p.id === id
+        ? {
+            ...p,
+            ...updates,
+            name: updated.name,
+            industry: (updated as Record<string, unknown>).industry as string | undefined,
+            vatRegistered: (updated as Record<string, unknown>).vatRegistered as boolean | undefined,
+          }
+        : p
+    ));
+  }, []);
+
+  const refreshData = useCallback(async (): Promise<void> => {
+    if (activeProfileId) await fetchAll(activeProfileId);
+  }, [activeProfileId, fetchAll]);
+
+  const loadSampleData = useCallback(async (): Promise<void> => {
+    if (!activeProfileId) return;
+    await demoApi.seedTransactions(activeProfileId);
+    await fetchAll(activeProfileId);
+  }, [activeProfileId, fetchAll]);
 
   const addTransaction = useCallback((tx: Omit<TransactionItem, 'id'>) => {
     const taxTreatment = tx.amount > 0 ? 'income' : 'deductible';
@@ -853,6 +917,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setBusinessIdeas(prev => prev.map(idea =>
         idea.id === entry.ideaId ? { ...idea, status: 'saved', committedDecisionId: d.id } : idea
       ));
+      // Refresh position/financials so Decision Memory immediately reflects on Tasks
+      return fetchAll(activeProfileId);
     }).catch(console.error);
     return tempId;
   }, [activeProfileId]);
@@ -881,11 +947,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     saChecklistApi.update(activeProfileId, id, status === 'done').catch(console.error);
   }, [activeProfileId]);
 
-  const resetDemoData = useCallback(() => {
-    demoApi.reset().then(({ profileId }) => {
-      setActiveProfileId(profileId);
-      return fetchAll(profileId);
-    }).catch(console.error);
+  const resetDemoData = useCallback(async (): Promise<void> => {
+    const { profileId } = await demoApi.reset();
+    // Reload the full profiles list so the store reflects the newly created profile
+    const profs = await profilesApi.list().catch(() => []);
+    const mapProfile = (p: typeof profs[0]): Profile => ({
+      id: p.id,
+      type: (p.type as ProfileType) || 'sole_trader',
+      name: p.name,
+      industry: (p as Record<string, unknown>).industry as string | undefined,
+      vatRegistered: (p as Record<string, unknown>).vatRegistered as boolean | undefined,
+      taxYear: ((p as Record<string, unknown>).taxYear ?? '2024/25') as string,
+      accountingBasis: (p as Record<string, unknown>).accountingBasis as string | undefined,
+    });
+    setProfiles(profs.map(mapProfile));
+    setActiveProfileId(profileId);
+    await fetchAll(profileId);
   }, [fetchAll]);
 
   const updateSharedContext = useCallback((data: Partial<SharedContext>) => {
@@ -908,6 +985,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     activeProfileId,
     setActiveProfileId,
     addProfile,
+    profilesLoaded,
+    updateProfile,
+    refreshData,
+    loadSampleData,
 
     sharedContext,
     updateSharedContext,

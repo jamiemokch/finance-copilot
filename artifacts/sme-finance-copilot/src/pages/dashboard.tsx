@@ -35,10 +35,15 @@ export default function Dashboard() {
   );
 
   const cashKpi = kpiMap['Available Cash'];
-  const plKpi = kpiMap['YTD Profit/Loss'];
-  const taxKpi = kpiMap['Estimated Tax'];
-  const arKpi = kpiMap['Accounts Receivable'];
+  const plKpi = kpiMap['YTD Profit'];
+  const taxKpi = kpiMap['Est. Tax Due'];
+  const arKpi = kpiMap['Invoices Owed'];
   const apKpi = kpiMap['Accounts Payable'];
+
+  // ── Tax-year derived labels ──────────────────────────────────────────────────
+  const taxYear = (activeProfile as Record<string, unknown>)?.taxYear as string | undefined ?? '2024/25';
+  const saYearLabel = taxYear.slice(2); // '2024/25' → '24/25'
+  const taxDeadline = `31 Jan ${parseInt(taxYear.split('/')[0], 10) + 2}`; // '2024/25' → '31 Jan 2026'
 
   // Dashboard shows only "Do now" tier ideas with impact numbers
   const previewIdeas = activeIdeas.filter(i => i.priorityTier === 'do_now').slice(0, 3);
@@ -102,6 +107,29 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* ─── Empty state for new users ────────────────────────────────── */}
+      {plBreakdown.revenues.length === 0 && plBreakdown.confirmedExpenses.length === 0 && activeInboxItems.length === 0 && (
+        <div className="border-2 border-dashed border-primary/20 rounded-xl p-10 text-center space-y-4 bg-primary/2">
+          <div className="w-14 h-14 bg-primary/10 rounded-full flex items-center justify-center mx-auto">
+            <WalletCards className="w-7 h-7 text-primary" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-xl font-serif font-medium">Your financial picture starts here</h2>
+            <p className="text-muted-foreground max-w-sm mx-auto text-sm">
+              Upload your first bank statement, invoice, or receipt and the AI will categorise it and update your P&L automatically.
+            </p>
+          </div>
+          <div className="flex gap-3 justify-center flex-wrap">
+            <a href="/ingest" className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors cursor-pointer">
+              Add your first record →
+            </a>
+            <a href="/settings" className="inline-flex items-center gap-2 bg-background border border-border text-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-secondary transition-colors cursor-pointer">
+              Load sample data
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* ─── Financial Position ────────────────────────────────────────── */}
       {vatWarning && vatWarning.warning && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2 text-sm mb-4">
@@ -161,7 +189,7 @@ export default function Dashboard() {
                       <div className="flex justify-between items-center p-3 bg-background">
                         <div>
                           <p className="font-medium text-amber-700">− Tax reserve (ringfenced)</p>
-                          <p className="text-xs text-muted-foreground">Set aside toward £{taxBalanceDue.toLocaleString()} balance due Jan 2025</p>
+                          <p className="text-xs text-muted-foreground">Set aside toward £{taxBalanceDue.toLocaleString()} balance due {taxDeadline}</p>
                         </div>
                         <span className="font-semibold font-mono text-amber-700">−£{cashBreakdown.taxReserve.toLocaleString()}</span>
                       </div>
@@ -317,7 +345,7 @@ export default function Dashboard() {
                   <div>
                     <p className="text-sm text-muted-foreground font-medium mb-1">Estimated Tax</p>
                     <p className="text-3xl font-serif text-foreground">{taxKpi.value}</p>
-                    <p className="text-xs text-muted-foreground mt-1">balance due 31 Jan 2025</p>
+                    <p className="text-xs text-muted-foreground mt-1">balance due {taxDeadline}</p>
                   </div>
                   {expanded === 'tax' ? <ChevronUp className="w-4 h-4 text-muted-foreground mt-1" /> : <ChevronDown className="w-4 h-4 text-muted-foreground mt-1" />}
                 </div>
@@ -431,7 +459,7 @@ export default function Dashboard() {
                 <div className="flex-1 space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
                     <CalendarClock className="w-4 h-4 text-primary" />
-                    <span className="font-medium text-sm">Self Assessment 23/24 readiness</span>
+                    <span className="font-medium text-sm">Self Assessment {saYearLabel} readiness</span>
                     {saDeadline && (
                       <Badge variant="secondary" className="bg-amber-100 text-amber-800 border-amber-200 text-xs">
                         Due {new Date(saDeadline.dueDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
@@ -595,7 +623,7 @@ export default function Dashboard() {
                     </span>
                   )}
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
-                    Deadline: 31 Jan 2025
+                    Deadline: {taxDeadline}
                   </span>
                 </div>
               </div>

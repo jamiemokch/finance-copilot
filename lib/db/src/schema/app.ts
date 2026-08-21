@@ -31,6 +31,8 @@ export const profilesTable = pgTable('profiles', {
   // Industry/business context for AI classification
   industry: text('industry').notNull().default('other'),
   vatRegistered: boolean('vat_registered').notNull().default(false),
+  // Cash vs accrual accounting
+  accountingBasis: text('accounting_basis').notNull().default('cash'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .notNull()

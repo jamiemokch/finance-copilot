@@ -343,7 +343,7 @@ function UploadCard({ config, profileId, onComplete }: {
 export default function Evidence() {
   const {
     evidenceItems, addEvidenceItem, inboxItems, activeProfileId,
-    transactions, addTransaction, resetDemoData,
+    transactions, addTransaction, resetDemoData, refreshData,
   } = useStore();
   const [showManual, setShowManual] = useState(false);
   const [manualItem, setManualItem] = useState({
@@ -357,11 +357,10 @@ export default function Evidence() {
 
   const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
 
-  // Callback for upload cards to trigger store refetch
+  // Callback for upload cards to trigger store refetch — refreshes P&L, tax, inbox, evidence
   const handleUploadComplete = () => {
     setRefreshKey(k => k + 1);
-    // The store will re-fetch evidence on next render cycle
-    // via the evidenceApi list call from the add flow
+    refreshData().catch(console.error);
   };
 
   const handleAddManual = () => {
