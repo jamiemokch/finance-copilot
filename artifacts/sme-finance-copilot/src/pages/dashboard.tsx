@@ -156,7 +156,7 @@ export default function Dashboard() {
                       <div className="flex justify-between items-center p-3 bg-background">
                         <div>
                           <p className="font-medium text-amber-700">− Tax reserve (ringfenced)</p>
-                          <p className="text-xs text-muted-foreground">Set aside toward £6,924 balance due Jan 2025</p>
+                          <p className="text-xs text-muted-foreground">Set aside toward £{taxBalanceDue.toLocaleString()} balance due Jan 2025</p>
                         </div>
                         <span className="font-semibold font-mono text-amber-700">−£{cashBreakdown.taxReserve.toLocaleString()}</span>
                       </div>
@@ -170,7 +170,7 @@ export default function Dashboard() {
                       <div className="flex justify-between items-center p-3 bg-primary/5 border-t-2 border-primary/20">
                         <div>
                           <p className="font-semibold text-foreground">Available cash</p>
-                          <p className="text-xs text-muted-foreground">AR (£3,400) excluded — not yet collected</p>
+                          <p className="text-xs text-muted-foreground">AR (£{(arKpi?.rawValue ?? 0).toLocaleString()}) excluded — not yet collected</p>
                         </div>
                         <span className="text-xl font-serif font-semibold text-foreground">£{availableCash.toLocaleString()}</span>
                       </div>
@@ -579,10 +579,10 @@ export default function Dashboard() {
                 </p>
                 <div className="flex gap-3 mt-2.5 flex-wrap">
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
-                    Available cash: £6,090
+                    Available cash: £{availableCash.toLocaleString()}
                   </span>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
-                    AR overdue: £2,400 (Axiom)
+                    AR overdue: £{arEntries.filter(e => e.isOverdue).reduce((s, e) => s + e.amount, 0).toLocaleString()} (Axiom)
                   </span>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
                     Deadline: 31 Jan 2025
