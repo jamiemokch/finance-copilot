@@ -144,7 +144,7 @@ export function getDemoTransactions(profileId: string): InsertTransaction[] {
       allowablePercentage: 100,
       allowableAmount: -770,
     },
-  ];
+  ].map((transaction) => ({ ...transaction, evidenceTier: 0 }));
 }
 
 /** Inbox items to seed (pending classification) */

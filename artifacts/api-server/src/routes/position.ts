@@ -6,7 +6,7 @@ import {
 import { eq } from "drizzle-orm";
 import {
   computePLBreakdown, computeTaxForProfit, computeCashPosition, buildKPIs,
-  computeMonthlyTrend, computeVATWarning,
+  computeMonthlyTrend, computeVATWarning, computeEvidenceCoverage,
   type AccountBalance, type AREntry, type APEntry,
 } from "../lib/finance.js";
 import { generateBusinessIdeasAI, isConfigured } from "../lib/ai.js";
@@ -42,6 +42,7 @@ router.get("/profiles/:profileId/position", async (req, res) => {
     const kpis = buildKPIs(pl, tax, cash, arEntries, pendingInbox.length);
     const monthlyTrend = computeMonthlyTrend(transactions);
     const vatWarning = computeVATWarning(pl.revenues);
+    const evidenceCoverage = computeEvidenceCoverage(transactions, pendingInbox.length);
 
     const completedCount = saItems.filter((i) => i.completed).length;
     const saReadiness = {
@@ -61,6 +62,7 @@ router.get("/profiles/:profileId/position", async (req, res) => {
       pendingInboxCount: pendingInbox.length,
       monthlyTrend,
       vatWarning: vatWarning.warning ? vatWarning : null,
+      evidenceCoverage,
       nonDeductibleTotal: pl.nonDeductibleExpenses,
     });
   } catch (err) {
@@ -97,6 +99,7 @@ router.get("/profiles/:profileId/business-ideas", async (req, res) => {
     const kpis = buildKPIs(pl, tax, cash, arEntries, pendingInbox.length);
     const monthlyTrend = computeMonthlyTrend(transactions);
     const vatWarning = computeVATWarning(pl.revenues);
+    const evidenceCoverage = computeEvidenceCoverage(transactions, pendingInbox.length);
     const completedCount = saItems.filter((i) => i.completed).length;
 
     const position = {
@@ -109,6 +112,7 @@ router.get("/profiles/:profileId/business-ideas", async (req, res) => {
       pendingInboxCount: pendingInbox.length,
       monthlyTrend,
       vatWarning: vatWarning.warning ? vatWarning : null,
+      evidenceCoverage,
     };
 
     const committedIds = decisions.map((d) => d.ideaId);

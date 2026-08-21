@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import {
   inboxItemsTable, transactionsTable, saChecklistItemsTable,
+  evidenceItemsTable,
 } from "@workspace/db/schema";
 import { eq, and } from "drizzle-orm";
 import { z } from "zod";
@@ -44,6 +45,7 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
     const { resolution } = body.data;
     const classification = classifyResolution(resolution);
     const pct = extractPercentage(resolution); // 0–100
+    const evidenceTier = await tierForInboxEvidence(item.evidenceId);
 
     // Fetch current transactions to compute tax impact diff accurately
     const existingTxns = await db.select().from(transactionsTable)
@@ -59,64 +61,76 @@ router.patch("/profiles/:profileId/inbox/:itemId/resolve", async (req, res) => {
     let taxImpact = 0;
 
     if (classification === "income" && item.amount) {
+      const signedAmount = item.sourceRowIndex != null ? item.amount : Math.abs(item.amount);
       // Income confirmed → positive transaction
       await db.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
-        amount: item.amount,
+        amount: signedAmount,
         category: "income",
         taxTreatment: "income",
         source: "manual",
         evidenceId: item.evidenceId ?? null,
+        evidenceTier,
+        sourceRowIndex: item.sourceRowIndex ?? null,
+        rawRowData: item.rawRowData ?? null,
         accountingCategory: "income",
         allowablePercentage: 100,
-        allowableAmount: item.amount,
+        allowableAmount: signedAmount,
         userOverride: true,
       });
       const plAfter = computePLBreakdown([
         ...existingTxns,
-        { amount: item.amount, category: "income", taxTreatment: "income" },
+        { amount: signedAmount, category: "income", taxTreatment: "income" },
       ], pendingAmounts);
       // Income increases tax due (negative saving)
       taxImpact = computeTaxImpactDiff(plBefore.profit, plAfter.profit) * -1;
 
     } else if (classification === "deductible" && item.amount) {
+      const signedAmount = item.sourceRowIndex != null ? item.amount : -Math.abs(item.amount);
       // Deductible expense → negative transaction with allowable amount
-      const allowableAmount = item.amount * (pct / 100);
+      const allowableAmount = signedAmount * (pct / 100);
       await db.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
-        amount: -item.amount, // store as negative
+        amount: signedAmount,
         category: "expense",
         taxTreatment: "deductible",
         source: "manual",
         evidenceId: item.evidenceId ?? null,
+        evidenceTier,
+        sourceRowIndex: item.sourceRowIndex ?? null,
+        rawRowData: item.rawRowData ?? null,
         accountingCategory: guessAccountingCategory(item.description),
         allowablePercentage: pct,
-        allowableAmount: -allowableAmount, // also negative
+        allowableAmount,
         userOverride: true,
       });
       // Tax saving = reduction in tax when profit decreases by allowableAmount
       const syntheticTx = {
-        amount: -item.amount, category: "expense", taxTreatment: "deductible" as const,
-        allowableAmount: -allowableAmount, allowablePercentage: pct,
+        amount: signedAmount, category: "expense", taxTreatment: "deductible" as const,
+        allowableAmount, allowablePercentage: pct,
       };
       const plAfter = computePLBreakdown([...existingTxns, syntheticTx], pendingAmounts);
       taxImpact = computeTaxImpactDiff(plBefore.profit, plAfter.profit);
 
     } else if (classification === "non_deductible" && item.amount) {
+      const signedAmount = item.sourceRowIndex != null ? item.amount : -Math.abs(item.amount);
       // Non-deductible → record in ledger for transparency; zero tax impact
       await db.insert(transactionsTable).values({
         profileId: profile.id,
         date: item.date,
         description: item.description,
-        amount: -item.amount,
+        amount: signedAmount,
         category: "expense",
         taxTreatment: "non_deductible",
         source: "manual",
         evidenceId: item.evidenceId ?? null,
+        evidenceTier,
+        sourceRowIndex: item.sourceRowIndex ?? null,
+        rawRowData: item.rawRowData ?? null,
         accountingCategory: guessAccountingCategory(item.description),
         allowablePercentage: 0,
         allowableAmount: 0,
@@ -176,6 +190,16 @@ function guessAccountingCategory(description: string): string {
   if (lower.includes("insurance")) return "insurance";
   if (lower.includes("equipment") || lower.includes("laptop") || lower.includes("camera") || lower.includes("computer")) return "equipment";
   return "other";
+}
+
+async function tierForInboxEvidence(evidenceId: string | null): Promise<number> {
+  if (!evidenceId) return 4;
+  const [evidence] = await db.select({ evidenceType: evidenceItemsTable.evidenceType })
+    .from(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceId));
+  return evidence?.evidenceType === "document" ? 1
+    : evidence?.evidenceType === "bank_csv" ? 2
+    : evidence?.evidenceType === "ledger" ? 3
+    : 4;
 }
 
 async function markInboxChecklistProgress(profileId: string) {

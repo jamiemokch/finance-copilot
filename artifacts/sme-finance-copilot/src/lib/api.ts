@@ -185,6 +185,18 @@ export interface APIVATWarning {
   message: string;
 }
 
+export interface APIEvidenceCoverage {
+  tierAmounts: Record<'0' | '1' | '2' | '3' | '4', number>;
+  strongEvidencePct: number;
+  selfDeclaredPct: number;
+  documentedPct: number;
+  coveragePct: number;
+  defensibilityPct: number;
+  classificationPct: number;
+  financialConfidenceScore: number;
+  financialConfidenceLabel: 'high' | 'medium' | 'low' | 'very_low';
+}
+
 export interface APIFinancialPosition {
   plBreakdown: APIPLBreakdown;
   taxCalculation: APITaxCalculation;
@@ -197,6 +209,7 @@ export interface APIFinancialPosition {
   monthlyTrend: APIMonthlyDataPoint[];
   vatWarning: APIVATWarning | null;
   nonDeductibleTotal?: number;
+  evidenceCoverage: APIEvidenceCoverage;
 }
 
 export const positionApi = {
@@ -217,6 +230,14 @@ export interface APIInboxItem {
   resolution?: string | null;
   taxImpact?: number | null;
   aiReasoning?: string | null;
+  evidenceType?: 'document' | 'bank_csv' | 'ledger' | 'manual';
+  mappingSchema?: unknown;
+  totalRows?: number;
+  processedRows?: number;
+  autoPostedRows?: number;
+  inboxRows?: number;
+  skippedRows?: number;
+  importStatus?: string;
   options: unknown;
   resolvedAt?: string | null;
 }
@@ -270,7 +291,7 @@ export const evidenceApi = {
   },
   register: (
     profileId: string,
-    data: { filename: string; objectPath: string; mimeType: string; category?: string },
+    data: { filename: string; objectPath: string; mimeType: string; category?: string; evidenceType?: 'document' | 'bank_csv' | 'ledger' | 'manual' },
   ) =>
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence`, {
       method: "POST",
@@ -280,6 +301,13 @@ export const evidenceApi = {
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/process`, {
       method: "POST",
     }),
+  detectSchema: (profileId: string, evidenceId: string) =>
+    apiFetch<{ mappingSchema: unknown; previewRows: string[][] }>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
+  processBatch: (profileId: string, evidenceId: string, confirmedMapping: unknown, bankCsv?: boolean) =>
+    apiFetch<{ evidence: APIEvidenceItem; processedRows: number; autoPostedRows: number; inboxRows: number; skippedRows: number }>(
+      `/profiles/${profileId}/evidence/${evidenceId}/process-batch`,
+      { method: "POST", body: JSON.stringify({ confirmedMapping, bankCsv }) },
+    ),
 };
 
 // ── Transactions ──────────────────────────────────────────────────────────────
@@ -300,6 +328,10 @@ export interface APITransaction {
   capitalAllowanceType?: string | null;
   vatMetadata?: { rate: 0 | 5 | 20; vatAmount: number | null; isVatInclusive: boolean } | null;
   userOverride?: boolean;
+  evidenceTier?: number;
+  sourceRowIndex?: number | null;
+  rawRowData?: unknown;
+  classificationConfidence?: number | null;
   createdAt?: string;
 }
 
@@ -313,6 +345,10 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions`, {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+  attachEvidence: (profileId: string, transactionId: string, evidenceId: string) =>
+    apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {
+      method: "PATCH", body: JSON.stringify({ evidenceId }),
     }),
 };
 

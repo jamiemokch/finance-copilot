@@ -1,10 +1,12 @@
 import {
   boolean,
   doublePrecision,
+  integer,
   jsonb,
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { createInsertSchema } from 'drizzle-zod';
@@ -65,6 +67,16 @@ export const evidenceItemsTable = pgTable('evidence_items', {
   extractedData: jsonb('extracted_data'),
   confidence: doublePrecision('confidence'),
   aiReasoning: text('ai_reasoning'),
+  // document | bank_csv | ledger | manual
+  evidenceType: text('evidence_type').notNull().default('document'),
+  totalRows: integer('total_rows').notNull().default(0),
+  processedRows: integer('processed_rows').notNull().default(0),
+  autoPostedRows: integer('auto_posted_rows').notNull().default(0),
+  inboxRows: integer('inbox_rows').notNull().default(0),
+  skippedRows: integer('skipped_rows').notNull().default(0),
+  mappingSchema: jsonb('mapping_schema'),
+  // idle | mapping | processing | done | error
+  importStatus: text('import_status').notNull().default('idle'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -93,6 +105,11 @@ export const transactionsTable = pgTable('transactions', {
   // manual | extracted | demo
   source: text('source').notNull().default('manual'),
   evidenceId: uuid('evidence_id'),
+  // 0 demo, 1 original document, 2 bank CSV, 3 ledger/spreadsheet, 4 manual
+  evidenceTier: integer('evidence_tier').notNull().default(4),
+  sourceRowIndex: integer('source_row_index'),
+  rawRowData: jsonb('raw_row_data'),
+  classificationConfidence: doublePrecision('classification_confidence'),
   // Structured accounting fields
   accountingCategory: text('accounting_category').notNull().default('other'),
   allowablePercentage: doublePrecision('allowable_percentage').notNull().default(100),
@@ -101,7 +118,9 @@ export const transactionsTable = pgTable('transactions', {
   vatMetadata: jsonb('vat_metadata'),                     // {rate, vatAmount, isVatInclusive} | null
   userOverride: boolean('user_override').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex('transactions_evidence_row_unique').on(table.evidenceId, table.sourceRowIndex),
+]);
 
 export const insertTransactionSchema = createInsertSchema(transactionsTable).omit({
   id: true,
@@ -128,9 +147,14 @@ export const inboxItemsTable = pgTable('inbox_items', {
   status: text('status').notNull().default('pending'),
   resolution: text('resolution'),
   taxImpact: doublePrecision('tax_impact'),
+  // Batch-import audit data; populated for spreadsheet rows awaiting review.
+  sourceRowIndex: integer('source_row_index'),
+  rawRowData: jsonb('raw_row_data'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
-});
+}, (table) => [
+  uniqueIndex('inbox_evidence_row_unique').on(table.evidenceId, table.sourceRowIndex),
+]);
 
 export const insertInboxItemSchema = createInsertSchema(inboxItemsTable).omit({
   id: true,

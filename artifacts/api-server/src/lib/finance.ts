@@ -85,6 +85,18 @@ export interface VATWarning {
   message: string;
 }
 
+export interface EvidenceCoverage {
+  tierAmounts: Record<'0' | '1' | '2' | '3' | '4', number>;
+  strongEvidencePct: number;
+  selfDeclaredPct: number;
+  documentedPct: number;
+  coveragePct: number;
+  defensibilityPct: number;
+  classificationPct: number;
+  financialConfidenceScore: number;
+  financialConfidenceLabel: 'high' | 'medium' | 'low' | 'very_low';
+}
+
 export interface FinancialPosition {
   plBreakdown: PLBreakdown;
   taxCalculation: TaxCalculation;
@@ -96,6 +108,7 @@ export interface FinancialPosition {
   pendingInboxCount: number;
   monthlyTrend: MonthlyDataPoint[];
   vatWarning: VATWarning | null;
+  evidenceCoverage: EvidenceCoverage;
 }
 
 // ─── UK Sole Trader Tax 2024/25 ───────────────────────────────────────────────
@@ -373,6 +386,64 @@ export function computeVATWarning(currentRevenue: number): VATWarning {
     warning,
     urgency,
     message,
+  };
+}
+
+/**
+ * Measure the quality of the records, independently from any tax arithmetic.
+ * Lower evidence tiers are stronger: 1=document, 2=bank CSV, 3=ledger,
+ * 4=manual declaration; tier 0 is sample/demo data.
+ */
+export function computeEvidenceCoverage(
+  transactions: Array<{
+    amount: number;
+    evidenceTier?: number | null;
+    classificationConfidence?: number | null;
+  }>,
+  pendingInboxCount = 0,
+): EvidenceCoverage {
+  const tierAmounts: EvidenceCoverage['tierAmounts'] = { '0': 0, '1': 0, '2': 0, '3': 0, '4': 0 };
+  let classifiedTotal = 0;
+  let classifiedCount = 0;
+
+  for (const transaction of transactions) {
+    const tier = Math.max(0, Math.min(4, transaction.evidenceTier ?? 4)) as 0 | 1 | 2 | 3 | 4;
+    tierAmounts[String(tier) as keyof typeof tierAmounts] += Math.abs(transaction.amount);
+    if (typeof transaction.classificationConfidence === 'number') {
+      classifiedTotal += Math.max(0, Math.min(1, transaction.classificationConfidence));
+      classifiedCount += 1;
+    }
+  }
+
+  const totalAmount = Object.values(tierAmounts).reduce((sum, amount) => sum + amount, 0);
+  const percentage = (amount: number) => totalAmount > 0 ? Math.round((amount / totalAmount) * 100) : 0;
+  const strongEvidencePct = percentage(tierAmounts['1'] + tierAmounts['2']);
+  const selfDeclaredPct = percentage(tierAmounts['3'] + tierAmounts['4']);
+  const documentedPct = percentage(tierAmounts['1']);
+  const recordTotal = transactions.length + pendingInboxCount;
+  const coveragePct = recordTotal > 0 ? Math.round((transactions.length / recordTotal) * 100) : 0;
+  const classificationPct = classifiedCount > 0 ? Math.round((classifiedTotal / classifiedCount) * 100) : 0;
+  const financialConfidenceScore = Math.round(
+    coveragePct * 0.3 + strongEvidencePct * 0.45 + classificationPct * 0.25,
+  );
+  const financialConfidenceLabel: EvidenceCoverage['financialConfidenceLabel'] =
+    financialConfidenceScore >= 85 ? 'high'
+      : financialConfidenceScore >= 65 ? 'medium'
+      : financialConfidenceScore >= 40 ? 'low'
+      : 'very_low';
+
+  return {
+    tierAmounts: Object.fromEntries(
+      Object.entries(tierAmounts).map(([tier, amount]) => [tier, Math.round(amount * 100) / 100]),
+    ) as EvidenceCoverage['tierAmounts'],
+    strongEvidencePct,
+    selfDeclaredPct,
+    documentedPct,
+    coveragePct,
+    defensibilityPct: strongEvidencePct,
+    classificationPct,
+    financialConfidenceScore,
+    financialConfidenceLabel,
   };
 }
 

@@ -10,6 +10,9 @@ import {
   computeTaxForProfit,
   computeCashPosition,
   buildKPIs,
+  computeMonthlyTrend,
+  computeVATWarning,
+  computeEvidenceCoverage,
   type AccountBalance,
   type AREntry,
   type APEntry,
@@ -70,6 +73,12 @@ router.post("/copilot/message", async (req, res) => {
         totalCount,
       },
       pendingInboxCount: pendingInbox.length,
+      monthlyTrend: computeMonthlyTrend(transactions),
+      vatWarning: (() => {
+        const warning = computeVATWarning(pl.revenues);
+        return warning.warning ? warning : null;
+      })(),
+      evidenceCoverage: computeEvidenceCoverage(transactions, pendingInbox.length),
     };
 
     const { reply, contextSummary } = await getCopilotReply(

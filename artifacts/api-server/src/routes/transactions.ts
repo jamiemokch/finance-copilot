@@ -31,7 +31,6 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
     amount: z.number(),
     category: z.string().default("expense"),
     taxTreatment: z.string().default("deductible"),
-    source: z.string().default("manual"),
   }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "Invalid input" }); return; }
   try {
@@ -40,6 +39,8 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
     const [txn] = await db.insert(transactionsTable).values({
       profileId: profile.id,
       ...body.data,
+      source: "manual",
+      evidenceTier: 4,
     }).returning();
     res.status(201).json(txn);
   } catch (err) {

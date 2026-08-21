@@ -3,18 +3,40 @@ import { db } from "@workspace/db";
 import {
   evidenceItemsTable, inboxItemsTable, transactionsTable, profilesTable,
 } from "@workspace/db/schema";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import {
-  extractFromImageFile, extractFromText, isConfigured,
-  type ExtractionContext, type ExtractedData,
+  extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
+  type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { computeTaxImpactDiff } from "../lib/finance.js";
+import { parseSpreadsheet, parseMoney, normaliseCell } from "../lib/spreadsheet.js";
 
 const router = Router();
 const storageService = new ObjectStorageService();
+const mappingSchemaInput = z.object({
+  headerRow: z.number().int().nonnegative(),
+  columns: z.object({
+    date: z.number().int().nonnegative().optional(),
+    amount: z.number().int().nonnegative().optional(),
+    debit: z.number().int().nonnegative().optional(),
+    credit: z.number().int().nonnegative().optional(),
+    description: z.number().int().nonnegative().optional(),
+    category: z.number().int().nonnegative().optional(),
+    balance: z.number().int().nonnegative().optional(),
+  }).strict(),
+  dateFormat: z.string().nullable().optional(),
+  currency: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  notes: z.array(z.string()).optional(),
+}).strict().superRefine((mapping, context) => {
+  if (mapping.columns.date === undefined) context.addIssue({ code: "custom", message: "A date column is required" });
+  if (mapping.columns.description === undefined) context.addIssue({ code: "custom", message: "A description column is required" });
+  if (mapping.columns.amount === undefined && mapping.columns.debit === undefined && mapping.columns.credit === undefined) {
+    context.addIssue({ code: "custom", message: "An amount, debit, or credit column is required" });
+  }
+});
 
 // GET /profiles/:profileId/evidence
 router.get("/profiles/:profileId/evidence", async (req, res) => {
@@ -40,6 +62,7 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
     objectPath: z.string().min(1),
     mimeType: z.string().min(1),
     category: z.string().default("other"),
+    evidenceType: z.enum(["document", "bank_csv", "ledger", "manual"]).default("document"),
   }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "Invalid input" }); return; }
   try {
@@ -51,6 +74,7 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
       objectPath: body.data.objectPath,
       mimeType: body.data.mimeType,
       category: body.data.category,
+      evidenceType: body.data.evidenceType,
       status: "received",
     }).returning();
     res.status(201).json(item);
@@ -138,7 +162,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
           fileBuffer.toString("base64"), mimeType, evidenceItem.filename, context
         );
       } else if (mimeType === "application/pdf") {
-        const pdfParse = (await import("pdf-parse")).default;
+        const pdfParse = (await import("pdf-parse") as unknown as { default: (input: Buffer) => Promise<{ text: string }> }).default;
         const data = await pdfParse(fileBuffer);
         extracted = await extractFromText(data.text, evidenceItem.filename, context);
       } else {
@@ -173,6 +197,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         taxTreatment: "income",
         source: "extracted",
         evidenceId: evidenceItem.id,
+        evidenceTier: 1,
+        classificationConfidence: extracted.confidence,
         accountingCategory: extracted.accountingCategory ?? "income",
         allowablePercentage: 100,
         allowableAmount: extracted.amount,
@@ -199,6 +225,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         taxTreatment: "deductible",
         source: "extracted",
         evidenceId: evidenceItem.id,
+        evidenceTier: 1,
+        classificationConfidence: extracted.confidence,
         accountingCategory: extracted.accountingCategory ?? "other",
         allowablePercentage: extracted.allowablePercentage,
         allowableAmount: allowableAmount != null ? -allowableAmount : null,
@@ -224,6 +252,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         taxTreatment: "non_deductible",
         source: "extracted",
         evidenceId: evidenceItem.id,
+        evidenceTier: 1,
+        classificationConfidence: extracted.confidence,
         accountingCategory: extracted.accountingCategory ?? "other",
         allowablePercentage: 0,
         allowableAmount: 0,
@@ -264,6 +294,294 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
     res.status(500).json({ error: "Failed to process evidence" });
   }
 });
+
+// POST /profiles/:profileId/evidence/:evidenceId/detect-schema — CSV/XLSX column proposal
+router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
+    const [buffer] = await file.download();
+    const rows = parseSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+    if (rows.length === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
+    const mappingSchema = await detectColumnSchema(rows.slice(0, 10), evidenceItem.filename, evidenceItem.mimeType);
+    const previewRows = rows.slice(mappingSchema.headerRow + 1, mappingSchema.headerRow + 6);
+    await db.update(evidenceItemsTable).set({
+      mappingSchema: mappingSchema as unknown as Record<string, unknown>,
+      importStatus: "mapping",
+      totalRows: Math.max(0, rows.length - mappingSchema.headerRow - 1),
+    }).where(eq(evidenceItemsTable.id, evidenceItem.id));
+    res.json({ mappingSchema, previewRows });
+  } catch (err) {
+    req.log.error(err, "Failed to detect spreadsheet schema");
+    res.status(500).json({ error: "Failed to detect spreadsheet schema" });
+  }
+});
+
+// POST /profiles/:profileId/evidence/:evidenceId/process-batch — confirmed CSV/XLSX import
+router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({ confirmedMapping: mappingSchemaInput, bankCsv: z.boolean().optional() }).safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "A valid confirmedMapping is required" }); return;
+  }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    const mapping = body.data.confirmedMapping as MappingSchema;
+    const bankCsv = body.data.bankCsv ?? evidenceItem.evidenceType === "bank_csv";
+    const evidenceTier = bankCsv ? 2 : 3;
+    const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
+    const [buffer] = await file.download();
+    const rows = parseSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+    const widestRow = Math.max(...rows.map((row) => row.length), 0);
+    const mappingIndexes = Object.values(mapping.columns).filter((index): index is number => index !== undefined);
+    if (mapping.headerRow >= rows.length || mappingIndexes.some((index) => index < 0 || index >= widestRow)) {
+      res.status(400).json({ error: "The confirmed mapping contains columns outside this spreadsheet" }); return;
+    }
+    // Atomically claim this evidence item. A second concurrent batch request sees
+    // "processing" and cannot send the same source row to a different outcome.
+    const [claimed] = await db.update(evidenceItemsTable).set({ importStatus: "processing" }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
+    )).returning();
+    if (!claimed) { res.status(409).json({ error: "This spreadsheet is already being processed" }); return; }
+    const existing = await db.select({
+      date: transactionsTable.date, amount: transactionsTable.amount, description: transactionsTable.description,
+      evidenceId: transactionsTable.evidenceId, sourceRowIndex: transactionsTable.sourceRowIndex,
+    }).from(transactionsTable).where(eq(transactionsTable.profileId, profile.id));
+    const existingInbox = await db.select({
+      date: inboxItemsTable.date, amount: inboxItemsTable.amount, description: inboxItemsTable.description,
+      evidenceId: inboxItemsTable.evidenceId, sourceRowIndex: inboxItemsTable.sourceRowIndex,
+    }).from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profile.id));
+    const handledRowIndexes = new Set([
+      ...existing.filter((row) => row.evidenceId === evidenceItem.id && row.sourceRowIndex !== null).map((row) => row.sourceRowIndex!),
+      ...existingInbox.filter((row) => row.evidenceId === evidenceItem.id && row.sourceRowIndex !== null).map((row) => row.sourceRowIndex!),
+    ]);
+    const existingCandidates = [
+      ...existing.map(({ date, amount, description }) => ({ date, amount, description })),
+      ...existingInbox.map(({ date, amount, description }) => ({ date, amount: amount ?? 0, description })),
+    ];
+    const context = await buildExtractionContext(profile, evidenceItem.category);
+
+    let processedRows = 0, autoPostedRows = 0, inboxRows = 0, skippedRows = 0;
+    const totalRowCount = Math.max(0, rows.length - mapping.headerRow - 1);
+    await db.update(evidenceItemsTable).set({
+      evidenceType: bankCsv ? "bank_csv" : "ledger",
+      mappingSchema: mapping as unknown as Record<string, unknown>,
+      totalRows: totalRowCount,
+      processedRows: 0, autoPostedRows: 0, inboxRows: 0, skippedRows: 0,
+    }).where(eq(evidenceItemsTable.id, evidenceItem.id));
+
+    for (let index = mapping.headerRow + 1; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (handledRowIndexes.has(index)) { skippedRows += 1; continue; }
+      // The mapped header is always before this loop. Only blank rows are
+      // skipped here: descriptions such as "balance transfer" are valid data.
+      if (row.every((cell) => !normaliseCell(cell))) {
+        skippedRows += 1; continue;
+      }
+      const rowData = mapSpreadsheetRow(row, mapping);
+      const parsedAmount = rowData.amount;
+      if (!rowData.date || parsedAmount === null || !rowData.description) { skippedRows += 1; continue; }
+      const confirmedRow = { ...rowData, amount: parsedAmount };
+      if (isStructuralBalanceSummary(confirmedRow, mapping)) { skippedRows += 1; continue; }
+      if (isDuplicate(existingCandidates, confirmedRow.date, confirmedRow.amount, confirmedRow.description)) { skippedRows += 1; continue; }
+
+      const extracted = isConfigured()
+        ? await extractFromText(`Spreadsheet row: ${JSON.stringify(row)}\nDate: ${confirmedRow.date}\nAmount: ${confirmedRow.amount}\nDescription: ${confirmedRow.description}`, evidenceItem.filename, context)
+        : lowConfidenceRow(confirmedRow);
+      const highConfidence = extracted.confidence >= 0.75 && extracted.taxTreatment !== "unclear";
+      const conflictsWithCashDirection =
+        (confirmedRow.amount > 0 && extracted.taxTreatment !== "income") ||
+        (confirmedRow.amount < 0 && extracted.taxTreatment === "income");
+      processedRows += 1;
+      if (highConfidence && !conflictsWithCashDirection) {
+        const transaction = transactionFromExtracted(profile.id, evidenceItem.id, extracted, confirmedRow, evidenceTier, index, row);
+        await db.insert(transactionsTable).values(transaction);
+        existingCandidates.push({ date: transaction.date, amount: transaction.amount, description: transaction.description });
+        autoPostedRows += 1;
+      } else {
+        await db.insert(inboxItemsTable).values({
+          profileId: profile.id, evidenceId: evidenceItem.id, date: confirmedRow.date,
+          description: confirmedRow.description, amount: confirmedRow.amount,
+          aiReasoning: conflictsWithCashDirection
+            ? `${extracted.aiReasoning} The suggested classification conflicts with the bank debit/credit direction, so please review it.`
+            : extracted.aiReasoning,
+          options: buildInboxOptions(extracted), status: "pending",
+          sourceRowIndex: index, rawRowData: row,
+        });
+        existingCandidates.push({ date: confirmedRow.date, amount: confirmedRow.amount, description: confirmedRow.description });
+        inboxRows += 1;
+      }
+    }
+    // Recompute from persisted source-row identities so a resumed import reports
+    // the complete batch, not only the rows processed during its final retry.
+    const [persistedTransactions, persistedInbox] = await Promise.all([
+      db.select({ sourceRowIndex: transactionsTable.sourceRowIndex })
+        .from(transactionsTable).where(eq(transactionsTable.evidenceId, evidenceItem.id)),
+      db.select({ sourceRowIndex: inboxItemsTable.sourceRowIndex })
+        .from(inboxItemsTable).where(eq(inboxItemsTable.evidenceId, evidenceItem.id)),
+    ]);
+    const inboxRowIndexes = new Set(persistedInbox
+      .map((row) => row.sourceRowIndex)
+      .filter((index): index is number => index !== null));
+    const transactionRowIndexes = new Set(persistedTransactions
+      .map((row) => row.sourceRowIndex)
+      .filter((index): index is number => index !== null));
+    const autoPostedTotal = [...transactionRowIndexes].filter((index) => !inboxRowIndexes.has(index)).length;
+    const inboxTotal = inboxRowIndexes.size;
+    const processedTotal = new Set([...transactionRowIndexes, ...inboxRowIndexes]).size;
+    const skippedTotal = Math.max(0, totalRowCount - processedTotal);
+    const [updated] = await db.update(evidenceItemsTable).set({
+      status: inboxTotal > 0 ? "needs_review" : "processed",
+      importStatus: "done",
+      totalRows: totalRowCount,
+      processedRows: processedTotal,
+      autoPostedRows: autoPostedTotal,
+      inboxRows: inboxTotal,
+      skippedRows: skippedTotal,
+    }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+    res.json({ evidence: updated, processedRows: processedTotal, autoPostedRows: autoPostedTotal, inboxRows: inboxTotal, skippedRows: skippedTotal });
+  } catch (err) {
+    req.log.error(err, "Failed to process spreadsheet batch");
+    await db.update(evidenceItemsTable).set({ importStatus: "error" })
+      .where(eq(evidenceItemsTable.id, req.params.evidenceId)).catch(() => undefined);
+    res.status(500).json({ error: "Failed to process spreadsheet batch" });
+  }
+});
+
+// PATCH /profiles/:profileId/transactions/:txId/attach-evidence
+router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({ evidenceId: z.string().uuid() }).safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "A valid evidenceId is required" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [transaction] = await db.select().from(transactionsTable).where(and(
+      eq(transactionsTable.id, req.params.txId), eq(transactionsTable.profileId, profile.id),
+    ));
+    const evidenceItem = await getEvidenceItem(profile.id, body.data.evidenceId);
+    if (!transaction || !evidenceItem) { res.status(404).json({ error: "Transaction or evidence item not found" }); return; }
+    const tier = tierForEvidenceType(evidenceItem.evidenceType);
+    if (transaction.evidenceTier !== 0 && transaction.evidenceTier <= tier) {
+      res.status(409).json({ error: "The transaction already has equal or stronger evidence" }); return;
+    }
+    const [updated] = await db.update(transactionsTable).set({
+      evidenceId: evidenceItem.id, evidenceTier: tier,
+    }).where(eq(transactionsTable.id, transaction.id)).returning();
+    res.json(updated);
+  } catch (err) {
+    req.log.error(err, "Failed to attach evidence");
+    res.status(500).json({ error: "Failed to attach evidence" });
+  }
+});
+
+async function getEvidenceItem(profileId: string, evidenceId: string) {
+  const [item] = await db.select().from(evidenceItemsTable).where(and(
+    eq(evidenceItemsTable.id, evidenceId), eq(evidenceItemsTable.profileId, profileId),
+  ));
+  return item;
+}
+
+async function buildExtractionContext(profile: typeof profilesTable.$inferSelect, uploadCategory: string): Promise<ExtractionContext> {
+  const recent = await db.select({
+    description: transactionsTable.description, taxTreatment: transactionsTable.taxTreatment,
+    accountingCategory: transactionsTable.accountingCategory,
+  }).from(transactionsTable).where(eq(transactionsTable.profileId, profile.id))
+    .orderBy(desc(transactionsTable.createdAt)).limit(5);
+  return {
+    businessType: profile.type, industry: profile.industry, uploadCategory,
+    priorTreatments: recent.map((transaction) => ({
+      description: transaction.description, treatment: transaction.taxTreatment, category: transaction.accountingCategory,
+    })),
+  };
+}
+
+function mapSpreadsheetRow(row: string[], mapping: MappingSchema) {
+  const col = (name: keyof MappingSchema["columns"]) => {
+    const index = mapping.columns[name];
+    return index === undefined ? "" : normaliseCell(row[index]);
+  };
+  const debit = parseMoney(col("debit"));
+  const credit = parseMoney(col("credit"));
+  const directAmount = parseMoney(col("amount"));
+  const amount = directAmount ?? (credit !== null ? Math.abs(credit) : debit !== null ? -Math.abs(debit) : null);
+  return {
+    date: normaliseImportedDate(col("date")),
+    amount,
+    description: col("description") || col("category") || "Imported transaction",
+  };
+}
+
+function isStructuralBalanceSummary(
+  row: { description: string; amount: number; date: string },
+  mapping: MappingSchema,
+): boolean {
+  if (mapping.columns.balance === undefined) return false;
+  return /^(opening|closing|running)\s+balance$/i.test(row.description.trim());
+}
+
+function isDuplicate(existing: Array<{ date: string; amount: number; description: string }>, date: string, amount: number, description: string) {
+  const canonical = description.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return existing.some((transaction) => transaction.date === date && Math.abs(transaction.amount - amount) < 0.001 &&
+    descriptionSimilarity(transaction.description.toLowerCase().replace(/[^a-z0-9]/g, ""), canonical) >= 0.92);
+}
+
+function normaliseImportedDate(value: string): string {
+  const trimmed = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const uk = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (!uk) return trimmed;
+  const year = uk[3].length === 2 ? `20${uk[3]}` : uk[3];
+  return `${year}-${uk[2].padStart(2, "0")}-${uk[1].padStart(2, "0")}`;
+}
+
+function descriptionSimilarity(left: string, right: string): number {
+  if (left === right) return 1;
+  if (!left || !right) return 0;
+  const shorter = left.length < right.length ? left : right;
+  const longer = left.length < right.length ? right : left;
+  if (longer.includes(shorter)) return shorter.length / longer.length;
+  const tokensLeft = new Set(left.match(/[a-z0-9]+/g) ?? []);
+  const tokensRight = new Set(right.match(/[a-z0-9]+/g) ?? []);
+  const intersection = [...tokensLeft].filter((token) => tokensRight.has(token)).length;
+  return intersection / new Set([...tokensLeft, ...tokensRight]).size;
+}
+
+function lowConfidenceRow(row: { date: string; amount: number; description: string }): ExtractedData {
+  return { supplier: null, date: row.date, amount: Math.abs(row.amount), description: row.description,
+    incomeOrExpense: row.amount >= 0 ? "income" : "expense", taxTreatment: "unclear", accountingCategory: "other",
+    capitalOrRevenue: "unclear", allowablePercentage: 100, capitalAllowanceType: null, vatMetadata: null,
+    hmrcBasisNote: null, confidence: 0, needsReview: true, aiReasoning: "AI classification is unavailable; please review this imported row." };
+}
+
+function transactionFromExtracted(profileId: string, evidenceId: string, extracted: ExtractedData,
+  row: { date: string; amount: number; description: string }, evidenceTier: number, sourceRowIndex: number, rawRowData: string[]) {
+  const isIncome = extracted.taxTreatment === "income";
+  // The bank/ledger amount is the cash fact; AI only classifies its treatment.
+  const amount = row.amount;
+  const allowable = Math.abs(amount) * (extracted.allowablePercentage / 100);
+  return {
+    profileId, evidenceId, date: extracted.date ?? row.date, description: extracted.description ?? row.description,
+    amount, category: isIncome ? "income" : "expense", taxTreatment: extracted.taxTreatment, source: "extracted",
+    evidenceTier, sourceRowIndex, rawRowData, classificationConfidence: extracted.confidence,
+    accountingCategory: extracted.accountingCategory, allowablePercentage: isIncome ? 100 : extracted.allowablePercentage,
+    allowableAmount: isIncome ? amount : extracted.taxTreatment === "non_deductible" ? 0 : -allowable,
+    capitalAllowanceType: extracted.capitalAllowanceType, vatMetadata: extracted.vatMetadata,
+  };
+}
+
+function tierForEvidenceType(type: string): number {
+  return type === "document" ? 1 : type === "bank_csv" ? 2 : type === "ledger" ? 3 : 4;
+}
 
 function buildInboxOptions(extracted: ExtractedData) {
   // If AI suspects income

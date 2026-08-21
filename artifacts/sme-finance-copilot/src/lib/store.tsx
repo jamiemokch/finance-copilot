@@ -6,6 +6,7 @@ import {
   type APIEvidenceItem, type APIDecision, type APIBusinessIdea,
   type APISAChecklistItem, type AuthUser,
   type APIMonthlyDataPoint, type APIVATWarning,
+  type APIEvidenceCoverage,
 } from './api';
 
 // ─── Core entity types ────────────────────────────────────────────────────────
@@ -311,6 +312,8 @@ export interface CashBreakdown {
   nearTermOutflows: CashFlow[];
 }
 
+export interface EvidenceCoverage extends APIEvidenceCoverage {}
+
 // ─── AppState ─────────────────────────────────────────────────────────────────
 
 export interface AppState {
@@ -377,6 +380,7 @@ export interface AppState {
   vatWarning: APIVATWarning | null;
   nonDeductibleTotal: number;
   taxLinesRaw: Array<{ label: string; amount: number }>;
+  evidenceCoverage: EvidenceCoverage;
 
   copilotTrigger: string | null;
   setCopilotTrigger: (msg: string | null) => void;
@@ -759,6 +763,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const vatWarning: APIVATWarning | null = rawPosition?.vatWarning ?? null;
   const nonDeductibleTotal: number = rawPosition?.nonDeductibleTotal ?? 0;
   const taxLinesRaw: Array<{ label: string; amount: number }> = rawPosition?.taxCalculation?.lines ?? [];
+  const evidenceCoverage: EvidenceCoverage = rawPosition?.evidenceCoverage ?? {
+    tierAmounts: { '0': 0, '1': 0, '2': 0, '3': 0, '4': 0 },
+    strongEvidencePct: 0, selfDeclaredPct: 0, documentedPct: 0, coveragePct: 0,
+    defensibilityPct: 0, classificationPct: 0, financialConfidenceScore: 0,
+    financialConfidenceLabel: 'very_low',
+  };
 
   // ── Mutations
 
@@ -1037,6 +1047,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     vatWarning,
     nonDeductibleTotal,
     taxLinesRaw,
+    evidenceCoverage,
 
     copilotTrigger,
     setCopilotTrigger,

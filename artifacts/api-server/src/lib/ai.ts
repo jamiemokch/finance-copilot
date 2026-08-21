@@ -55,6 +55,101 @@ export interface ExtractedData {
   aiReasoning: string;
 }
 
+export interface MappingSchema {
+  headerRow: number;
+  columns: {
+    date?: number;
+    amount?: number;
+    debit?: number;
+    credit?: number;
+    description?: number;
+    category?: number;
+    balance?: number;
+  };
+  dateFormat: string | null;
+  currency: string;
+  confidence: number;
+  notes: string[];
+}
+
+function fallbackMapping(rows: string[][]): MappingSchema {
+  const header = rows.findIndex((row) => /(date|amount|description|debit|credit|balance)/i.test(row.join(' ')));
+  const headerRow = header >= 0 ? header : 0;
+  const labels = (rows[headerRow] ?? []).map((cell) => cell.toLowerCase());
+  const find = (patterns: RegExp[]) => {
+    const index = labels.findIndex((label) => patterns.some((pattern) => pattern.test(label)));
+    return index >= 0 ? index : undefined;
+  };
+  return {
+    headerRow,
+    columns: {
+      date: find([/date|posted|transact/]),
+      amount: find([/^amount$|value|net/]),
+      debit: find([/debit|withdrawal|outgoing|expense/]),
+      credit: find([/credit|deposit|incoming|income/]),
+      description: find([/description|details|memo|reference|narrative/]),
+      category: find([/category|type/]),
+      balance: find([/^balance|running/]),
+    },
+    dateFormat: null,
+    currency: 'GBP',
+    confidence: 0.35,
+    notes: ['Mapping was inferred locally because AI mapping was unavailable.'],
+  };
+}
+
+export async function detectColumnSchema(
+  rows: string[][],
+  filename: string,
+  mimeType: string,
+): Promise<MappingSchema> {
+  if (!isConfigured()) return fallbackMapping(rows);
+  const client = getClient();
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    max_tokens: 900,
+    messages: [
+      {
+        role: 'system',
+        content: `You identify columns in UK financial CSV/XLSX files. Return ONLY valid JSON:
+{
+  "headerRow": number,
+  "columns": {"date": number|null, "amount": number|null, "debit": number|null, "credit": number|null, "description": number|null, "category": number|null, "balance": number|null},
+  "dateFormat": string|null,
+  "currency": string,
+  "confidence": number,
+  "notes": string[]
+}
+Column indexes are zero-based. Use null for absent columns. Prefer amount, or debit/credit when a split bank export is used. Do not treat a running balance as a transaction amount.`,
+      },
+      {
+        role: 'user',
+        content: `Filename: ${filename}\nMIME type: ${mimeType}\nRows:\n${JSON.stringify(rows.slice(0, 10))}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+  });
+  try {
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}') as Record<string, unknown>;
+    const rawColumns = (parsed.columns ?? {}) as Record<string, unknown>;
+    const index = (key: string) => typeof rawColumns[key] === 'number' ? rawColumns[key] as number : undefined;
+    return {
+      headerRow: typeof parsed.headerRow === 'number' ? parsed.headerRow : 0,
+      columns: {
+        date: index('date'), amount: index('amount'), debit: index('debit'),
+        credit: index('credit'), description: index('description'),
+        category: index('category'), balance: index('balance'),
+      },
+      dateFormat: typeof parsed.dateFormat === 'string' ? parsed.dateFormat : null,
+      currency: typeof parsed.currency === 'string' ? parsed.currency : 'GBP',
+      confidence: typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
+      notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note): note is string => typeof note === 'string') : [],
+    };
+  } catch {
+    return fallbackMapping(rows);
+  }
+}
+
 function buildExtractionPrompt(context: ExtractionContext): string {
   const priorStr =
     context.priorTreatments.length > 0
@@ -135,7 +230,7 @@ function normalizeExtracted(parsed: Record<string, unknown>): ExtractedData {
         ? parsed.incomeOrExpense
         : 'unclear',
     taxTreatment:
-      (['deductible', 'non_deductible', 'income', 'unclear'] as const).includes(
+      (['deductible', 'non_deductible', 'income', 'unclear'] as readonly string[]).includes(
         parsed.taxTreatment as string,
       )
         ? (parsed.taxTreatment as ExtractedData['taxTreatment'])
@@ -148,7 +243,7 @@ function normalizeExtracted(parsed: Record<string, unknown>): ExtractedData {
         : 'unclear',
     allowablePercentage: allowablePct,
     capitalAllowanceType:
-      (['AIA', 'main_pool', 'nil'] as const).includes(
+      (['AIA', 'main_pool', 'nil'] as readonly string[]).includes(
         parsed.capitalAllowanceType as string,
       )
         ? (parsed.capitalAllowanceType as 'AIA' | 'main_pool' | 'nil')
@@ -369,7 +464,7 @@ Already committed ideas (exclude from new generation): ${committedIdeaIds.join('
       .filter((i): i is Record<string, unknown> => typeof i === 'object' && i !== null)
       .map((idea, idx) => ({
         id: typeof idea.id === 'string' ? idea.id : `idea-${idx}`,
-        category: (['tax', 'cash', 'growth', 'operations', 'pricing'] as const).includes(
+        category: (['tax', 'cash', 'growth', 'operations', 'pricing'] as readonly string[]).includes(
           idea.category as string,
         )
           ? (idea.category as AIBusinessIdea['category'])
@@ -378,7 +473,7 @@ Already committed ideas (exclude from new generation): ${committedIdeaIds.join('
         summary: typeof idea.summary === 'string' ? idea.summary : '',
         currentPosition: typeof idea.currentPosition === 'string' ? idea.currentPosition : '',
         proposedAction: typeof idea.proposedAction === 'string' ? idea.proposedAction : '',
-        priorityTier: (['do_now', 'consider', 'watch'] as const).includes(
+        priorityTier: (['do_now', 'consider', 'watch'] as readonly string[]).includes(
           idea.priorityTier as string,
         )
           ? (idea.priorityTier as AIBusinessIdea['priorityTier'])
@@ -408,7 +503,7 @@ Already committed ideas (exclude from new generation): ${committedIdeaIds.join('
           ? (idea.whatMustBeTrue as string[])
           : [],
         source: typeof idea.source === 'string' ? idea.source : 'Business best practice',
-        confidence: (['high', 'medium', 'low'] as const).includes(idea.confidence as string)
+        confidence: (['high', 'medium', 'low'] as readonly string[]).includes(idea.confidence as string)
           ? (idea.confidence as AIBusinessIdea['confidence'])
           : 'medium',
         aiInsight: typeof idea.aiInsight === 'string' ? idea.aiInsight : '',
