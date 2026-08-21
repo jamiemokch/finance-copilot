@@ -207,11 +207,19 @@ export interface APIUploadUrl {
 export const evidenceApi = {
   list: (profileId: string) =>
     apiFetch<APIEvidenceItem[]>(`/profiles/${profileId}/evidence`),
-  requestUploadUrl: (name: string, size: number, contentType: string) =>
-    apiFetch<APIUploadUrl>("/storage/uploads/request-url", {
+  /** Upload file bytes directly through the API server (avoids GCS CORS) */
+  uploadDirect: async (file: File): Promise<{ objectPath: string }> => {
+    const buffer = await file.arrayBuffer();
+    return apiFetch<{ objectPath: string }>("/storage/uploads/direct", {
       method: "POST",
-      body: JSON.stringify({ name, size, contentType }),
-    }),
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Filename": encodeURIComponent(file.name),
+        "X-Content-Type": file.type || "application/octet-stream",
+      },
+      body: buffer,
+    });
+  },
   register: (
     profileId: string,
     data: { filename: string; objectPath: string; mimeType: string; category?: string },

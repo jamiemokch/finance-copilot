@@ -86,11 +86,11 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         description: evidenceItem.filename,
         amount: null,
         aiReasoning: "AI extraction not available. Please classify this item manually.",
-        options: JSON.stringify([
+        options: [
           { label: "Fully deductible business expense", isSuggested: false },
           { label: "Partially deductible (mixed use)", isSuggested: false },
           { label: "Not deductible — personal expense", isSuggested: false },
-        ]),
+        ],
         status: "pending",
       });
       res.json(updated);
@@ -160,7 +160,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         description: extracted.description ?? evidenceItem.filename,
         amount: extracted.amount ?? null,
         aiReasoning: extracted.aiReasoning,
-        options: JSON.stringify(options),
+        options: options,
         status: "pending",
       });
       const [updated] = await db.update(evidenceItemsTable).set({

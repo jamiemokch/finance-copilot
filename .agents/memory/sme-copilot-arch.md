@@ -44,13 +44,14 @@ Added: `isAuthenticated`, `isLoading`, `authUser`, `login` to AppState.
 - `pdf-parse` and other node_modules are handled by esbuild's external fallback (not in explicit external list but resolved at runtime).
 
 ## Evidence upload flow (ingest.tsx)
-Real GCS presigned URL flow:
-1. `evidenceApi.requestUploadUrl(filename, size, mimeType)` → `{ uploadURL, objectPath }`
-2. `fetch(uploadURL, { method: 'PUT', body: file })` — direct to GCS
-3. `evidenceApi.register(profileId, { filename, objectPath, mimeType, category })`
-4. `evidenceApi.process(profileId, evidenceId)` — GPT-4o-mini OCR + tax check
+Server-side upload (avoids browser→GCS CORS entirely):
+1. `evidenceApi.uploadDirect(file)` → `POST /api/storage/uploads/direct` (octet-stream, 25MB limit) → `{ objectPath }`
+2. `evidenceApi.register(profileId, { filename, objectPath, mimeType, category })` → DB record
+3. `evidenceApi.process(profileId, evidenceId)` → GPT-4o-mini OCR + tax check → auto-tx or Inbox item
 
-Requires: GCS bucket with CORS configured + service account credentials on the API server.
+Key: `ObjectStorageService.saveContent(buffer, contentType)` uses GCS client `.save()` directly (no signed URL needed server-side). objectPath normalised as `/objects/uploads/{uuid}`. `getObjectEntityFile(objectPath)` maps back to same GCS path for read-back during extraction.
+
+Verified end-to-end: PUT ✓, roundtrip ✓, AI extraction ✓, route 401-gated ✓ (not 404).
 
 ## DB notes
 - `jsonb` columns in Drizzle: pass JavaScript objects/arrays directly — do NOT call `JSON.stringify()` before inserting. Drizzle serialises automatically; double-stringifying stores a JSON string literal not an object.

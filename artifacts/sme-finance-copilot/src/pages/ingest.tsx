@@ -175,20 +175,11 @@ function UploadCard({ config, profileId, onComplete }: {
     if (step !== 'idle') return;
     setPickedFilename(file.name);
     try {
-      // Step 1: Request presigned GCS URL
+      // Step 1: Upload bytes through the API server (avoids GCS CORS issues)
       setStep('uploading');
-      const { uploadURL, objectPath } = await evidenceApi.requestUploadUrl(
-        file.name, file.size, file.type || 'application/octet-stream'
-      );
+      const { objectPath } = await evidenceApi.uploadDirect(file);
 
-      // Step 2: PUT file directly to GCS
-      await fetch(uploadURL, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-        body: file,
-      });
-
-      // Step 3: Register evidence item in DB
+      // Step 2: Register evidence item in DB
       setStep('reading');
       const evidenceItem = await evidenceApi.register(profileId, {
         filename: file.name,
@@ -197,18 +188,19 @@ function UploadCard({ config, profileId, onComplete }: {
         category: config.id,
       });
 
-      // Step 4: Trigger AI extraction (real OCR + tax check)
+      // Step 3: Trigger AI extraction (real OCR + tax check)
       setStep('identifying');
       const processed = await evidenceApi.process(profileId, evidenceItem.id);
 
       const needsReview = processed.status === 'needs_review' || processed.status === 'error';
       setStep(needsReview ? 'done_review' : 'done_ok');
-      onComplete(); // trigger parent refetch
+      onComplete();
       setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 4500);
     } catch (err) {
       console.error('Upload failed:', err);
       setStep('error');
-      setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 4000);
+      // Error state stays visible for 5 s so user can read it, then resets
+      setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 5000);
     }
   };
 

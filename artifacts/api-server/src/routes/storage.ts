@@ -3,7 +3,7 @@ import {
   RequestUploadUrlBody,
   RequestUploadUrlResponse,
 } from '@workspace/api-zod';
-import { Router, type IRouter, type Request, type Response } from 'express';
+import express, { Router, type IRouter, type Request, type Response } from 'express';
 
 import { ObjectPermission } from '../lib/objectAcl';
 import {
@@ -26,6 +26,41 @@ function hasAuthenticatedSession(
 
   return req.isAuthenticated();
 }
+
+/**
+ * POST /storage/uploads/direct
+ *
+ * Upload file bytes directly through the API server (avoids browser→GCS CORS).
+ * Body: raw bytes (application/octet-stream), size limit 25 MB.
+ * Headers: X-Filename (URI-encoded), X-Content-Type (MIME type of the file).
+ * Returns: { objectPath } — the normalised /objects/… path for DB storage.
+ */
+router.post(
+  '/storage/uploads/direct',
+  express.raw({ type: '*/*', limit: '25mb' }),
+  async (req: Request, res: Response) => {
+    if (!hasAuthenticatedSession(req)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'Empty body' });
+      return;
+    }
+    const contentType =
+      (req.headers['x-content-type'] as string) || 'application/octet-stream';
+    try {
+      const objectPath = await objectStorageService.saveContent(
+        req.body,
+        contentType,
+      );
+      res.json({ objectPath });
+    } catch (err) {
+      req.log.error({ err }, 'Direct upload failed');
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  },
+);
 
 /**
  * POST /storage/uploads/request-url
