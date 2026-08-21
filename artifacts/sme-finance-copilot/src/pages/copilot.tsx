@@ -1,7 +1,8 @@
 import { Card, Button, Input, Badge } from '@/components/ui';
 import { useStore } from '@/lib/store';
+import { copilotApi } from '@/lib/api';
 import { useState, useRef, useEffect } from 'react';
-import { Bot, Send, Plus, Search, MessageSquare, Clock, AlertCircle } from 'lucide-react';
+import { Bot, Send, Plus, Search, MessageSquare, Clock, Zap } from 'lucide-react';
 import { cn } from '@/components/ui';
 
 export default function Copilot() {
@@ -35,23 +36,33 @@ export default function Copilot() {
     }
     const userMsg = input;
     setInput('');
-    addChatMessage(sessionId, { role: 'user', content: userMsg, timestamp: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) });
+    const timestamp = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    addChatMessage(sessionId, { role: 'user', content: userMsg, timestamp });
     setIsTyping(true);
-    setTimeout(() => {
-      addChatMessage(sessionId!, {
-        role: 'system',
-        content: "This is a demo response. When a live AI is connected, the intended flow is:\n\n1. Read your active profile's Financial Memory (position, transactions, Inbox)\n2. Apply relevant UK tax rules for the current period\n3. Reference your Decision Memory and benchmark data\n4. Give a sourced, conservative answer — with the calculation basis shown\n5. Flag unresolved items to the Inbox rather than guessing\n6. Clearly distinguish high-confidence answers from judgement calls",
-        timestamp: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
-      });
-      setIsTyping(false);
-    }, 1500);
+
+    copilotApi.message(activeProfileId, userMsg)
+      .then(({ reply }) => {
+        addChatMessage(sessionId!, {
+          role: 'system',
+          content: reply,
+          timestamp: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+        });
+      })
+      .catch(() => {
+        addChatMessage(sessionId!, {
+          role: 'system',
+          content: 'Sorry, I could not reach the Copilot right now. Please try again in a moment.',
+          timestamp: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+        });
+      })
+      .finally(() => setIsTyping(false));
   };
 
   const starterQuestions = [
     'How much tax do I owe this year?',
     'What are my biggest tax-saving opportunities?',
     'Should I buy equipment before year end?',
-    'How does my margin compare to similar businesses?',
+    'How does my profit margin compare to similar businesses?',
   ];
 
   const filteredSessions = chatHistory.filter(s =>
@@ -112,11 +123,9 @@ export default function Copilot() {
             <Bot className="w-5 h-5 text-primary" />
             <span className="font-medium">{selectedSession?.title ?? 'Ask a question'}</span>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge className="bg-amber-100 text-amber-800 border-amber-200 text-xs flex items-center gap-1">
-              <AlertCircle className="w-3 h-3" /> Demo mode — responses are mocked
-            </Badge>
-          </div>
+          <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200 text-xs flex items-center gap-1">
+            <Zap className="w-3 h-3" /> Live — answers grounded in your data
+          </Badge>
         </div>
 
         {/* Messages */}
@@ -128,7 +137,7 @@ export default function Copilot() {
                 <h3 className="font-medium text-foreground">What would you like to know?</h3>
                 <p className="text-sm text-muted-foreground max-w-sm">
                   Ask about your finances, tax position, or business decisions.
-                  When live AI is connected, responses will reference your Financial Memory and tax rules.
+                  Answers reference your live Financial Memory and UK tax rules.
                 </p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
@@ -150,7 +159,6 @@ export default function Copilot() {
                   <div className="flex items-center gap-1.5 mb-1">
                     <Bot className="w-3.5 h-3.5 text-primary" />
                     <span className="text-[10px] text-muted-foreground font-medium">Copilot</span>
-                    <Badge className="text-[9px] bg-amber-100 text-amber-700 border-amber-200 py-0 px-1 h-4">Demo</Badge>
                     <span className="text-[10px] text-muted-foreground">{msg.timestamp}</span>
                   </div>
                 )}
@@ -170,9 +178,7 @@ export default function Copilot() {
           )}
           {isTyping && (
             <div className="flex items-start gap-2">
-              <div className="flex items-center gap-1.5 mb-1">
-                <Bot className="w-3.5 h-3.5 text-primary" />
-              </div>
+              <Bot className="w-3.5 h-3.5 text-primary mt-1" />
               <div className="p-3 rounded-2xl bg-secondary text-secondary-foreground rounded-bl-sm flex items-center gap-1.5">
                 <div className="w-1.5 h-1.5 bg-foreground/40 rounded-full animate-bounce" />
                 <div className="w-1.5 h-1.5 bg-foreground/40 rounded-full animate-bounce [animation-delay:0.2s]" />
@@ -192,12 +198,12 @@ export default function Copilot() {
               onChange={e => setInput(e.target.value)}
               className="flex-1"
             />
-            <Button type="submit" className="gap-2 cursor-pointer" disabled={!input.trim()}>
+            <Button type="submit" className="gap-2 cursor-pointer" disabled={!input.trim() || isTyping}>
               <Send className="w-4 h-4" />
             </Button>
           </form>
           <p className="text-[10px] text-muted-foreground mt-2 text-center">
-            Demo mode: responses are pre-written. When live AI is connected, answers will reference your actual Financial Memory.
+            Responses are grounded in your P&amp;L, tax position, and UK HMRC rules. Not a substitute for professional advice.
           </p>
         </div>
       </div>

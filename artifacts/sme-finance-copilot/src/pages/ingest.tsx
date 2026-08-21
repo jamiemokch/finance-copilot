@@ -1,5 +1,6 @@
 import { Card, Badge, Button, Input, Label, Select } from '@/components/ui';
 import { useStore, EvidenceCategory, EvidenceStatus } from '@/lib/store';
+import { evidenceApi } from '@/lib/api';
 import { useState, useRef } from 'react';
 import {
   UploadCloud, CheckCircle2, FileText, Plus, Database, Loader2,
@@ -22,12 +23,12 @@ interface FlowStep {
 
 function FlowDiagram({ pendingCount }: { pendingCount: number }) {
   const steps: FlowStep[] = [
-    { icon: UploadCloud,    label: 'Evidence',               sub: 'Bank CSV, invoices, receipts', active: true },
-    { icon: Database,       label: 'AI categorises',         sub: 'Matches transactions, flags unknowns' },
-    { icon: AlertCircle,    label: 'Inbox',                  sub: pendingCount > 0 ? `${pendingCount} item${pendingCount !== 1 ? 's' : ''} need review` : 'You resolve ambiguous items', href: '/tasks', liveCount: pendingCount },
-    { icon: FileText,       label: 'Financial Records',      sub: 'Clean P&L, AR, AP, Cash', href: '/position' },
-    { icon: Building2,      label: 'Dashboard',              sub: 'Live position & readiness', href: '/dashboard' },
-    { icon: CheckCircle2,   label: 'Business Ideas',         sub: 'Decisions grounded in your numbers', href: '/business-ideas' },
+    { icon: UploadCloud,  label: 'Evidence',             sub: 'Bank CSV, invoices, receipts', active: true },
+    { icon: Database,     label: 'AI categorises',       sub: 'Extracts amounts, checks HMRC rules' },
+    { icon: AlertCircle,  label: 'Inbox',                sub: pendingCount > 0 ? `${pendingCount} item${pendingCount !== 1 ? 's' : ''} need review` : 'You resolve ambiguous items', href: '/tasks', liveCount: pendingCount },
+    { icon: FileText,     label: 'Financial Records',    sub: 'Clean P&L, AR, AP, Cash', href: '/position' },
+    { icon: Building2,    label: 'Dashboard',            sub: 'Live position & readiness', href: '/dashboard' },
+    { icon: CheckCircle2, label: 'Business Ideas',       sub: 'Decisions grounded in your numbers', href: '/business-ideas' },
   ];
 
   return (
@@ -50,7 +51,6 @@ function FlowDiagram({ pendingCount }: { pendingCount: number }) {
               <span className={cn("text-[10px] leading-tight mt-0.5", step.active ? "text-primary-foreground/70" : "text-muted-foreground")}>
                 {step.sub}
               </span>
-              {/* Live pending count badge */}
               {step.liveCount !== undefined && step.liveCount > 0 && (
                 <span className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center shadow-sm">
                   {step.liveCount}
@@ -83,7 +83,6 @@ interface CategoryConfig {
   description: string;
   accepts: string;
   examples: string;
-  // What the AI typically does with this type
   aiOutcome: string;
 }
 
@@ -150,19 +149,20 @@ const CATEGORY_LABELS: Record<EvidenceCategory, string> = {
 
 // ─── AI processing steps ──────────────────────────────────────────────────────
 
-type ProcessStep = 'idle' | 'uploading' | 'reading' | 'identifying' | 'checking' | 'categorising' | 'done_ok' | 'done_review';
+type ProcessStep = 'idle' | 'uploading' | 'reading' | 'identifying' | 'checking' | 'categorising' | 'done_ok' | 'done_review' | 'error';
 
-const AI_STEPS: { key: ProcessStep; label: string; duration: number }[] = [
-  { key: 'uploading',    label: 'Uploading…',               duration: 600 },
-  { key: 'reading',      label: 'Reading document…',         duration: 700 },
-  { key: 'identifying',  label: 'Identifying supplier…',     duration: 650 },
-  { key: 'checking',     label: 'Checking tax treatment…',   duration: 750 },
-  { key: 'categorising', label: 'Categorising…',             duration: 500 },
+const AI_STEPS: { key: ProcessStep; label: string }[] = [
+  { key: 'uploading',    label: 'Uploading to secure storage…' },
+  { key: 'reading',      label: 'Reading document…'            },
+  { key: 'identifying',  label: 'Identifying supplier…'        },
+  { key: 'checking',     label: 'Checking tax treatment…'      },
+  { key: 'categorising', label: 'Categorising…'                },
 ];
 
-function UploadCard({ config, onUploaded }: {
+function UploadCard({ config, profileId, onComplete }: {
   config: CategoryConfig;
-  onUploaded: (cat: EvidenceCategory, needsReview: boolean, filename: string) => void;
+  profileId: string;
+  onComplete: () => void;
 }) {
   const [step, setStep] = useState<ProcessStep>('idle');
   const [isDragging, setIsDragging] = useState(false);
@@ -171,34 +171,51 @@ function UploadCard({ config, onUploaded }: {
   const [, navigate] = useLocation();
   const Icon = config.icon;
 
-  const simulate = (filename?: string) => {
+  const doRealUpload = async (file: File) => {
     if (step !== 'idle') return;
-    // Randomly decide if this upload needs review (receipts and 'other' sometimes do)
-    const willNeedReview = (config.id === 'receipt' || config.id === 'other') && Math.random() > 0.5;
-    const resolvedName = filename ?? pickedFilename ?? `${config.id.replace('_', '-')}.pdf`;
+    setPickedFilename(file.name);
+    try {
+      // Step 1: Request presigned GCS URL
+      setStep('uploading');
+      const { uploadURL, objectPath } = await evidenceApi.requestUploadUrl(
+        file.name, file.size, file.type || 'application/octet-stream'
+      );
 
-    // Run through AI steps sequentially
-    let elapsed = 0;
-    AI_STEPS.forEach(({ key }) => {
-      setTimeout(() => setStep(key), elapsed);
-      elapsed += AI_STEPS.find(s => s.key === key)!.duration;
-    });
-    // Final state
-    setTimeout(() => {
-      const finalStep: ProcessStep = willNeedReview ? 'done_review' : 'done_ok';
-      setStep(finalStep);
-      onUploaded(config.id, willNeedReview, resolvedName);
-      // Reset after a few seconds so the card can accept another upload
+      // Step 2: PUT file directly to GCS
+      await fetch(uploadURL, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+
+      // Step 3: Register evidence item in DB
+      setStep('reading');
+      const evidenceItem = await evidenceApi.register(profileId, {
+        filename: file.name,
+        objectPath,
+        mimeType: file.type || 'application/octet-stream',
+        category: config.id,
+      });
+
+      // Step 4: Trigger AI extraction (real OCR + tax check)
+      setStep('identifying');
+      const processed = await evidenceApi.process(profileId, evidenceItem.id);
+
+      const needsReview = processed.status === 'needs_review' || processed.status === 'error';
+      setStep(needsReview ? 'done_review' : 'done_ok');
+      onComplete(); // trigger parent refetch
       setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 4500);
-    }, elapsed);
+    } catch (err) {
+      console.error('Upload failed:', err);
+      setStep('error');
+      setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 4000);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setPickedFilename(file.name);
-    simulate(file.name);
-    // Reset input so same file can be re-selected
+    doRealUpload(file);
     e.target.value = '';
   };
 
@@ -206,26 +223,17 @@ function UploadCard({ config, onUploaded }: {
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files?.[0];
-    simulate(file?.name);
+    if (file) doRealUpload(file);
   };
 
   const handleButtonClick = () => {
-    if (step === 'done_review') {
-      navigate('/tasks');
-      return;
-    }
-    if (step === 'done_ok') {
-      setStep('idle');
-      setPickedFilename(null);
-      return;
-    }
-    if (step === 'idle') {
-      fileInputRef.current?.click();
-    }
+    if (step === 'done_review') { navigate('/tasks'); return; }
+    if (step === 'done_ok' || step === 'error') { setStep('idle'); setPickedFilename(null); return; }
+    if (step === 'idle') fileInputRef.current?.click();
   };
 
   const isProcessing = ['uploading', 'reading', 'identifying', 'checking', 'categorising'].includes(step);
-  const isDone = step === 'done_ok' || step === 'done_review';
+  const isDone = step === 'done_ok' || step === 'done_review' || step === 'error';
   const currentStepLabel = AI_STEPS.find(s => s.key === step)?.label ?? '';
 
   return (
@@ -235,12 +243,12 @@ function UploadCard({ config, onUploaded }: {
         isDragging ? "border-primary bg-primary/5 scale-[1.02]" : "border-border hover:border-primary/40",
         step === 'done_ok'     && "border-emerald-400 bg-emerald-50",
         step === 'done_review' && "border-amber-400 bg-amber-50",
+        step === 'error'       && "border-red-300 bg-red-50",
       )}
       onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
       onDragLeave={() => setIsDragging(false)}
       onDrop={handleDrop}
     >
-      {/* Hidden real file input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -253,6 +261,7 @@ function UploadCard({ config, onUploaded }: {
         "w-10 h-10 rounded-full flex items-center justify-center transition-colors",
         step === 'done_ok'     ? "bg-emerald-100" :
         step === 'done_review' ? "bg-amber-100" :
+        step === 'error'       ? "bg-red-100" :
                                  "bg-primary/10"
       )}>
         {isProcessing
@@ -261,7 +270,9 @@ function UploadCard({ config, onUploaded }: {
             ? <CheckCircle2 className="w-5 h-5 text-emerald-600" />
             : step === 'done_review'
               ? <AlertCircle className="w-5 h-5 text-amber-600" />
-              : <Icon className="w-5 h-5 text-primary" />
+              : step === 'error'
+                ? <AlertCircle className="w-5 h-5 text-red-500" />
+                : <Icon className="w-5 h-5 text-primary" />
         }
       </div>
 
@@ -275,16 +286,13 @@ function UploadCard({ config, onUploaded }: {
             <p className="text-xs text-primary font-medium flex items-center justify-center gap-1">
               <Sparkles className="w-3 h-3 animate-pulse" /> {currentStepLabel}
             </p>
-            {/* Step progress indicators */}
             <div className="flex justify-center gap-1">
               {AI_STEPS.map((s, i) => (
                 <div
                   key={s.key}
                   className={cn(
                     "h-1 w-6 rounded-full transition-colors duration-300",
-                    AI_STEPS.findIndex(x => x.key === step) >= i
-                      ? "bg-primary"
-                      : "bg-secondary"
+                    AI_STEPS.findIndex(x => x.key === step) >= i ? "bg-primary" : "bg-secondary"
                   )}
                 />
               ))}
@@ -292,21 +300,18 @@ function UploadCard({ config, onUploaded }: {
           </div>
         ) : step === 'done_ok' ? (
           <div>
-            <p className="text-xs text-emerald-700 mt-1">
-              ✓ Categorised automatically — added to financial records
-            </p>
-            {pickedFilename && (
-              <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>
-            )}
+            <p className="text-xs text-emerald-700 mt-1">✓ Categorised automatically — added to financial records</p>
+            {pickedFilename && <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>}
           </div>
         ) : step === 'done_review' ? (
           <div>
-            <p className="text-xs text-amber-700 mt-1">
-              ⚠ Sent to Inbox — needs your decision before it affects tax
-            </p>
-            {pickedFilename && (
-              <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>
-            )}
+            <p className="text-xs text-amber-700 mt-1">⚠ Sent to Inbox — needs your decision before affecting tax</p>
+            {pickedFilename && <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>}
+          </div>
+        ) : step === 'error' ? (
+          <div>
+            <p className="text-xs text-red-600 mt-1">Upload failed — please try again</p>
+            {pickedFilename && <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>}
           </div>
         ) : (
           <div>
@@ -321,7 +326,8 @@ function UploadCard({ config, onUploaded }: {
         variant={isDone ? 'outline' : 'default'}
         className={cn(
           "w-full cursor-pointer text-xs",
-          step === 'done_review' && "border-amber-400 bg-amber-100 text-amber-800 hover:bg-amber-200"
+          step === 'done_review' && "border-amber-400 bg-amber-100 text-amber-800 hover:bg-amber-200",
+          step === 'error'       && "border-red-300 bg-red-50 text-red-700 hover:bg-red-100",
         )}
         disabled={isProcessing}
         onClick={handleButtonClick}
@@ -329,6 +335,7 @@ function UploadCard({ config, onUploaded }: {
         {isProcessing          ? currentStepLabel :
          step === 'done_ok'    ? '✓ Done — upload another?' :
          step === 'done_review' ? '→ Go to Inbox to resolve' :
+         step === 'error'      ? '↻ Try again' :
                                   'Choose file or drag here'}
       </Button>
 
@@ -342,7 +349,10 @@ function UploadCard({ config, onUploaded }: {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Evidence() {
-  const { evidenceItems, addEvidenceItem, inboxItems, activeProfileId, transactions, addTransaction } = useStore();
+  const {
+    evidenceItems, addEvidenceItem, inboxItems, activeProfileId,
+    transactions, addTransaction, resetDemoData,
+  } = useStore();
   const [showManual, setShowManual] = useState(false);
   const [manualItem, setManualItem] = useState({
     date: new Date().toISOString().split('T')[0],
@@ -351,36 +361,15 @@ export default function Evidence() {
     category: 'General',
   });
   const [manualErrors, setManualErrors] = useState<{ description?: string; amount?: string }>({});
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
 
-  const handleUploaded = (cat: EvidenceCategory, needsReview: boolean, filename: string) => {
-    const fallbackNames: Record<EvidenceCategory, string> = {
-      bank_statement: 'bank-export.csv',
-      invoice_sent:   'invoice-new.pdf',
-      receipt:        'receipt-scan.jpg',
-      prior_return:   'sa302-prior-year.pdf',
-      contract:       'client-contract.pdf',
-      other:          'document.pdf',
-    };
-    addEvidenceItem({
-      profileId: activeProfileId,
-      category: cat,
-      filename: filename || fallbackNames[cat],
-      uploadedAt: new Date().toISOString().split('T')[0],
-      status: needsReview ? 'needs_review' : 'categorised',
-      extractedLines: needsReview ? undefined : Math.floor(Math.random() * 40) + 3,
-    });
-    // For auto-categorised items, also add a demo transaction
-    if (!needsReview) {
-      addTransaction({
-        date: new Date().toISOString().split('T')[0],
-        description: `[Upload] ${filename || fallbackNames[cat]}`,
-        amount: cat === 'invoice_sent' ? 1200 : -85,
-        category: cat === 'invoice_sent' ? 'Sales' : 'Expenses',
-        source: 'receipt',
-      });
-    }
+  // Callback for upload cards to trigger store refetch
+  const handleUploadComplete = () => {
+    setRefreshKey(k => k + 1);
+    // The store will re-fetch evidence on next render cycle
+    // via the evidenceApi list call from the add flow
   };
 
   const handleAddManual = () => {
@@ -412,12 +401,12 @@ export default function Evidence() {
       <div>
         <h1 className="text-3xl font-serif text-foreground">Evidence</h1>
         <p className="text-muted-foreground mt-1 text-lg max-w-2xl">
-          This is where everything starts. Upload your financial evidence and the system extracts,
-          categorises, and feeds it into your financial records.
+          Upload your financial evidence. The AI extracts, verifies HMRC allowability,
+          and feeds confirmed items into your financial records.
         </p>
       </div>
 
-      {/* Flow diagram — with live Inbox badge */}
+      {/* Flow diagram */}
       <FlowDiagram pendingCount={pendingInbox} />
 
       {/* Status bar */}
@@ -449,11 +438,16 @@ export default function Evidence() {
       <div>
         <h2 className="text-xl font-serif font-medium mb-1">Upload evidence</h2>
         <p className="text-sm text-muted-foreground mb-5">
-          Choose the right category so the AI applies the correct tax rules. In this prototype, clicking any card simulates an upload with the full AI categorisation sequence.
+          Choose the right category so the AI applies the correct tax rules. Files are uploaded securely and processed by GPT-4o.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {CATEGORIES.map(cat => (
-            <UploadCard key={cat.id} config={cat} onUploaded={handleUploaded} />
+            <UploadCard
+              key={cat.id}
+              config={cat}
+              profileId={activeProfileId}
+              onComplete={handleUploadComplete}
+            />
           ))}
         </div>
       </div>
@@ -529,7 +523,7 @@ export default function Evidence() {
             {evidenceItems.length === 0 ? (
               <div className="p-8 text-center text-muted-foreground">
                 <FolderOpen className="w-10 h-10 mx-auto mb-3 opacity-20" />
-                <p>No evidence uploaded yet.</p>
+                <p>No evidence uploaded yet. Choose a category above to start.</p>
               </div>
             ) : evidenceItems.map(ev => {
               const statusCfg = STATUS_CONFIG[ev.status];
@@ -544,7 +538,6 @@ export default function Evidence() {
                       <p className="font-medium text-sm truncate">{ev.filename}</p>
                       <p className="text-xs text-muted-foreground">
                         {catLabel} · Uploaded {ev.uploadedAt}
-                        {ev.extractedLines !== undefined && ` · ${ev.extractedLines} lines extracted`}
                         {ev.linkedInboxItemId && <span className="ml-1 text-amber-600">→ Inbox item</span>}
                       </p>
                     </div>
@@ -564,7 +557,12 @@ export default function Evidence() {
         <h2 className="text-xl font-serif font-medium mb-4">Transaction log</h2>
         <Card className="overflow-hidden shadow-sm">
           <div className="divide-y divide-border">
-            {transactions.slice(0, 8).map(t => (
+            {transactions.length === 0 ? (
+              <div className="p-8 text-center text-muted-foreground">
+                <Database className="w-10 h-10 mx-auto mb-3 opacity-20" />
+                <p>No transactions yet.</p>
+              </div>
+            ) : transactions.slice(0, 8).map(t => (
               <div key={t.id} className="p-4 flex items-center justify-between hover:bg-muted/30 transition-colors">
                 <div className="flex items-center gap-3">
                   <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center text-muted-foreground shrink-0">

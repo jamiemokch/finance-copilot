@@ -4,9 +4,9 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
-import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
+import { Route, Switch, Redirect, useLocation, Router as WouterRouter } from 'wouter';
 
-import { StoreProvider } from '@/lib/store';
+import { StoreProvider, useStore } from '@/lib/store';
 import { Layout } from '@/components/layout';
 
 import Welcome from '@/pages/welcome';
@@ -23,9 +23,25 @@ import Settings from '@/pages/settings';
 const queryClient = new QueryClient();
 
 function Router() {
-  const [location] = useLocation();
+  const [location, navigate] = useLocation();
+  const { isAuthenticated, isLoading } = useStore();
 
-  if (location === '/welcome' || location === '/onboarding' || location === '/') {
+  const isPublicRoute = location === '/' || location === '/welcome' || location === '/onboarding';
+
+  // Show loading spinner while auth resolves
+  if (isLoading) return null;
+
+  // Auto-redirect authenticated users away from welcome screen
+  if (isAuthenticated && isPublicRoute) {
+    return <Redirect to="/dashboard" />;
+  }
+
+  // Auth gate: send unauthenticated users to welcome/login
+  if (!isAuthenticated && !isPublicRoute) {
+    return <Redirect to="/" />;
+  }
+
+  if (isPublicRoute) {
     return (
       <Switch>
         <Route path="/" component={Welcome} />

@@ -1,0 +1,363 @@
+/**
+ * Typed API client for the SME Finance Copilot backend.
+ * All routes are relative to /api (the API server artifact path).
+ */
+
+const API = "/api";
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API}${path}`, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.headers ?? {}),
+    },
+    ...options,
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      msg = body.error ?? msg;
+    } catch {
+      // ignore parse error
+    }
+    throw new ApiError(res.status, msg);
+  }
+  return res.json() as Promise<T>;
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  id: string;
+  name?: string | null;
+  email?: string | null;
+  picture?: string | null;
+}
+
+export async function getAuthUser(): Promise<AuthUser | null> {
+  try {
+    const data = await apiFetch<{ user: AuthUser | null }>("/auth/user");
+    return data.user;
+  } catch {
+    return null;
+  }
+}
+
+// ── Profiles ──────────────────────────────────────────────────────────────────
+
+export interface APIProfile {
+  id: string;
+  userId: string;
+  name: string;
+  type: string;
+  taxYear?: string | null;
+  taxReserve?: number | null;
+  cashAccounts?: unknown;
+  arEntries?: unknown;
+  apEntries?: unknown;
+  createdAt?: string;
+}
+
+export const profilesApi = {
+  list: () => apiFetch<APIProfile[]>("/profiles"),
+  create: (data: { name: string; type?: string }) =>
+    apiFetch<APIProfile>("/profiles", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ── Financial Position ────────────────────────────────────────────────────────
+
+export interface APITaxLine {
+  label: string;
+  amount: number;
+}
+
+export interface APITaxCalculation {
+  lines: APITaxLine[];
+  balanceDue: number;
+  reserveGap: number;
+}
+
+export interface APIPLBreakdown {
+  revenues: number;
+  confirmedExpenses: number;
+  pendingExpenses: number;
+  profit: number;
+}
+
+export interface APIAccountBalance {
+  name: string;
+  balance: number;
+}
+
+export interface APICashPosition {
+  accounts: APIAccountBalance[];
+  taxReserve: number;
+  apDueWithin30Days: number;
+  netAvailable: number;
+}
+
+export interface APIAREntry {
+  name: string;
+  amount: number;
+  daysPastDue: number;
+  invoiceCount: number;
+}
+
+export interface APIAPEntry {
+  name: string;
+  amount: number;
+  daysUntilDue: number;
+}
+
+export interface APIKPI {
+  id: string;
+  label: string;
+  value: string;
+  trend: string;
+  basis: string;
+  rawValue?: number;
+  detail?: string;
+}
+
+export interface APISAReadiness {
+  score: number;
+  completedCount: number;
+  totalCount: number;
+}
+
+export interface APIFinancialPosition {
+  plBreakdown: APIPLBreakdown;
+  taxCalculation: APITaxCalculation;
+  cashPosition: APICashPosition;
+  arEntries: APIAREntry[];
+  apEntries: APIAPEntry[];
+  kpis: APIKPI[];
+  saReadiness: APISAReadiness;
+  pendingInboxCount: number;
+}
+
+export const positionApi = {
+  get: (profileId: string) =>
+    apiFetch<APIFinancialPosition>(`/profiles/${profileId}/position`),
+};
+
+// ── Inbox ─────────────────────────────────────────────────────────────────────
+
+export interface APIInboxItem {
+  id: string;
+  profileId: string;
+  evidenceId?: string | null;
+  date: string;
+  description: string;
+  amount?: number | null;
+  status: string;
+  resolution?: string | null;
+  taxImpact?: number | null;
+  aiReasoning?: string | null;
+  options: unknown;
+  resolvedAt?: string | null;
+}
+
+export const inboxApi = {
+  list: (profileId: string) =>
+    apiFetch<APIInboxItem[]>(`/profiles/${profileId}/inbox`),
+  resolve: (profileId: string, itemId: string, resolution: string) =>
+    apiFetch<APIInboxItem>(`/profiles/${profileId}/inbox/${itemId}/resolve`, {
+      method: "PATCH",
+      body: JSON.stringify({ resolution }),
+    }),
+};
+
+// ── Evidence ──────────────────────────────────────────────────────────────────
+
+export interface APIEvidenceItem {
+  id: string;
+  profileId: string;
+  filename: string;
+  objectPath: string;
+  mimeType: string;
+  category?: string | null;
+  status: string;
+  confidence?: number | null;
+  extractedData?: unknown;
+  aiReasoning?: string | null;
+  uploadedAt?: string;
+}
+
+export interface APIUploadUrl {
+  uploadURL: string;
+  objectPath: string;
+}
+
+export const evidenceApi = {
+  list: (profileId: string) =>
+    apiFetch<APIEvidenceItem[]>(`/profiles/${profileId}/evidence`),
+  requestUploadUrl: (name: string, size: number, contentType: string) =>
+    apiFetch<APIUploadUrl>("/storage/uploads/request-url", {
+      method: "POST",
+      body: JSON.stringify({ name, size, contentType }),
+    }),
+  register: (
+    profileId: string,
+    data: { filename: string; objectPath: string; mimeType: string; category?: string },
+  ) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  process: (profileId: string, evidenceId: string) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/process`, {
+      method: "POST",
+    }),
+};
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+
+export interface APITransaction {
+  id: string;
+  profileId: string;
+  date: string;
+  description: string;
+  amount: number;
+  category: string;
+  taxTreatment: string;
+  source: string;
+  evidenceId?: string | null;
+  createdAt?: string;
+}
+
+export const transactionsApi = {
+  list: (profileId: string) =>
+    apiFetch<APITransaction[]>(`/profiles/${profileId}/transactions`),
+  create: (
+    profileId: string,
+    data: { date: string; description: string; amount: number; category?: string; taxTreatment?: string },
+  ) =>
+    apiFetch<APITransaction>(`/profiles/${profileId}/transactions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ── Decisions ─────────────────────────────────────────────────────────────────
+
+export interface APIDecision {
+  id: string;
+  profileId: string;
+  ideaId: string;
+  ideaTitle: string;
+  ideaCategory: string;
+  date: string;
+  userDecision: string;
+  userRationale?: string | null;
+  assumptionsSnapshot: unknown;
+  expectedPLImpact: number;
+  expectedCashImpact: number;
+  expectedTaxImpact: number;
+  status: string;
+  actualOutcome?: string | null;
+  actualPLImpact?: number | null;
+  actualCashImpact?: number | null;
+  actualTaxImpact?: number | null;
+}
+
+export const decisionsApi = {
+  list: (profileId: string) =>
+    apiFetch<APIDecision[]>(`/profiles/${profileId}/decisions`),
+  commit: (profileId: string, data: object) =>
+    apiFetch<APIDecision>(`/profiles/${profileId}/decisions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (profileId: string, decisionId: string, data: object) =>
+    apiFetch<APIDecision>(`/profiles/${profileId}/decisions/${decisionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+};
+
+// ── Business Ideas ────────────────────────────────────────────────────────────
+
+export interface APIBusinessIdea {
+  id: string;
+  category: string;
+  title: string;
+  summary: string;
+  currentPosition: string;
+  proposedAction: string;
+  priorityTier: string;
+  plImpactRange?: { min: number; max: number } | null;
+  cashImpactRange?: { min: number; max: number } | null;
+  taxImpactRange?: { min: number; max: number } | null;
+  paybackRange?: { minMonths: number | null; maxMonths: number | null } | null;
+  urgencyNote?: string | null;
+  editableAssumptions: Array<{
+    key: string; label: string; value: number; unit: string;
+    min: number; max: number; step: number;
+  }>;
+  whatMustBeTrue: string[];
+  source: string;
+  confidence: string;
+  status: string;
+  committedDecisionId: string | null;
+}
+
+export const ideasApi = {
+  list: (profileId: string) =>
+    apiFetch<APIBusinessIdea[]>(`/profiles/${profileId}/business-ideas`),
+};
+
+// ── SA Checklist ──────────────────────────────────────────────────────────────
+
+export interface APISAChecklistItem {
+  id: string;
+  profileId: string;
+  checkId: string;
+  label: string;
+  detail?: string | null;
+  completed: boolean;
+  category?: string | null;
+  completedAt?: string | null;
+}
+
+export const saChecklistApi = {
+  list: (profileId: string) =>
+    apiFetch<APISAChecklistItem[]>(`/profiles/${profileId}/sa-checklist`),
+  update: (profileId: string, itemId: string, completed: boolean) =>
+    apiFetch<APISAChecklistItem>(`/profiles/${profileId}/sa-checklist/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ completed }),
+    }),
+};
+
+// ── Copilot ───────────────────────────────────────────────────────────────────
+
+export const copilotApi = {
+  message: (profileId: string, message: string) =>
+    apiFetch<{ reply: string; contextSummary: string }>("/copilot/message", {
+      method: "POST",
+      body: JSON.stringify({ profileId, message }),
+    }),
+};
+
+// ── Demo ──────────────────────────────────────────────────────────────────────
+
+export const demoApi = {
+  seed: () => apiFetch<{ profileId: string; message: string }>("/demo/seed", { method: "POST" }),
+  reset: () => apiFetch<{ profileId: string; message: string }>("/demo/reset", { method: "POST" }),
+};

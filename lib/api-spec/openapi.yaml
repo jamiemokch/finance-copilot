@@ -3,13 +3,34 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: SME Finance Copilot API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: Auth
+    description: Browser and mobile authentication endpoints.
+  - name: Storage
+    description: Object storage upload and serving endpoints.
+  - name: Profiles
+    description: User profile operations
+  - name: Evidence
+    description: Evidence upload and AI extraction
+  - name: Transactions
+    description: Financial transaction operations
+  - name: Inbox
+    description: Inbox item review and resolution
+  - name: Position
+    description: Computed financial position and business ideas
+  - name: Decisions
+    description: Decision memory and SA checklist
+  - name: Copilot
+    description: AI copilot operations
+  - name: Demo
+    description: Demo data operations
+
 paths:
   /healthz:
     get:
@@ -24,7 +45,587 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /auth/user:
+    get:
+      tags: [Auth]
+      operationId: getCurrentAuthUser
+      summary: Get the currently authenticated user
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationSessionHeader'
+        - $ref: '#/components/parameters/SessionCookie'
+      responses:
+        '200':
+          description: Auth status resolved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUserEnvelope'
+
+  /login:
+    get:
+      tags: [Auth]
+      operationId: beginBrowserLogin
+      summary: Start the browser OIDC login flow
+      parameters:
+        - name: returnTo
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the OIDC authorization endpoint.
+
+  /callback:
+    get:
+      tags: [Auth]
+      operationId: handleBrowserLoginCallback
+      summary: Complete the browser OIDC login flow
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: iss
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the returnTo path on success.
+
+  /logout:
+    get:
+      tags: [Auth]
+      operationId: logoutBrowserSession
+      summary: Clear the session and begin OIDC logout
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationSessionHeader'
+        - $ref: '#/components/parameters/SessionCookie'
+        - name: returnTo
+          in: query
+          required: false
+          schema:
+            type: string
+            default: /
+      responses:
+        '302':
+          description: Redirect to OIDC provider logout URL.
+
+  /mobile-auth/token-exchange:
+    post:
+      tags: [Auth]
+      operationId: exchangeMobileAuthorizationCode
+      summary: Exchange a mobile OIDC code for a session token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileTokenExchangeRequest'
+      responses:
+        '200':
+          description: Session created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileTokenExchangeSuccess'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Token did not contain usable claims.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Token exchange failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /mobile-auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logoutMobileSession
+      summary: Delete a mobile session token
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationSessionHeader'
+      responses:
+        '200':
+          description: Logout processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogoutSuccess'
+
+  /storage/uploads/request-url:
+    post:
+      tags: [Storage]
+      operationId: requestUploadUrl
+      summary: Request a presigned URL for file upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+      responses:
+        '200':
+          description: Presigned upload URL generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to generate upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /storage/public-objects/{filePath}:
+    get:
+      tags: [Storage]
+      operationId: getPublicObject
+      summary: Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object content streamed.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /storage/objects/{objectPath}:
+    get:
+      tags: [Storage]
+      operationId: getStorageObject
+      summary: Serve an object entity from PRIVATE_OBJECT_DIR
+      parameters:
+        - name: objectPath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object content streamed.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Object not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /profiles:
+    get:
+      tags: [Profiles]
+      operationId: listProfiles
+      summary: List the authenticated user's profiles
+      responses:
+        '200':
+          description: List of profiles.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Profile'
+    post:
+      tags: [Profiles]
+      operationId: createProfile
+      summary: Create a new profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileInput'
+      responses:
+        '201':
+          description: Profile created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+
+  /profiles/{profileId}/position:
+    get:
+      tags: [Position]
+      operationId: getFinancialPosition
+      summary: Get the computed financial position for a profile
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: Computed financial position.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancialPosition'
+
+  /profiles/{profileId}/evidence:
+    get:
+      tags: [Evidence]
+      operationId: listEvidence
+      summary: List evidence items for a profile
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of evidence items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EvidenceItem'
+    post:
+      tags: [Evidence]
+      operationId: createEvidence
+      summary: Register a new evidence item after upload
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceInput'
+      responses:
+        '201':
+          description: Evidence item created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceItem'
+
+  /profiles/{profileId}/evidence/{evidenceId}/process:
+    post:
+      tags: [Evidence]
+      operationId: processEvidence
+      summary: Trigger AI extraction on an evidence item
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: evidenceId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Evidence processed — extractedData and confidence populated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceItem'
+        '404':
+          description: Evidence item not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /profiles/{profileId}/transactions:
+    get:
+      tags: [Transactions]
+      operationId: listTransactions
+      summary: List transactions for a profile
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of transactions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Transaction'
+    post:
+      tags: [Transactions]
+      operationId: createTransaction
+      summary: Create a manual transaction
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionInput'
+      responses:
+        '201':
+          description: Transaction created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+
+  /profiles/{profileId}/inbox:
+    get:
+      tags: [Inbox]
+      operationId: listInboxItems
+      summary: List inbox items for a profile
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of inbox items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InboxItem'
+
+  /profiles/{profileId}/inbox/{itemId}/resolve:
+    patch:
+      tags: [Inbox]
+      operationId: resolveInboxItem
+      summary: Resolve an inbox item — creates a transaction and updates financial position
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InboxResolveInput'
+      responses:
+        '200':
+          description: Inbox item resolved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxItem'
+
+  /profiles/{profileId}/business-ideas:
+    get:
+      tags: [Position]
+      operationId: listBusinessIdeas
+      summary: List business ideas with live financial baselines
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of business ideas with live baselines.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BusinessIdea'
+
+  /profiles/{profileId}/decisions:
+    get:
+      tags: [Decisions]
+      operationId: listDecisions
+      summary: List decision memory entries
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of decisions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DecisionMemory'
+    post:
+      tags: [Decisions]
+      operationId: createDecision
+      summary: Save a new decision
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionInput'
+      responses:
+        '201':
+          description: Decision saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionMemory'
+
+  /profiles/{profileId}/decisions/{decisionId}:
+    patch:
+      tags: [Decisions]
+      operationId: updateDecision
+      summary: Update a decision (status, actual outcomes)
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: decisionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionUpdate'
+      responses:
+        '200':
+          description: Decision updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionMemory'
+
+  /profiles/{profileId}/sa-checklist:
+    get:
+      tags: [Decisions]
+      operationId: listSAChecklist
+      summary: List SA readiness checklist items
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+      responses:
+        '200':
+          description: List of SA checklist items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SAChecklistItem'
+
+  /profiles/{profileId}/sa-checklist/{itemId}:
+    patch:
+      tags: [Decisions]
+      operationId: updateSAChecklistItem
+      summary: Mark a checklist item complete or incomplete
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SAChecklistUpdate'
+      responses:
+        '200':
+          description: Checklist item updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SAChecklistItem'
+
+  /copilot/message:
+    post:
+      tags: [Copilot]
+      operationId: sendCopilotMessage
+      summary: Send a message to the AI copilot with live financial context
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CopilotMessageInput'
+      responses:
+        '200':
+          description: AI response with financial context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CopilotMessageResponse'
+
+  /demo/reset:
+    post:
+      tags: [Demo]
+      operationId: resetDemoData
+      summary: Reset all user data and re-seed canonical demo data
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DemoResetInput'
+      responses:
+        '200':
+          description: Demo data reset and re-seeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoResetResponse'
+
 components:
+  parameters:
+    AuthorizationSessionHeader:
+      name: Authorization
+      in: header
+      required: false
+      description: 'Opaque session token — `Bearer <sid>`.'
+      schema:
+        type: string
+    SessionCookie:
+      name: sid
+      in: cookie
+      required: false
+      description: Browser session cookie.
+      schema:
+        type: string
+    ProfileIdParam:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        type: string
+
   schemas:
     HealthStatus:
       type: object
@@ -34,3 +635,657 @@ components:
       required:
         - status
 
+    AuthUser:
+      type: object
+      required: [id, email, firstName, lastName, profileImageUrl]
+      properties:
+        id:
+          type: string
+        email:
+          type: [string, 'null']
+        firstName:
+          type: [string, 'null']
+        lastName:
+          type: [string, 'null']
+        profileImageUrl:
+          type: [string, 'null']
+
+    AuthUserEnvelope:
+      type: object
+      required: [user]
+      properties:
+        user:
+          oneOf:
+            - $ref: '#/components/schemas/AuthUser'
+            - type: 'null'
+
+    MobileTokenExchangeRequest:
+      type: object
+      required: [code, code_verifier, redirect_uri, state]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        code_verifier:
+          type: string
+          minLength: 1
+        redirect_uri:
+          type: string
+          minLength: 1
+        state:
+          type: string
+          minLength: 1
+        nonce:
+          type: string
+          minLength: 1
+
+    MobileTokenExchangeSuccess:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+
+    LogoutSuccess:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          const: true
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        size:
+          type: number
+          minimum: 1
+        contentType:
+          type: string
+          minLength: 1
+
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+        objectPath:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/UploadUrlRequest'
+
+    Profile:
+      type: object
+      required: [id, userId, name, type, taxYear, createdAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        taxYear:
+          type: string
+        taxReserve:
+          type: number
+        createdAt:
+          type: string
+
+    ProfileInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        type:
+          type: string
+          default: sole_trader
+
+    PLBreakdown:
+      type: object
+      required: [revenues, confirmedExpenses, pendingExpenses, profit]
+      properties:
+        revenues:
+          type: number
+        confirmedExpenses:
+          type: number
+        pendingExpenses:
+          type: number
+        profit:
+          type: number
+
+    TaxLine:
+      type: object
+      required: [label, amount]
+      properties:
+        label:
+          type: string
+        amount:
+          type: number
+
+    TaxCalculation:
+      type: object
+      required: [lines, balanceDue, reserveGap]
+      properties:
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaxLine'
+        balanceDue:
+          type: number
+        reserveGap:
+          type: number
+
+    AccountBalance:
+      type: object
+      required: [name, balance]
+      properties:
+        name:
+          type: string
+        balance:
+          type: number
+
+    CashPosition:
+      type: object
+      required: [accounts, taxReserve, apDueWithin30Days, netAvailable]
+      properties:
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountBalance'
+        taxReserve:
+          type: number
+        apDueWithin30Days:
+          type: number
+        netAvailable:
+          type: number
+
+    AREntry:
+      type: object
+      required: [name, amount]
+      properties:
+        name:
+          type: string
+        amount:
+          type: number
+        daysPastDue:
+          type: number
+        invoiceCount:
+          type: number
+
+    APEntry:
+      type: object
+      required: [name, amount]
+      properties:
+        name:
+          type: string
+        amount:
+          type: number
+        daysUntilDue:
+          type: number
+
+    KPI:
+      type: object
+      required: [id, label, value, trend, basis]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        value:
+          type: string
+        trend:
+          type: string
+        basis:
+          type: string
+        rawValue:
+          type: number
+        detail:
+          type: string
+
+    SAReadiness:
+      type: object
+      required: [score, completedCount, totalCount]
+      properties:
+        score:
+          type: number
+        completedCount:
+          type: number
+        totalCount:
+          type: number
+
+    FinancialPosition:
+      type: object
+      required: [plBreakdown, taxCalculation, cashPosition, arEntries, apEntries, kpis, saReadiness, pendingInboxCount]
+      properties:
+        plBreakdown:
+          $ref: '#/components/schemas/PLBreakdown'
+        taxCalculation:
+          $ref: '#/components/schemas/TaxCalculation'
+        cashPosition:
+          $ref: '#/components/schemas/CashPosition'
+        arEntries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AREntry'
+        apEntries:
+          type: array
+          items:
+            $ref: '#/components/schemas/APEntry'
+        kpis:
+          type: array
+          items:
+            $ref: '#/components/schemas/KPI'
+        saReadiness:
+          $ref: '#/components/schemas/SAReadiness'
+        pendingInboxCount:
+          type: number
+
+    ExtractedData:
+      type: object
+      properties:
+        supplier:
+          type: string
+        date:
+          type: string
+        amount:
+          type: number
+        description:
+          type: string
+        taxTreatment:
+          type: string
+        confidence:
+          type: number
+        needsReview:
+          type: boolean
+        rawText:
+          type: string
+
+    EvidenceItem:
+      type: object
+      required: [id, profileId, filename, objectPath, mimeType, category, status, createdAt]
+      properties:
+        id:
+          type: string
+        profileId:
+          type: string
+        filename:
+          type: string
+        objectPath:
+          type: string
+        mimeType:
+          type: string
+        category:
+          type: string
+        status:
+          type: string
+        extractedData:
+          $ref: '#/components/schemas/ExtractedData'
+        confidence:
+          type: [number, 'null']
+        aiReasoning:
+          type: [string, 'null']
+        createdAt:
+          type: string
+
+    EvidenceInput:
+      type: object
+      required: [filename, objectPath, mimeType]
+      properties:
+        filename:
+          type: string
+        objectPath:
+          type: string
+        mimeType:
+          type: string
+        category:
+          type: string
+
+    Transaction:
+      type: object
+      required: [id, profileId, date, description, amount, category, taxTreatment, source, createdAt]
+      properties:
+        id:
+          type: string
+        profileId:
+          type: string
+        date:
+          type: string
+        description:
+          type: string
+        amount:
+          type: number
+        category:
+          type: string
+        taxTreatment:
+          type: string
+        source:
+          type: string
+        evidenceId:
+          type: [string, 'null']
+        createdAt:
+          type: string
+
+    TransactionInput:
+      type: object
+      required: [date, description, amount, category]
+      properties:
+        date:
+          type: string
+        description:
+          type: string
+        amount:
+          type: number
+        category:
+          type: string
+        taxTreatment:
+          type: string
+        source:
+          type: string
+
+    InboxSubOption:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+        isSuggested:
+          type: boolean
+
+    InboxOption:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+        isSuggested:
+          type: boolean
+        subOptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxSubOption'
+
+    InboxItem:
+      type: object
+      required: [id, profileId, date, description, status, aiReasoning, options, createdAt]
+      properties:
+        id:
+          type: string
+        profileId:
+          type: string
+        evidenceId:
+          type: [string, 'null']
+        date:
+          type: string
+        description:
+          type: string
+        amount:
+          type: [number, 'null']
+        aiReasoning:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxOption'
+        status:
+          type: string
+        resolution:
+          type: [string, 'null']
+        taxImpact:
+          type: [number, 'null']
+        createdAt:
+          type: string
+
+    InboxResolveInput:
+      type: object
+      required: [resolution]
+      properties:
+        resolution:
+          type: string
+          minLength: 1
+
+    ImpactRange:
+      type: object
+      required: [min, max]
+      properties:
+        min:
+          type: number
+        max:
+          type: number
+
+    PaybackRange:
+      type: object
+      properties:
+        minMonths:
+          type: [number, 'null']
+        maxMonths:
+          type: [number, 'null']
+
+    AssumptionField:
+      type: object
+      required: [key, label, value, unit, min, max, step]
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+        min:
+          type: number
+        max:
+          type: number
+        step:
+          type: number
+
+    BusinessIdea:
+      type: object
+      required: [id, category, title, summary, currentPosition, proposedAction, priorityTier, source, confidence, status, editableAssumptions, whatMustBeTrue]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        title:
+          type: string
+        summary:
+          type: string
+        currentPosition:
+          type: string
+        proposedAction:
+          type: string
+        priorityTier:
+          type: string
+        plImpactRange:
+          $ref: '#/components/schemas/ImpactRange'
+        cashImpactRange:
+          $ref: '#/components/schemas/ImpactRange'
+        taxImpactRange:
+          $ref: '#/components/schemas/ImpactRange'
+        paybackRange:
+          $ref: '#/components/schemas/PaybackRange'
+        urgencyNote:
+          type: string
+        editableAssumptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssumptionField'
+        whatMustBeTrue:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+        confidence:
+          type: string
+        status:
+          type: string
+        committedDecisionId:
+          type: [string, 'null']
+
+    DecisionMemory:
+      type: object
+      required: [id, profileId, ideaId, ideaTitle, ideaCategory, date, userDecision, userRationale, expectedPLImpact, expectedCashImpact, expectedTaxImpact, status, assumptionsSnapshot, createdAt]
+      properties:
+        id:
+          type: string
+        profileId:
+          type: string
+        ideaId:
+          type: string
+        ideaTitle:
+          type: string
+        ideaCategory:
+          type: string
+        date:
+          type: string
+        userDecision:
+          type: string
+        userRationale:
+          type: string
+        expectedPLImpact:
+          type: number
+        expectedCashImpact:
+          type: number
+        expectedTaxImpact:
+          type: number
+        status:
+          type: string
+        assumptionsSnapshot:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssumptionField'
+        actualOutcome:
+          type: [string, 'null']
+        actualPLImpact:
+          type: [number, 'null']
+        actualCashImpact:
+          type: [number, 'null']
+        actualTaxImpact:
+          type: [number, 'null']
+        createdAt:
+          type: string
+
+    DecisionInput:
+      type: object
+      required: [ideaId, ideaTitle, ideaCategory, userDecision, expectedPLImpact, expectedCashImpact, expectedTaxImpact]
+      properties:
+        ideaId:
+          type: string
+        ideaTitle:
+          type: string
+        ideaCategory:
+          type: string
+        userDecision:
+          type: string
+        userRationale:
+          type: string
+        assumptionsSnapshot:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssumptionField'
+        expectedPLImpact:
+          type: number
+        expectedCashImpact:
+          type: number
+        expectedTaxImpact:
+          type: number
+        status:
+          type: string
+
+    DecisionUpdate:
+      type: object
+      properties:
+        status:
+          type: string
+        actualOutcome:
+          type: string
+        actualPLImpact:
+          type: number
+        actualCashImpact:
+          type: number
+        actualTaxImpact:
+          type: number
+
+    SAChecklistItem:
+      type: object
+      required: [id, profileId, checkId, label, detail, category, completed, createdAt]
+      properties:
+        id:
+          type: string
+        profileId:
+          type: string
+        checkId:
+          type: string
+        label:
+          type: string
+        detail:
+          type: string
+        category:
+          type: string
+        completed:
+          type: boolean
+        completedAt:
+          type: [string, 'null']
+        createdAt:
+          type: string
+
+    SAChecklistUpdate:
+      type: object
+      required: [completed]
+      properties:
+        completed:
+          type: boolean
+
+    CopilotMessageInput:
+      type: object
+      required: [profileId, message]
+      properties:
+        profileId:
+          type: string
+        message:
+          type: string
+          minLength: 1
+
+    CopilotMessageResponse:
+      type: object
+      required: [reply]
+      properties:
+        reply:
+          type: string
+        contextSummary:
+          type: string
+
+    DemoResetInput:
+      type: object
+      properties:
+        profileId:
+          type: string
+
+    DemoResetResponse:
+      type: object
+      required: [success, profileId]
+      properties:
+        success:
+          type: boolean
+        profileId:
+          type: string
+        message:
+          type: string

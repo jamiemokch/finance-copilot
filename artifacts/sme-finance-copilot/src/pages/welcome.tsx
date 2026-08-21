@@ -1,8 +1,9 @@
-import { Link } from 'wouter';
 import { Button } from '@/components/ui';
+import { useStore } from '@/lib/store';
 import { BrainCircuit } from 'lucide-react';
 
 export default function Welcome() {
+  const { login } = useStore();
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
       <div className="max-w-md w-full space-y-8 text-center">
@@ -19,11 +20,16 @@ export default function Welcome() {
           </p>
         </div>
         <div className="pt-8 space-y-4">
-          <Link href="/onboarding" className="inline-flex items-center justify-center whitespace-nowrap rounded-lg text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 cursor-pointer bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm h-12 px-8 w-full text-lg">
-            Get Started
-          </Link>
-          <p className="text-xs text-muted-foreground bg-amber-100 text-amber-800 p-2 rounded-lg">
-            Prototype mode: Uses fictional sample data. Not connected to HMRC or any banks.
+          <Button
+            size="lg"
+            className="w-full text-lg h-12 cursor-pointer"
+            onClick={login}
+          >
+            Get Started — Sign in with Replit
+          </Button>
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 p-2 rounded-lg">
+            Alpha-lite: real data, real AI analysis, fictional demo transactions pre-loaded.
+            Not connected to HMRC or any bank feeds.
           </p>
         </div>
       </div>
