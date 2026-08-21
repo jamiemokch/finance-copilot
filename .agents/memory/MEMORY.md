@@ -1,4 +1,4 @@
-- [SME Finance Copilot architecture](sme-copilot-arch.md) — frontend-only React/Vite prototype, local state via StoreProvider; no backend, no real AI, fictional data only
+- [SME Finance Copilot architecture](sme-copilot-arch.md) — full-stack React/Vite, Express, PostgreSQL, and Replit OIDC app; profiles and manual records persist server-side
 - [SME Finance Copilot canonical figures](sme-copilot-figures.md) — all canonical money values and where they live in code
 - [SME Finance Copilot PM audit changes](sme-copilot-pm-audit.md) — summary of all PM audit changes applied (priority tiers, Decision Memory, tax gap, Evidence animation, nav, tasks)
 - [SME Finance Copilot debug findings](sme-copilot-debug-aug2026.md) — root causes and fixes: plBreakdown/taxCalculation now reactive; resolveInboxItem recalculates tax; PeerBenchmark starts collapsed

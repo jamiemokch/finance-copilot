@@ -34,6 +34,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, msg);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -328,7 +329,9 @@ export interface APITransaction {
   date: string;
   description: string;
   amount: number;
+  recordType?: 'income' | 'expense';
   category: string;
+  note?: string | null;
   taxTreatment: string;
   source: string;
   evidenceId?: string | null;
@@ -350,12 +353,21 @@ export const transactionsApi = {
     apiFetch<APITransaction[]>(`/profiles/${profileId}/transactions`),
   create: (
     profileId: string,
-    data: { date: string; description: string; amount: number; category?: string; taxTreatment?: string },
+    data: { date: string; recordType: 'income' | 'expense'; description: string; amount: number; category: string; note?: string | null },
   ) =>
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  update: (
+    profileId: string,
+    transactionId: string,
+    data: { date: string; recordType: 'income' | 'expense'; description: string; amount: number; category: string; note?: string | null },
+  ) => apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}`, {
+    method: "PATCH", body: JSON.stringify(data),
+  }),
+  remove: (profileId: string, transactionId: string) =>
+    apiFetch<void>(`/profiles/${profileId}/transactions/${transactionId}`, { method: "DELETE" }),
   attachEvidence: (profileId: string, transactionId: string, evidenceId: string) =>
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {
       method: "PATCH", body: JSON.stringify({ evidenceId }),

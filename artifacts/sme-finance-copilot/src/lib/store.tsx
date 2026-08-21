@@ -81,8 +81,11 @@ export interface TransactionItem {
   date: string;
   description: string;
   amount: number;
+  recordType: 'income' | 'expense';
   category: string;
-  source: 'bank' | 'manual' | 'receipt';
+  note?: string;
+  createdAt?: string;
+  source: string;
   evidenceTier?: number;
   evidenceId?: string | null;
 }
@@ -349,7 +352,9 @@ export interface AppState {
   positionItems: PositionItem[];
 
   transactions: TransactionItem[];
-  addTransaction: (transaction: Omit<TransactionItem, 'id'>) => Promise<void>;
+  addTransaction: (transaction: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>) => Promise<void>;
+  updateTransaction: (id: string, transaction: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>) => Promise<void>;
+  deleteTransaction: (id: string) => Promise<void>;
 
   evidenceItems: EvidenceItem[];
   addEvidenceItem: (item: Omit<EvidenceItem, 'id'>) => string;
@@ -627,10 +632,15 @@ function mapTransaction(t: APITransaction): TransactionItem {
     date: t.date,
     description: t.description,
     amount: t.amount,
+    // Legacy rows predate the explicit record type. Positive entries were
+    // historically income, even though the newly-added DB default is expense.
+    recordType: t.amount > 0 ? 'income' : (t.recordType ?? 'expense'),
     category: t.category,
-    source: (src === 'bank' || src === 'manual' || src === 'receipt') ? src : 'manual',
+    note: t.note ?? undefined,
+    source: src,
     evidenceTier: t.evidenceTier,
     evidenceId: t.evidenceId,
+    createdAt: t.createdAt,
   };
 }
 
@@ -847,12 +857,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
-  const addTransaction = useCallback(async (tx: Omit<TransactionItem, 'id'>): Promise<void> => {
-    const taxTreatment = tx.amount > 0 ? 'income' : 'deductible';
+  const addTransaction = useCallback(async (tx: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>): Promise<void> => {
     await transactionsApi.create(activeProfileId, {
-      date: tx.date, description: tx.description, amount: tx.amount,
-      category: tx.category, taxTreatment,
+      date: tx.date, recordType: tx.recordType, description: tx.description, amount: tx.amount,
+      category: tx.category, note: tx.note,
     });
+    await fetchAll(activeProfileId);
+  }, [activeProfileId, fetchAll]);
+
+  const updateTransaction = useCallback(async (id: string, tx: Omit<TransactionItem, 'id' | 'source' | 'evidenceTier'>): Promise<void> => {
+    await transactionsApi.update(activeProfileId, id, {
+      date: tx.date, recordType: tx.recordType, description: tx.description, amount: tx.amount,
+      category: tx.category, note: tx.note,
+    });
+    await fetchAll(activeProfileId);
+  }, [activeProfileId, fetchAll]);
+
+  const deleteTransaction = useCallback(async (id: string): Promise<void> => {
+    await transactionsApi.remove(activeProfileId, id);
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
@@ -1029,6 +1051,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     positionItems,
     transactions,
     addTransaction,
+    updateTransaction,
+    deleteTransaction,
 
     evidenceItems,
     addEvidenceItem,

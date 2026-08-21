@@ -1,159 +1,151 @@
-import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
-import { evidenceApi, transactionsApi } from '@/lib/api';
-import { useStore } from '@/lib/store';
-import { useRef, useState } from 'react';
-import {
-  Banknote, CheckCircle2, ChevronLeft, Database, FileSpreadsheet, FileText,
-  Loader2, Pencil, Plus, Receipt, UploadCloud, AlertCircle, Landmark,
-} from 'lucide-react';
-import { cn } from '@/components/ui';
-import { Link } from 'wouter';
+import { Button, Card, Input, Label, Select } from '@/components/ui';
+import { useStore, type TransactionItem } from '@/lib/store';
+import { CheckCircle2, Pencil, Plus, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
 
-type Intake = 'document' | 'bank' | 'ledger' | 'manual' | null;
-type ColumnRole = 'date' | 'amount' | 'description' | 'category' | 'debit' | 'credit' | 'balance' | 'none';
-type Mapping = { headerRow: number; columns: Partial<Record<Exclude<ColumnRole, 'none'>, number>>; dateFormat?: string | null; currency?: string };
+type RecordType = 'income' | 'expense';
+type FormValues = {
+  date: string;
+  recordType: RecordType;
+  description: string;
+  amount: string;
+  category: string;
+  note: string;
+};
 
-const INTAKES = [
-  { id: 'document' as const, title: 'Receipt or invoice', text: 'A receipt, invoice, or other original document.', icon: Receipt, note: 'Best for proof of a specific transaction' },
-  { id: 'bank' as const, title: 'Bank export', text: 'A CSV from Starling, Monzo, Barclays or another bank.', icon: Landmark, note: 'Official bank-supported record' },
-  { id: 'ledger' as const, title: 'Spreadsheet or CSV', text: 'Your own ledger, cashbook, or exported spreadsheet.', icon: FileSpreadsheet, note: 'Useful for existing records' },
-  { id: 'manual' as const, title: 'Quick entry', text: 'Type one transaction in now.', icon: Pencil, note: 'For cash or out-of-pocket items' },
-];
+const categories: Record<RecordType, { value: string; label: string }[]> = {
+  income: [
+    { value: 'sales', label: 'Sales or services' },
+    { value: 'other_income', label: 'Other business income' },
+  ],
+  expense: [
+    { value: 'travel', label: 'Travel and mileage' },
+    { value: 'office_software', label: 'Office, phone and software' },
+    { value: 'materials', label: 'Materials and stock' },
+    { value: 'professional_fees', label: 'Professional fees and insurance' },
+    { value: 'marketing', label: 'Advertising and marketing' },
+    { value: 'equipment', label: 'Equipment and tools' },
+    { value: 'other_expense', label: 'Other business expense' },
+  ],
+};
 
-function FilePicker({ accept, onPick, label = 'Choose file' }: { accept: string; onPick: (file: File) => void; label?: string }) {
-  const ref = useRef<HTMLInputElement>(null);
-  return <>
-    <input ref={ref} type="file" accept={accept} className="hidden" onChange={e => {
-      const file = e.target.files?.[0]; if (file) onPick(file); e.target.value = '';
-    }} />
-    <Button onClick={() => ref.current?.click()} className="gap-2 cursor-pointer"><UploadCloud className="w-4 h-4" />{label}</Button>
-  </>;
+function currentTaxYear() {
+  const today = new Date();
+  const startYear = today.getUTCMonth() > 3 || (today.getUTCMonth() === 3 && today.getUTCDate() >= 6)
+    ? today.getUTCFullYear() : today.getUTCFullYear() - 1;
+  return { label: `${startYear}/${String(startYear + 1).slice(-2)}`, start: `${startYear}-04-06`, end: `${startYear + 1}-04-05` };
 }
 
-function TierBadge({ tier }: { tier?: number }) {
-  if (!tier) return null;
-  const config = tier === 1 ? { Icon: Receipt, text: 'Receipt' } : tier === 2 ? { Icon: Landmark, text: 'Bank' } :
-    tier === 3 ? { Icon: FileSpreadsheet, text: 'Spreadsheet' } : { Icon: Pencil, text: 'Manual' };
-  const Icon = config.Icon;
-  return <Badge variant="outline" className="text-[10px] py-0 gap-1"><Icon className="w-3 h-3" />Tier {tier} · {config.text}</Badge>;
+function emptyForm(): FormValues {
+  const taxYear = currentTaxYear();
+  return { date: new Date().toISOString().slice(0, 10), recordType: 'expense', description: '', amount: '', category: 'travel', note: '' };
 }
 
-function DocumentFlow({ profileId, refresh, onBack }: { profileId: string; refresh: () => Promise<void>; onBack: () => void }) {
-  const [status, setStatus] = useState<'idle' | 'working' | 'done' | 'error'>('idle');
-  const [message, setMessage] = useState('');
-  const upload = async (file: File) => {
-    setStatus('working'); setMessage('Reading your document and checking the transaction…');
-    try {
-      const { objectPath } = await evidenceApi.uploadDirect(file);
-      const item = await evidenceApi.register(profileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' });
-      const processed = await evidenceApi.process(profileId, item.id);
-      await refresh();
-      setStatus('done'); setMessage(processed.status === 'needs_review' ? 'Sent to Inbox for a quick decision.' : 'Added to your records.');
-    } catch { setStatus('error'); setMessage('We could not process that document. Please try again.'); }
+function toForm(record: TransactionItem): FormValues {
+  const recordType: RecordType = record.recordType ?? (record.amount >= 0 ? 'income' : 'expense');
+  return {
+    date: record.date,
+    recordType,
+    description: record.description,
+    amount: Math.abs(record.amount).toFixed(2),
+    category: record.category,
+    note: record.note ?? '',
   };
-  return <Card className="p-6 shadow-sm space-y-5">
-    <button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
-    <div><h2 className="text-xl font-serif">Add a receipt or invoice</h2><p className="text-sm text-muted-foreground mt-1">Upload an original document. We’ll extract the transaction and ask only if anything is unclear.</p></div>
-    {status === 'working' ? <div className="py-8 text-center text-primary"><Loader2 className="w-7 h-7 animate-spin mx-auto mb-3" />{message}</div> :
-      status === 'done' ? <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-emerald-800 flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" />{message}</div> :
-      <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><Receipt className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Receipt, invoice, or statement</p><p className="text-xs text-muted-foreground">PDF, JPG, PNG, HEIC</p><FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={upload} /></div>}
-    {status === 'error' && <p className="text-sm text-destructive">{message}</p>}
-  </Card>;
-}
-
-function BatchFlow({ kind, profileId, refresh, onBack }: { kind: 'bank' | 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void }) {
-  const [stage, setStage] = useState<'pick' | 'detecting' | 'mapping' | 'importing' | 'done' | 'error'>('pick');
-  const [evidenceId, setEvidenceId] = useState('');
-  const [filename, setFilename] = useState('');
-  const [preview, setPreview] = useState<string[][]>([]);
-  const [mapping, setMapping] = useState<Mapping>({ headerRow: 0, columns: {} });
-  const [summary, setSummary] = useState<{ processedRows: number; autoPostedRows: number; inboxRows: number; skippedRows: number } | null>(null);
-  const [error, setError] = useState('');
-  const chooseFile = async (file: File) => {
-    setStage('detecting'); setFilename(file.name);
-    try {
-      const { objectPath } = await evidenceApi.uploadDirect(file);
-      const evidence = await evidenceApi.register(profileId, { filename: file.name, objectPath, mimeType: file.type || 'text/csv', category: kind === 'bank' ? 'bank_statement' : 'other', evidenceType: kind === 'bank' ? 'bank_csv' : 'ledger' });
-      const detected = await evidenceApi.detectSchema(profileId, evidence.id);
-      setEvidenceId(evidence.id); setPreview(detected.previewRows);
-      const proposed = detected.mappingSchema as Mapping;
-      setMapping({ headerRow: proposed.headerRow ?? 0, columns: proposed.columns ?? {}, dateFormat: proposed.dateFormat ?? null, currency: proposed.currency ?? 'GBP' });
-      setStage('mapping');
-    } catch { setError('We could not read that file. Please use a CSV or Excel file and try again.'); setStage('error'); }
-  };
-  const setRole = (column: number, role: ColumnRole) => setMapping(prev => {
-    const columns = { ...prev.columns };
-    Object.keys(columns).forEach(key => { if (columns[key as keyof typeof columns] === column) delete columns[key as keyof typeof columns]; });
-    if (role !== 'none') columns[role] = column;
-    return { ...prev, columns };
-  });
-  const importBatch = async () => {
-    setStage('importing');
-    try {
-      const result = await evidenceApi.processBatch(profileId, evidenceId, mapping, kind === 'bank');
-      setSummary(result); await refresh(); setStage('done');
-    } catch (err) { setError(err instanceof Error ? err.message : 'Import failed.'); setStage('error'); }
-  };
-  const columnCount = Math.max(0, ...preview.map(row => row.length));
-  const roleFor = (column: number): ColumnRole => (Object.entries(mapping.columns).find(([, value]) => value === column)?.[0] as ColumnRole) ?? 'none';
-  const total = summary?.processedRows ?? 0;
-  return <Card className="p-6 shadow-sm space-y-5">
-    <button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
-    <div><h2 className="text-xl font-serif">{kind === 'bank' ? 'Import a bank export' : 'Import a spreadsheet or CSV'}</h2><p className="text-sm text-muted-foreground mt-1">{kind === 'bank' ? 'We’ll recognise the columns in your official bank export.' : 'We’ll suggest how each column in your ledger should be used.'}</p></div>
-    {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose your {kind === 'bank' ? 'bank CSV' : 'CSV or Excel file'}</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Choose file" /></div>}
-    {stage === 'detecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />AI is detecting the columns in {filename}…</div>}
-    {stage === 'mapping' && <div className="space-y-4">
-      <div className="bg-primary/5 border border-primary/15 rounded-lg p-3 text-sm"><strong>Check the columns.</strong> We’ve suggested a mapping. Change any heading below, then import.</div>
-      <div className="overflow-x-auto border border-border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, col) => <th key={col} className="p-2 min-w-36 text-left"><Select value={roleFor(col)} onChange={e => setRole(col, e.target.value as ColumnRole)} className="text-xs"><option value="none">Ignore column</option><option value="date">Date</option><option value="amount">Amount</option><option value="description">Description</option><option value="category">Category</option><option value="debit">Debit</option><option value="credit">Credit</option><option value="balance">Balance</option></Select></th>)}</tr></thead><tbody>{preview.slice(0, 5).map((row, i) => <tr key={i} className="border-t border-border">{Array.from({ length: columnCount }, (_, col) => <td key={col} className="p-2 max-w-48 truncate">{row[col] || '—'}</td>)}</tr>)}</tbody></table></div>
-      <div className="flex justify-between items-center"><span className="text-xs text-muted-foreground">Preview of the first 5 rows</span><Button onClick={importBatch} className="cursor-pointer">Looks right — import</Button></div>
-    </div>}
-    {stage === 'importing' && <div className="py-8 space-y-3"><div className="flex justify-between text-sm"><span>Importing {filename}</span><span>Processing rows…</span></div><div className="h-3 rounded-full bg-secondary overflow-hidden"><div className="h-full w-2/3 bg-primary animate-pulse rounded-full" /></div><p className="text-xs text-muted-foreground text-center">Your financial position will refresh when this is complete.</p></div>}
-    {stage === 'done' && summary && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5"><div className="flex gap-2 text-emerald-800"><CheckCircle2 className="w-5 h-5" /><div><p className="font-semibold">Import complete</p><p className="text-sm mt-1">{summary.autoPostedRows} added, {summary.inboxRows} sent to review{summary.skippedRows ? `, ${summary.skippedRows} skipped` : ''}.</p></div></div><div className="mt-4 h-2 bg-emerald-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 w-full" /></div><p className="text-xs text-emerald-700 mt-2">{total} of {total + summary.skippedRows} rows processed</p></div>}
-    {stage === 'error' && <div className="text-sm text-destructive flex gap-2"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
-  </Card>;
-}
-
-function ManualFlow({ onBack }: { onBack: () => void }) {
-  const { addTransaction } = useStore();
-  const [item, setItem] = useState({ date: new Date().toISOString().slice(0, 10), amount: '', description: '', category: 'General' });
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const submit = async () => {
-    const amount = Number(item.amount); if (!item.description.trim() || !amount) { setError('Add a description and a non-zero amount.'); return; }
-    setSaving(true); setError('');
-    try { await addTransaction({ ...item, amount, description: item.description.trim(), source: 'manual' }); setSaved(true); setItem({ ...item, amount: '', description: '' }); }
-    catch { setError('We could not save that transaction. Please try again.'); }
-    finally { setSaving(false); }
-  };
-  return <Card className="p-6 shadow-sm space-y-5"><button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button><div><h2 className="text-xl font-serif">Quick entry</h2><p className="text-sm text-muted-foreground mt-1">Add one transaction. Use a minus amount for money going out.</p></div>
-    {saved && <div className="p-3 text-sm bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg">Added to your records. Your figures have refreshed.</div>}
-    {error && <div className="p-3 text-sm bg-red-50 border border-red-200 text-red-800 rounded-lg">{error}</div>}
-    <div className="grid sm:grid-cols-2 gap-4"><div className="space-y-1"><Label>Date</Label><Input type="date" value={item.date} onChange={e => setItem({ ...item, date: e.target.value })} /></div><div className="space-y-1"><Label>Amount (£)</Label><Input type="number" placeholder="-50.00" value={item.amount} onChange={e => setItem({ ...item, amount: e.target.value })} /></div><div className="sm:col-span-2 space-y-1"><Label>Description</Label><Input value={item.description} placeholder="e.g. Client lunch" onChange={e => setItem({ ...item, description: e.target.value })} /></div><div className="space-y-1"><Label>Accounting category (optional)</Label><Select value={item.category} onChange={e => setItem({ ...item, category: e.target.value })}><option>General</option><option>Travel</option><option>Office</option><option>Sales</option><option>Entertainment</option></Select></div><div className="flex items-end"><Button disabled={saving} onClick={submit} className="w-full cursor-pointer">{saving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Plus className="w-4 h-4 mr-2" />}Add transaction</Button></div></div>
-  </Card>;
 }
 
 export default function AddRecords() {
-  const { evidenceItems, inboxItems, activeProfileId, transactions, refreshData } = useStore();
-  const [intake, setIntake] = useState<Intake>(null);
-  const [attachTo, setAttachTo] = useState<string | null>(null);
-  const [attaching, setAttaching] = useState(false);
-  const [attachError, setAttachError] = useState('');
-  const pending = inboxItems.filter(i => i.status === 'pending').length;
-  const attachReceipt = async (file: File) => {
-    if (!attachTo) return; setAttaching(true); setAttachError('');
-    try { const { objectPath } = await evidenceApi.uploadDirect(file); const evidence = await evidenceApi.register(activeProfileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' }); await transactionsApi.attachEvidence(activeProfileId, attachTo, evidence.id); await refreshData(); setAttachTo(null); }
-    catch { setAttachError('We could not attach that receipt. Please try again.'); }
-    finally { setAttaching(false); }
+  const { activeProfileId, transactions, addTransaction, updateTransaction, deleteTransaction } = useStore();
+  const taxYear = useMemo(currentTaxYear, []);
+  const [form, setForm] = useState<FormValues>(emptyForm);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  const records = transactions.filter(record => record.source === 'manual');
+
+  const chooseType = (recordType: RecordType) => {
+    setForm(current => ({ ...current, recordType, category: categories[recordType][0].value }));
   };
-  return <div className="space-y-7 animate-in fade-in duration-500 max-w-5xl mx-auto pb-12">
-    <div><h1 className="text-3xl font-serif">Add Records</h1><p className="text-muted-foreground mt-1 text-lg">Bring in the records that keep your financial picture current and defensible.</p></div>
-    {pending > 0 && <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800"><strong>{pending} item{pending !== 1 ? 's' : ''} need a decision.</strong> <Link href="/tasks" className="underline">Review them in Tasks</Link>.</div>}
-    {!intake ? <><div className="grid sm:grid-cols-2 gap-4">{INTAKES.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setIntake(option.id)} className="text-left border border-border rounded-xl p-5 bg-card hover:border-primary/40 hover:bg-primary/[.02] transition-all cursor-pointer"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-4"><Icon className="w-5 h-5" /></div><h2 className="font-serif text-lg">{option.title}</h2><p className="text-sm text-muted-foreground mt-1">{option.text}</p><p className="text-xs text-primary mt-3">{option.note} →</p></button>; })}</div>
-      <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}</div></div><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
-      intake === 'document' ? <DocumentFlow profileId={activeProfileId} refresh={refreshData} onBack={() => setIntake(null)} /> :
-      intake === 'manual' ? <ManualFlow onBack={() => setIntake(null)} /> :
-      <BatchFlow kind={intake} profileId={activeProfileId} refresh={refreshData} onBack={() => setIntake(null)} />}
-    {attachTo && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="p-6 w-full max-w-md space-y-4"><h2 className="font-serif text-xl">Attach a receipt</h2><p className="text-sm text-muted-foreground">Adding an original receipt upgrades this record’s evidence quality.</p>{attaching ? <Loader2 className="animate-spin text-primary mx-auto" /> : <FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={attachReceipt} label="Choose receipt" />}{attachError && <p className="text-sm text-destructive">{attachError}</p>}<Button variant="outline" className="w-full" onClick={() => setAttachTo(null)}>Cancel</Button></Card></div>}
+  const change = <K extends keyof FormValues>(key: K, value: FormValues[K]) => setForm(current => ({ ...current, [key]: value }));
+  const reset = () => {
+    setForm(emptyForm());
+    setEditingId(null);
+    setStatus('idle');
+    setMessage('');
+  };
+  const submit = async () => {
+    const amount = Number(form.amount);
+    if (!activeProfileId) { setStatus('error'); setMessage('Your business profile is still loading. Please try again.'); return; }
+    if (!form.description.trim() || !Number.isFinite(amount) || amount <= 0) {
+      setStatus('error'); setMessage('Enter a description and an amount greater than £0.'); return;
+    }
+    if (form.date < taxYear.start || form.date > taxYear.end) {
+      setStatus('error'); setMessage(`Choose a date in the current ${taxYear.label} tax year.`); return;
+    }
+    setStatus('saving'); setMessage('');
+    const values = { ...form, description: form.description.trim(), amount, note: form.note.trim() || undefined };
+    try {
+      if (editingId) {
+        await updateTransaction(editingId, values);
+        setMessage('Record updated and your list has refreshed.');
+      } else {
+        await addTransaction(values);
+        setMessage('Record saved and added to your list.');
+      }
+      setStatus('success');
+      setForm(emptyForm());
+      setEditingId(null);
+    } catch {
+      setStatus('error');
+      setMessage('We could not save this record. Please try again.');
+    }
+  };
+  const edit = (record: TransactionItem) => {
+    setForm(toForm(record));
+    setEditingId(record.id);
+    setStatus('idle');
+    setMessage('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  const remove = async (record: TransactionItem) => {
+    if (!window.confirm(`Delete “${record.description}”? This cannot be undone.`)) return;
+    try {
+      await deleteTransaction(record.id);
+      if (editingId === record.id) reset();
+    } catch {
+      setStatus('error');
+      setMessage('We could not delete this record. Please try again.');
+    }
+  };
+
+  return <div className="max-w-4xl mx-auto space-y-7 pb-12">
+    <div>
+      <h1 className="text-3xl font-serif">Add Records</h1>
+      <p className="text-muted-foreground mt-1">Add your income and expenses for the current UK tax year ({taxYear.label}).</p>
+    </div>
+
+    <Card className="p-6 shadow-sm space-y-5">
+      <div><h2 className="text-xl font-serif">{editingId ? 'Edit record' : 'Add a record'}</h2><p className="text-sm text-muted-foreground mt-1">Use a positive amount. We’ll record it as income or an expense based on your choice.</p></div>
+      {status === 'success' && <div className="rounded-lg p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" />{message}</div>}
+      {status === 'error' && <div className="rounded-lg p-3 bg-red-50 border border-red-200 text-red-800 text-sm">{message}</div>}
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div className="sm:col-span-2 space-y-2"><Label>Record type</Label><div className="flex gap-2"><Button type="button" variant={form.recordType === 'income' ? 'default' : 'outline'} onClick={() => chooseType('income')}>Income</Button><Button type="button" variant={form.recordType === 'expense' ? 'default' : 'outline'} onClick={() => chooseType('expense')}>Expense</Button></div></div>
+        <div className="space-y-1"><Label>Date</Label><Input type="date" min={taxYear.start} max={taxYear.end} value={form.date} onChange={event => change('date', event.target.value)} /></div>
+        <div className="space-y-1"><Label>Amount (£)</Label><Input type="number" min="0.01" step="0.01" placeholder="0.00" value={form.amount} onChange={event => change('amount', event.target.value)} /></div>
+        <div className="sm:col-span-2 space-y-1"><Label>Description</Label><Input value={form.description} placeholder={form.recordType === 'income' ? 'e.g. Website design work' : 'e.g. Train to client meeting'} onChange={event => change('description', event.target.value)} /></div>
+        <div className="space-y-1"><Label>Category</Label><Select value={form.category} onChange={event => change('category', event.target.value)}>{categories[form.recordType].map(category => <option key={category.value} value={category.value}>{category.label}</option>)}</Select></div>
+        <div className="space-y-1"><Label>Note <span className="text-muted-foreground">(optional)</span></Label><Input value={form.note} placeholder="Anything useful to remember" onChange={event => change('note', event.target.value)} /></div>
+      </div>
+      <div className="flex flex-wrap gap-3"><Button disabled={status === 'saving'} onClick={submit} className="cursor-pointer">{editingId ? <Pencil className="w-4 h-4 mr-2" /> : <Plus className="w-4 h-4 mr-2" />}{status === 'saving' ? 'Saving…' : editingId ? 'Save changes' : 'Save record'}</Button>{editingId && <Button variant="outline" onClick={reset}>Cancel edit</Button>}</div>
+    </Card>
+
+    <section>
+      <div className="flex items-end justify-between gap-4 mb-3"><div><h2 className="text-xl font-serif">Your records</h2><p className="text-sm text-muted-foreground">Saved to your business profile and available after you sign in again.</p></div><span className="text-sm text-muted-foreground">{records.length} record{records.length === 1 ? '' : 's'}</span></div>
+      <Card className="divide-y divide-border overflow-hidden">
+        {records.length ? records.map(record => <div key={record.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0"><div className="flex items-center gap-2"><span className={`text-xs font-medium px-2 py-0.5 rounded-full ${record.recordType === 'income' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{record.recordType === 'income' ? 'Income' : 'Expense'}</span><span className="text-xs text-muted-foreground">{new Date(record.date).toLocaleDateString('en-GB')}</span></div><p className="font-medium mt-1">{record.description}</p><p className="text-xs text-muted-foreground mt-1">{record.category.replaceAll('_', ' ')}{record.note ? ` · ${record.note}` : ''}</p></div>
+          <div className="flex items-center gap-3"><span className={`font-semibold ${record.recordType === 'income' ? 'text-emerald-700' : ''}`}>{record.recordType === 'income' ? '+' : '−'}£{Math.abs(record.amount).toFixed(2)}</span><Button variant="ghost" size="icon" aria-label={`Edit ${record.description}`} onClick={() => edit(record)}><Pencil className="w-4 h-4" /></Button><Button variant="ghost" size="icon" aria-label={`Delete ${record.description}`} onClick={() => remove(record)}><Trash2 className="w-4 h-4 text-destructive" /></Button></div>
+        </div>) : <div className="p-10 text-center text-muted-foreground">No saved records yet. Add your first income or expense above.</div>}
+      </Card>
+    </section>
   </div>;
 }

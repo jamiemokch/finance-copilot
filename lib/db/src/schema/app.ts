@@ -98,6 +98,8 @@ export const transactionsTable = pgTable('transactions', {
   description: text('description').notNull(),
   // positive = income, negative = expense
   amount: doublePrecision('amount').notNull(),
+  recordType: text('record_type').notNull().default('expense'),
+  note: text('note'),
   // income | expense | ar | ap
   category: text('category').notNull().default('expense'),
   // deductible | non_deductible | income | ar | ap
