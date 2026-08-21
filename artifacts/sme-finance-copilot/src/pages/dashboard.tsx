@@ -2,7 +2,7 @@ import { Card, Badge, Button } from '@/components/ui';
 import { useStore } from '@/lib/store';
 import {
   WalletCards, Clock, CheckCircle2, ChevronRight, CheckSquare, Lightbulb,
-  CalendarClock, Circle, ChevronDown, ChevronUp, AlertCircle, FileText,
+  CalendarClock, Circle, ChevronDown, ChevronUp, AlertCircle, AlertTriangle, FileText,
   ArrowRight, TrendingUp, Banknote, X,
 } from 'lucide-react';
 import { Link } from 'wouter';
@@ -40,7 +40,11 @@ export default function Dashboard() {
   const arKpi = kpiMap['Accounts Receivable'];
   const apKpi = kpiMap['Accounts Payable'];
 
-  const previewIdeas = activeIdeas.slice(0, 2);
+  // Dashboard shows only "Do now" tier ideas with impact numbers
+  const previewIdeas = activeIdeas.filter(i => i.priorityTier === 'do_now').slice(0, 3);
+  const taxBalanceDue = 6900;   // canonical: IT £6,526 + NI − PoA paid
+  const taxReserve = 3500;
+  const taxReserveGap = taxBalanceDue - taxReserve;
 
   const urgentCompliance = activeComplianceItems
     .filter(c => c.status === 'due-soon' || c.status === 'overdue')
@@ -557,27 +561,81 @@ export default function Dashboard() {
           )}
         </div>
 
+        {/* Tax reserve gap — actionable card */}
+        {taxReserveGap > 0 && (
+          <Card className="p-4 border-l-4 border-l-amber-400 bg-amber-50 dark:bg-amber-900/20 shadow-sm">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-4 h-4 text-amber-700" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-sm text-amber-900 dark:text-amber-200">Tax reserve gap — £{taxReserveGap.toLocaleString()} shortfall</p>
+                <p className="text-xs text-amber-800 dark:text-amber-300 mt-1 leading-relaxed">
+                  Your January balance due is <strong>£{taxBalanceDue.toLocaleString()}</strong> but
+                  your reserve is only <strong>£{taxReserve.toLocaleString()}</strong>.
+                  You're <strong>£{taxReserveGap.toLocaleString()}</strong> short.
+                  Once Axiom pays their overdue invoice (£2,400), move it straight into your tax pot — that covers the gap.
+                </p>
+                <div className="flex gap-3 mt-2.5 flex-wrap">
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
+                    Available cash: £6,090
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
+                    AR overdue: £2,400 (Axiom)
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
+                    Deadline: 31 Jan 2025
+                  </span>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-xl font-serif font-medium">Business ideas</h2>
+            <h2 className="text-xl font-serif font-medium">Act now</h2>
             <Link href="/business-ideas" className="text-sm text-primary font-medium flex items-center gap-1 hover:underline cursor-pointer">
-              See all <ChevronRight className="w-4 h-4" />
+              All ideas <ChevronRight className="w-4 h-4" />
             </Link>
           </div>
+          <p className="text-xs text-muted-foreground -mt-2">Top-priority ideas grounded in your numbers</p>
           {previewIdeas.length > 0 ? (
             <div className="space-y-3">
               {previewIdeas.map(idea => (
                 <Link key={idea.id} href="/business-ideas">
                   <Card className="p-4 cursor-pointer hover:border-primary/50 transition-colors flex items-start gap-3 shadow-sm bg-card group">
-                    <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+                    <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
                       <Lightbulb className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">Do now</span>
                         <h3 className="font-medium text-sm text-foreground truncate">{idea.title}</h3>
-                        <Badge variant="outline" className="text-[10px] capitalize shrink-0">{idea.category}</Badge>
                       </div>
-                      <p className="text-xs text-muted-foreground line-clamp-2">{idea.summary}</p>
+                      {idea.urgencyNote && (
+                        <p className="text-xs text-amber-700 font-medium mt-0.5 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 shrink-0" />{idea.urgencyNote}
+                        </p>
+                      )}
+                      {/* Key impact */}
+                      <div className="flex gap-2 mt-1.5 flex-wrap">
+                        {idea.taxImpactRange && idea.taxImpactRange.max > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Tax +£{idea.taxImpactRange.min}–£{idea.taxImpactRange.max}
+                          </span>
+                        )}
+                        {idea.cashImpactRange && idea.cashImpactRange.min > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Cash +£{idea.cashImpactRange.min.toLocaleString()}–£{idea.cashImpactRange.max.toLocaleString()}
+                          </span>
+                        )}
+                        {idea.paybackRange?.minMonths === 0 && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
+                            Immediate
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </Card>
                 </Link>
@@ -586,7 +644,7 @@ export default function Dashboard() {
           ) : (
             <Card className="p-5 text-center text-muted-foreground bg-secondary/20 shadow-sm border-dashed">
               <Lightbulb className="w-8 h-8 mx-auto mb-2 opacity-20" />
-              <p className="text-sm">No new ideas to review.</p>
+              <p className="text-sm">No priority ideas right now.</p>
             </Card>
           )}
         </div>

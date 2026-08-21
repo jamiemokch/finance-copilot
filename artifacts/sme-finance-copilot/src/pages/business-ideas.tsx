@@ -1,5 +1,5 @@
 import { Card, Badge, Button, Input, Label } from '@/components/ui';
-import { useStore, AssumptionField, BusinessIdea, BusinessIdeaCategory } from '@/lib/store';
+import { useStore, AssumptionField, BusinessIdea, BusinessIdeaCategory, DecisionMemoryEntry } from '@/lib/store';
 import { useState } from 'react';
 import {
   Lightbulb, ChevronDown, ChevronUp, Users, TrendingUp, DollarSign,
@@ -7,6 +7,158 @@ import {
   Briefcase, AlertTriangle, ExternalLink, Minus, Plus, Brain, BookMarked
 } from 'lucide-react';
 import { cn } from '@/components/ui';
+
+// ─── Decision Memory card ─────────────────────────────────────────────────────
+
+function DecisionMemoryCard({ entry }: { entry: DecisionMemoryEntry }) {
+  const { updateDecisionMemoryStatus, updateDecisionMemoryOutcome } = useStore();
+  const [showOutcomeInput, setShowOutcomeInput] = useState(false);
+  const [outcomeText, setOutcomeText] = useState('');
+  const [actualPL, setActualPL] = useState('');
+  const [actualCash, setActualCash] = useState('');
+  const [actualTax, setActualTax] = useState('');
+
+  const statusConfig: Record<DecisionMemoryEntry['status'], { color: string; label: string }> = {
+    committed:  { color: 'bg-blue-100 text-blue-800 border-blue-200',             label: 'Committed' },
+    monitoring: { color: 'bg-amber-100 text-amber-800 border-amber-200',          label: 'Monitoring' },
+    completed:  { color: 'bg-emerald-100 text-emerald-700 border-emerald-200',    label: 'Completed ✓' },
+    abandoned:  { color: 'bg-secondary text-muted-foreground border-border',      label: 'Abandoned' },
+  };
+
+  const sc = statusConfig[entry.status];
+
+  return (
+    <Card className={cn("p-4 shadow-sm border", entry.status === 'abandoned' && "opacity-55")}>
+      <div className="flex flex-col sm:flex-row sm:items-start gap-4">
+        {/* Left: info */}
+        <div className="flex-1 space-y-1.5 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sc.color}`}>
+              {sc.label}
+            </span>
+            <Badge variant="outline" className="text-[10px] capitalize">{entry.ideaCategory}</Badge>
+            <span className="text-xs text-muted-foreground">{entry.date}</span>
+          </div>
+          <h4 className="font-medium text-sm text-foreground">{entry.ideaTitle}</h4>
+          <p className="text-sm text-foreground font-medium">{entry.userDecision}</p>
+          {entry.userRationale && (
+            <p className="text-xs text-muted-foreground italic">"{entry.userRationale}"</p>
+          )}
+
+          {/* Actual outcome — shown when recorded */}
+          {entry.status === 'completed' && entry.actualOutcome && (
+            <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg">
+              <p className="text-xs font-medium text-emerald-800 mb-0.5">Actual outcome:</p>
+              <p className="text-xs text-emerald-700">{entry.actualOutcome}</p>
+              <div className="flex gap-3 mt-1.5 flex-wrap">
+                {entry.actualPLImpact !== undefined && (
+                  <span className="text-xs text-emerald-700">P&L: {entry.actualPLImpact >= 0 ? '+' : ''}£{Math.abs(entry.actualPLImpact).toLocaleString()}</span>
+                )}
+                {entry.actualCashImpact !== undefined && (
+                  <span className="text-xs text-emerald-700">Cash: {entry.actualCashImpact >= 0 ? '+' : ''}£{Math.abs(entry.actualCashImpact).toLocaleString()}</span>
+                )}
+                {entry.actualTaxImpact !== undefined && (
+                  <span className="text-xs text-emerald-700">Tax: +£{Math.abs(entry.actualTaxImpact).toLocaleString()}</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Outcome input form */}
+          {showOutcomeInput && (
+            <div className="mt-2 space-y-2 p-3 bg-secondary/30 rounded-lg border border-border">
+              <p className="text-xs font-medium text-foreground">Record actual outcome:</p>
+              <textarea
+                className="w-full text-xs border border-border rounded-md p-2 resize-none bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                rows={2}
+                placeholder="What actually happened? (e.g. 'Paid £2,100 in January — saving confirmed')"
+                value={outcomeText}
+                onChange={e => setOutcomeText(e.target.value)}
+              />
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: 'Actual P&L (£)', val: actualPL, set: setActualPL },
+                  { label: 'Actual Cash (£)', val: actualCash, set: setActualCash },
+                  { label: 'Tax saving (£)', val: actualTax, set: setActualTax },
+                ].map(f => (
+                  <input
+                    key={f.label}
+                    type="number"
+                    placeholder={f.label}
+                    value={f.val}
+                    onChange={e => f.set(e.target.value)}
+                    className="text-xs border border-border rounded-md px-2 py-1.5 bg-background text-foreground"
+                  />
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="text-xs cursor-pointer"
+                  onClick={() => {
+                    if (outcomeText) {
+                      updateDecisionMemoryOutcome(
+                        entry.id, outcomeText,
+                        actualPL ? parseFloat(actualPL) : undefined,
+                        actualCash ? parseFloat(actualCash) : undefined,
+                        actualTax ? parseFloat(actualTax) : undefined
+                      );
+                      setShowOutcomeInput(false);
+                    }
+                  }}
+                >
+                  Save outcome
+                </Button>
+                <Button size="sm" variant="outline" className="text-xs cursor-pointer" onClick={() => setShowOutcomeInput(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: expected impacts + status actions */}
+        <div className="shrink-0 flex flex-col items-end gap-3">
+          <div className="flex gap-3 text-xs">
+            <div className="text-center min-w-[52px]">
+              <p className="text-muted-foreground">P&L y1</p>
+              <p className={`font-semibold ${entry.expectedPLImpact >= 0 ? 'text-emerald-700' : 'text-destructive'}`}>
+                {entry.expectedPLImpact >= 0 ? '+' : ''}£{Math.abs(entry.expectedPLImpact).toLocaleString()}
+              </p>
+            </div>
+            {entry.expectedTaxImpact !== 0 && (
+              <div className="text-center min-w-[52px]">
+                <p className="text-muted-foreground">Tax saving</p>
+                <p className="font-semibold text-emerald-700">+£{entry.expectedTaxImpact.toLocaleString()}</p>
+              </div>
+            )}
+          </div>
+
+          {entry.status !== 'abandoned' && entry.status !== 'completed' && (
+            <div className="flex flex-col gap-1 items-end">
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-[10px] h-7 cursor-pointer"
+                onClick={() => setShowOutcomeInput(true)}
+              >
+                Mark completed
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-[10px] h-7 text-muted-foreground cursor-pointer"
+                onClick={() => updateDecisionMemoryStatus(entry.id, 'abandoned')}
+              >
+                Abandon
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
 
 // ─── Scenario compute engine ──────────────────────────────────────────────────
 
@@ -28,7 +180,7 @@ function computeScenario(ideaId: string, assumptions: AssumptionField[]): Scenar
     const salary = v('salary');
     const growthPct = v('revenueGrowth');
     const recruitment = v('recruitmentCost');
-    const currentRevenue = 36500;
+    const currentRevenue = 39800; // canonical: YTD revenue £39,800
     const incrementalRevenue = Math.round(currentRevenue * growthPct / 100);
     const netOngoingYear1 = incrementalRevenue - salary;
     const taxSaving = Math.round(salary * 0.20);
@@ -40,7 +192,7 @@ function computeScenario(ideaId: string, assumptions: AssumptionField[]): Scenar
       plImpactYear1: netOngoingYear1,
       taxImpact: taxSaving,
       paybackMonths: payback,
-      benchmarkEffect: `Revenue per employee: ~£${newRevenuePerHead.toLocaleString()}/yr (from £36,500 solo) vs peer median £65,000`,
+      benchmarkEffect: `Revenue per employee: ~£${newRevenuePerHead.toLocaleString()}/yr (from £39,800 solo) vs peer median £65,000`,
       downsideNote: netOngoingYear1 < 0
         ? `If revenue grows by only ${growthPct}%, net annual shortfall is £${Math.abs(netOngoingYear1).toLocaleString()}. Ensure 6-month salary reserve (~£${Math.round(salary / 2).toLocaleString()}) before hiring.`
         : `Monitor monthly: if pipeline dries up, cash position deteriorates quickly. Keep 6-month reserve.`,
@@ -119,6 +271,35 @@ function computeScenario(ideaId: string, assumptions: AssumptionField[]): Scenar
 
   return { cashOneOff: 0, cashOngoingYear1: 0, plImpactYear1: 0, taxImpact: 0, paybackMonths: null, benchmarkEffect: '', downsideNote: '' };
 }
+
+// ─── Impact range helpers ────────────────────────────────────────────────────
+
+function fmtRange(min: number, max: number, prefix = '£'): string {
+  const fmt = (n: number) => {
+    const abs = Math.abs(n);
+    if (abs >= 1000) return `${prefix}${(abs / 1000).toFixed(abs % 1000 === 0 ? 0 : 1)}k`;
+    return `${prefix}${abs.toLocaleString()}`;
+  };
+  if (min === max) return `${min < 0 ? '−' : '+'}${fmt(min)}`;
+  const sign = min >= 0 ? '+' : min < 0 && max <= 0 ? '−' : '±';
+  if (min < 0 && max < 0) return `−${fmt(min)}–−${fmt(max)}`;
+  if (min >= 0 && max >= 0) return `+${fmt(min)}–+${fmt(max)}`;
+  return `${fmt(min)}–+${fmt(max)}`;
+}
+
+function ImpactPill({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${color}`}>
+      {label}: {value}
+    </span>
+  );
+}
+
+const TIER_CONFIG = {
+  do_now:  { label: 'Do now',  color: 'bg-emerald-100 text-emerald-800 border-emerald-200', dot: 'bg-emerald-500' },
+  consider:{ label: 'Consider',color: 'bg-amber-100 text-amber-800 border-amber-200',       dot: 'bg-amber-500'   },
+  watch:   { label: 'Watch',   color: 'bg-secondary text-muted-foreground border-border',   dot: 'bg-muted-foreground' },
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -322,8 +503,18 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
         )}
         onClick={() => !isExpanded && setIsExpanded(true)}
       >
-        <div className="flex-1 space-y-1.5">
-          <div className="flex flex-wrap items-center gap-2 mb-1">
+        <div className="flex-1 space-y-2">
+          {/* Tier + category + status row */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Priority tier badge */}
+            {(() => {
+              const t = TIER_CONFIG[idea.priorityTier];
+              return (
+                <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${t.color}`}>
+                  {t.label}
+                </span>
+              );
+            })()}
             <Badge variant="outline" className="gap-1.5 capitalize bg-background text-xs">
               {getCategoryIcon(idea.category)} {idea.category}
             </Badge>
@@ -334,10 +525,56 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
             )}
             <div className="ml-auto">{getStatusBadge(idea.status)}</div>
           </div>
+
           <h3 className="text-xl font-serif text-foreground">{idea.title}</h3>
           <p className="text-sm text-muted-foreground leading-relaxed max-w-3xl">{idea.summary}</p>
+
+          {/* Quantified impact pills */}
+          <div className="flex flex-wrap gap-1.5 pt-0.5">
+            {idea.taxImpactRange && idea.taxImpactRange.max > 0 && (
+              <ImpactPill
+                label="Tax saving"
+                value={`+£${idea.taxImpactRange.min.toLocaleString()}–£${idea.taxImpactRange.max.toLocaleString()}`}
+                color="bg-emerald-50 text-emerald-700 border-emerald-200"
+              />
+            )}
+            {idea.cashImpactRange && (idea.cashImpactRange.max !== 0 || idea.cashImpactRange.min !== 0) && (() => {
+              const { min, max } = idea.cashImpactRange;
+              const pos = min >= 0;
+              const label = pos ? `Cash released: +£${min.toLocaleString()}–£${max.toLocaleString()}` : `Cash cost: −£${Math.abs(max).toLocaleString()}–£${Math.abs(min).toLocaleString()}`;
+              const color = pos ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-secondary text-muted-foreground border-border";
+              return <ImpactPill label="" value={label} color={color} />;
+            })()}
+            {idea.paybackRange?.minMonths === 0 && (
+              <ImpactPill label="Payback" value="immediate" color="bg-blue-50 text-blue-700 border-blue-200" />
+            )}
+            {idea.paybackRange?.minMonths !== null && idea.paybackRange?.minMonths !== undefined && idea.paybackRange.minMonths > 0 && (
+              <ImpactPill
+                label="Payback"
+                value={idea.paybackRange.maxMonths ? `${idea.paybackRange.minMonths}–${idea.paybackRange.maxMonths}m` : `${idea.paybackRange.minMonths}m+`}
+                color="bg-secondary text-muted-foreground border-border"
+              />
+            )}
+            <span className={cn(
+              'text-[10px] px-2 py-0.5 rounded-full border',
+              idea.confidence === 'high' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+              idea.confidence === 'medium' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+              'bg-secondary text-muted-foreground border-border'
+            )}>
+              {idea.confidence} confidence
+            </span>
+          </div>
+
+          {/* Urgency note for do_now / deadlines */}
+          {(idea.urgencyNote || (idea.deadlines && idea.deadlines.length > 0)) && !committedEntry && (
+            <p className="text-xs text-amber-700 flex items-center gap-1 font-medium pt-0.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              {idea.urgencyNote ?? idea.deadlines?.[0]}
+            </p>
+          )}
+
           {committedEntry && (
-            <div className="mt-3 p-3 bg-secondary/30 rounded-lg text-sm border border-border">
+            <div className="mt-2 p-3 bg-secondary/30 rounded-lg text-sm border border-border">
               <span className="font-semibold block mb-0.5 text-foreground">Decision recorded: {committedEntry.userDecision}</span>
               {committedEntry.userRationale && (
                 <span className="text-muted-foreground italic">"{committedEntry.userRationale}"</span>
@@ -763,20 +1000,40 @@ export default function BusinessIdeas() {
           </div>
         </div>
 
-        {/* Ideas list */}
-        <div className="space-y-4">
-          {filteredIdeas.length === 0 ? (
-            <div className="text-center py-16 text-muted-foreground bg-card rounded-xl border border-border shadow-sm">
-              <Lightbulb className="w-12 h-12 mx-auto mb-4 opacity-20" />
-              <h3 className="text-lg font-medium text-foreground">
-                {categoryFilter === 'all' ? 'No ideas in this profile yet.' : `No ${categoryFilter} ideas yet.`}
-              </h3>
-              <p className="mt-1">Ideas are generated from your Financial Memory and peer benchmarks.</p>
-            </div>
-          ) : (
-            filteredIdeas.map(idea => <IdeaCard key={idea.id} idea={idea} />)
-          )}
-        </div>
+        {/* Ideas grouped by priority tier */}
+        {filteredIdeas.filter(b => b.status !== 'dismissed').length === 0 ? (
+          <div className="text-center py-16 text-muted-foreground bg-card rounded-xl border border-border shadow-sm">
+            <Lightbulb className="w-12 h-12 mx-auto mb-4 opacity-20" />
+            <h3 className="text-lg font-medium text-foreground">
+              {categoryFilter === 'all' ? 'No ideas in this profile yet.' : `No ${categoryFilter} ideas yet.`}
+            </h3>
+            <p className="mt-1">Ideas are generated from your Financial Memory and peer benchmarks.</p>
+          </div>
+        ) : (
+          <div className="space-y-8">
+            {(['do_now', 'consider', 'watch'] as const).map(tier => {
+              const tierIdeas = filteredIdeas.filter(b => b.priorityTier === tier && b.status !== 'dismissed');
+              if (tierIdeas.length === 0) return null;
+              const tc = TIER_CONFIG[tier];
+              return (
+                <div key={tier} className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-2.5 h-2.5 rounded-full ${tc.dot}`} />
+                    <h3 className="font-semibold text-base text-foreground">{tc.label}</h3>
+                    <span className="text-xs text-muted-foreground">
+                      {tier === 'do_now' ? 'Act this week — time-sensitive or immediate wins' :
+                       tier === 'consider' ? 'Evaluate when conditions are right' :
+                       'Monitor — not ready to act yet'}
+                    </span>
+                  </div>
+                  <div className="space-y-4">
+                    {tierIdeas.map(idea => <IdeaCard key={idea.id} idea={idea} />)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {profileIdeas.some(b => b.status === 'dismissed') && (
           <button
@@ -788,51 +1045,65 @@ export default function BusinessIdeas() {
         )}
       </div>
 
-      {/* Decision Memory summary */}
-      {committedCount > 0 && (
-        <section className="space-y-4 pt-4 border-t border-border">
-          <div className="flex items-center gap-2">
-            <BookMarked className="w-5 h-5 text-primary" />
-            <h2 className="text-xl font-serif font-medium text-foreground">Decision Memory</h2>
-          </div>
-          <p className="text-sm text-muted-foreground">Decisions you have committed to — reflected in your Financial Position forecast.</p>
+      {/* Decision Memory ─ always visible */}
+      <section className="space-y-5 pt-4 border-t border-border">
+        <div className="flex items-center gap-2">
+          <BookMarked className="w-5 h-5 text-primary" />
+          <h2 className="text-xl font-serif font-medium text-foreground">Decision Memory</h2>
+          {committedCount > 0 && (
+            <Badge variant="outline" className="ml-1 text-[10px]">{committedCount} committed</Badge>
+          )}
+        </div>
+        <p className="text-sm text-muted-foreground -mt-2">
+          Decisions you've committed to — each has an expected outcome. Come back to record what actually happened and close the loop.
+        </p>
+
+        {/* Committed pipeline forecast */}
+        {(() => {
+          const live = decisionMemory.filter(d => d.profileId === activeProfileId && d.status !== 'abandoned');
+          if (live.length === 0) return null;
+          const totalPL   = live.reduce((s, d) => s + d.expectedPLImpact, 0);
+          const totalTax  = live.reduce((s, d) => s + d.expectedTaxImpact, 0);
+          const totalCash = live.reduce((s, d) => s + d.expectedCashImpact, 0);
+          return (
+            <Card className="p-4 bg-primary/5 border-primary/20 shadow-sm">
+              <p className="text-xs font-semibold text-primary mb-3 uppercase tracking-wider">
+                Committed pipeline — combined expected impact (year 1)
+              </p>
+              <div className="grid grid-cols-3 gap-4">
+                {[
+                  { label: 'P&L', value: totalPL   },
+                  { label: 'Cash', value: totalCash },
+                  { label: 'Tax saving', value: totalTax },
+                ].map(({ label, value }) => (
+                  <div key={label} className="text-center">
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className={`text-lg font-serif font-semibold ${value >= 0 ? 'text-emerald-700' : 'text-destructive'}`}>
+                      {value >= 0 ? '+' : ''}£{Math.abs(value).toLocaleString()}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          );
+        })()}
+
+        {committedCount === 0 ? (
+          <Card className="p-6 text-center text-muted-foreground bg-secondary/20 border-dashed shadow-sm">
+            <BookMarked className="w-8 h-8 mx-auto mb-2 opacity-20" />
+            <p className="text-sm">No decisions saved yet.</p>
+            <p className="text-xs mt-1 max-w-sm mx-auto">
+              Explore an idea above, adjust assumptions, then click "Save to Decision Memory" when you decide what to do.
+            </p>
+          </Card>
+        ) : (
           <div className="space-y-3">
             {decisionMemory
               .filter(d => d.profileId === activeProfileId)
-              .map(entry => (
-                <Card key={entry.id} className="p-4 bg-card shadow-sm border-border">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <Badge variant="outline" className="text-[10px] capitalize">{entry.ideaCategory}</Badge>
-                        <span className="text-xs text-muted-foreground">{entry.date}</span>
-                      </div>
-                      <h4 className="font-medium text-sm">{entry.ideaTitle}</h4>
-                      <p className="text-sm text-foreground mt-0.5">{entry.userDecision}</p>
-                      {entry.userRationale && (
-                        <p className="text-xs text-muted-foreground italic mt-0.5">"{entry.userRationale}"</p>
-                      )}
-                    </div>
-                    <div className="flex gap-4 text-xs shrink-0">
-                      <div className="text-center">
-                        <p className="text-muted-foreground">P&L year 1</p>
-                        <p className={`font-semibold ${entry.expectedPLImpact >= 0 ? 'text-emerald-700' : 'text-destructive'}`}>
-                          {formatMoney(entry.expectedPLImpact)}
-                        </p>
-                      </div>
-                      {entry.expectedTaxImpact !== 0 && (
-                        <div className="text-center">
-                          <p className="text-muted-foreground">Tax saving</p>
-                          <p className="font-semibold text-emerald-700">+£{entry.expectedTaxImpact.toLocaleString()}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </Card>
-              ))}
+              .map(entry => <DecisionMemoryCard key={entry.id} entry={entry} />)}
           </div>
-        </section>
-      )}
+        )}
+      </section>
     </div>
   );
 }

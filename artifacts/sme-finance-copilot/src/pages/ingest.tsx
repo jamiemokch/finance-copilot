@@ -4,37 +4,58 @@ import { useState } from 'react';
 import {
   UploadCloud, CheckCircle2, FileText, Plus, Database, Loader2,
   ArrowRight, Building2, Receipt, FileClock, FileSignature, FolderOpen,
-  AlertCircle, ChevronDown, ChevronUp,
+  AlertCircle, ChevronDown, ChevronUp, Sparkles,
 } from 'lucide-react';
 import { cn } from '@/components/ui';
 import { Link } from 'wouter';
 
 // ─── Product flow diagram ──────────────────────────────────────────────────────
 
-const FLOW_STEPS = [
-  { icon: UploadCloud, label: 'Evidence', sub: 'Bank CSV, invoices, receipts, prior return', active: true },
-  { icon: Database, label: 'AI extracts & categorises', sub: 'Matches transactions, flags unknowns' },
-  { icon: AlertCircle, label: 'Inbox', sub: 'You resolve ambiguous items', href: '/tasks' },
-  { icon: FileText, label: 'Financial Records', sub: 'Clean P&L, AR, AP, Cash', href: '/position' },
-  { icon: Building2, label: 'Dashboard', sub: 'Live position & readiness', href: '/dashboard' },
-  { icon: CheckCircle2, label: 'Business Ideas', sub: 'Decisions grounded in your numbers', href: '/business-ideas' },
-];
+interface FlowStep {
+  icon: typeof UploadCloud;
+  label: string;
+  sub: string;
+  active?: boolean;
+  href?: string;
+  liveCount?: number;
+}
 
-function FlowDiagram() {
+function FlowDiagram({ pendingCount }: { pendingCount: number }) {
+  const steps: FlowStep[] = [
+    { icon: UploadCloud,    label: 'Evidence',               sub: 'Bank CSV, invoices, receipts', active: true },
+    { icon: Database,       label: 'AI categorises',         sub: 'Matches transactions, flags unknowns' },
+    { icon: AlertCircle,    label: 'Inbox',                  sub: pendingCount > 0 ? `${pendingCount} item${pendingCount !== 1 ? 's' : ''} need review` : 'You resolve ambiguous items', href: '/tasks', liveCount: pendingCount },
+    { icon: FileText,       label: 'Financial Records',      sub: 'Clean P&L, AR, AP, Cash', href: '/position' },
+    { icon: Building2,      label: 'Dashboard',              sub: 'Live position & readiness', href: '/dashboard' },
+    { icon: CheckCircle2,   label: 'Business Ideas',         sub: 'Decisions grounded in your numbers', href: '/business-ideas' },
+  ];
+
   return (
     <div className="bg-secondary/20 border border-border rounded-xl p-5">
-      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-4">How evidence flows through the product</p>
+      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-4">
+        How evidence flows through the product
+      </p>
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 flex-wrap">
-        {FLOW_STEPS.map((step, i) => {
+        {steps.map((step, i) => {
           const Icon = step.icon;
           const content = (
             <div className={cn(
-              "flex flex-col items-center text-center px-3 py-2 rounded-lg min-w-[90px]",
+              "relative flex flex-col items-center text-center px-3 py-2 rounded-lg min-w-[90px]",
               step.active ? "bg-primary text-primary-foreground shadow-sm" : "bg-background border border-border hover:border-primary/40 transition-colors"
             )}>
               <Icon className={cn("w-5 h-5 mb-1", step.active ? "text-primary-foreground" : "text-primary")} />
-              <span className={cn("text-xs font-semibold leading-tight", step.active ? "text-primary-foreground" : "text-foreground")}>{step.label}</span>
-              <span className={cn("text-[10px] leading-tight mt-0.5", step.active ? "text-primary-foreground/70" : "text-muted-foreground")}>{step.sub}</span>
+              <span className={cn("text-xs font-semibold leading-tight", step.active ? "text-primary-foreground" : "text-foreground")}>
+                {step.label}
+              </span>
+              <span className={cn("text-[10px] leading-tight mt-0.5", step.active ? "text-primary-foreground/70" : "text-muted-foreground")}>
+                {step.sub}
+              </span>
+              {/* Live pending count badge */}
+              {step.liveCount !== undefined && step.liveCount > 0 && (
+                <span className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center shadow-sm">
+                  {step.liveCount}
+                </span>
+              )}
             </div>
           );
           return (
@@ -42,7 +63,7 @@ function FlowDiagram() {
               {step.href ? (
                 <Link href={step.href} className="cursor-pointer">{content}</Link>
               ) : content}
-              {i < FLOW_STEPS.length - 1 && (
+              {i < steps.length - 1 && (
                 <ArrowRight className="w-4 h-4 text-muted-foreground shrink-0 hidden sm:block" />
               )}
             </div>
@@ -62,79 +83,202 @@ interface CategoryConfig {
   description: string;
   accepts: string;
   examples: string;
+  // What the AI typically does with this type
+  aiOutcome: string;
 }
 
 const CATEGORIES: CategoryConfig[] = [
-  { id: 'bank_statement', label: 'Bank Statements / CSV', icon: Building2, description: 'Export from Starling, Monzo, Barclays, HSBC, etc.', accepts: '.csv, .pdf, .qif, .ofx', examples: 'Starling export, Monzo CSV, Barclays statement PDF' },
-  { id: 'invoice_sent', label: 'Invoices Sent', icon: FileText, description: 'Your sales invoices — we extract amount, date, client', accepts: '.pdf, .jpg, .png', examples: 'Invoice #1042, retainer agreement, project quote' },
-  { id: 'receipt', label: 'Receipts & Expense Proofs', icon: Receipt, description: 'Purchase receipts for allowable expenses', accepts: '.pdf, .jpg, .png, .heic', examples: 'Adobe subscription, WeWork, travel tickets' },
-  { id: 'prior_return', label: 'Prior Tax Return', icon: FileClock, description: 'Last year\'s Self-Assessment return — used for PoA context', accepts: '.pdf', examples: 'SA302, tax calculation summary' },
-  { id: 'contract', label: 'Contracts & Agreements', icon: FileSignature, description: 'Client or supplier contracts — helps verify recurring income/costs', accepts: '.pdf, .docx', examples: 'Retainer agreement, service contract, lease' },
-  { id: 'other', label: 'Other Documents', icon: FolderOpen, description: 'Anything else relevant — we\'ll classify it', accepts: 'Any file type', examples: 'Insurance certificates, HMRC correspondence, letting agent statement' },
+  {
+    id: 'bank_statement', label: 'Bank Statements / CSV', icon: Building2,
+    description: 'Export from Starling, Monzo, Barclays, HSBC, etc.',
+    accepts: '.csv, .pdf, .qif, .ofx',
+    examples: 'Starling export, Monzo CSV, Barclays statement PDF',
+    aiOutcome: 'auto-categorises transactions; flags ambiguous payments to Inbox',
+  },
+  {
+    id: 'invoice_sent', label: 'Invoices Sent', icon: FileText,
+    description: 'Your sales invoices — we extract amount, date, client',
+    accepts: '.pdf, .jpg, .png',
+    examples: 'Invoice #1042, retainer agreement, project quote',
+    aiOutcome: 'extracts amount & client; adds to AR; matches against bank receipts',
+  },
+  {
+    id: 'receipt', label: 'Receipts & Expense Proofs', icon: Receipt,
+    description: 'Purchase receipts for allowable expenses',
+    accepts: '.pdf, .jpg, .png, .heic',
+    examples: 'Adobe subscription, WeWork, travel tickets',
+    aiOutcome: 'checks HMRC allowability; routes to Inbox if over £1,000 or ambiguous',
+  },
+  {
+    id: 'prior_return', label: 'Prior Tax Return', icon: FileClock,
+    description: 'Last year\'s Self-Assessment return — used for PoA context',
+    accepts: '.pdf',
+    examples: 'SA302, tax calculation summary',
+    aiOutcome: 'reads prior PoA paid; updates tax forecast baseline',
+  },
+  {
+    id: 'contract', label: 'Contracts & Agreements', icon: FileSignature,
+    description: 'Client or supplier contracts — helps verify recurring income/costs',
+    accepts: '.pdf, .docx',
+    examples: 'Retainer agreement, service contract, lease',
+    aiOutcome: 'extracts recurring income/cost schedule; cross-checks bank feed',
+  },
+  {
+    id: 'other', label: 'Other Documents', icon: FolderOpen,
+    description: 'Anything else relevant — we\'ll classify it',
+    accepts: 'Any file type',
+    examples: 'Insurance certificates, HMRC correspondence, letting agent statement',
+    aiOutcome: 'classifies document type; routes to relevant section',
+  },
 ];
 
 const STATUS_CONFIG: Record<EvidenceStatus, { label: string; className: string }> = {
-  received: { label: 'Received', className: 'bg-blue-100 text-blue-700' },
-  processing: { label: 'Processing…', className: 'bg-yellow-100 text-yellow-700' },
-  categorised: { label: 'Categorised', className: 'bg-emerald-100 text-emerald-700' },
+  received:     { label: 'Received',    className: 'bg-blue-100 text-blue-700' },
+  processing:   { label: 'Processing…', className: 'bg-yellow-100 text-yellow-700' },
+  categorised:  { label: 'Categorised', className: 'bg-emerald-100 text-emerald-700' },
   needs_review: { label: 'Needs review', className: 'bg-amber-100 text-amber-800' },
 };
 
 const CATEGORY_LABELS: Record<EvidenceCategory, string> = {
   bank_statement: 'Bank statement',
-  invoice_sent: 'Invoice',
-  receipt: 'Receipt',
-  prior_return: 'Prior return',
-  contract: 'Contract',
-  other: 'Other',
+  invoice_sent:   'Invoice',
+  receipt:        'Receipt',
+  prior_return:   'Prior return',
+  contract:       'Contract',
+  other:          'Other',
 };
 
-// ─── Upload simulation ─────────────────────────────────────────────────────────
+// ─── AI processing steps ──────────────────────────────────────────────────────
 
-function UploadCard({ config, onUploaded }: { config: CategoryConfig; onUploaded: (cat: EvidenceCategory) => void }) {
-  const [state, setState] = useState<'idle' | 'uploading' | 'done'>('idle');
+type ProcessStep = 'idle' | 'uploading' | 'reading' | 'identifying' | 'checking' | 'categorising' | 'done_ok' | 'done_review';
+
+const AI_STEPS: { key: ProcessStep; label: string; duration: number }[] = [
+  { key: 'uploading',    label: 'Uploading…',               duration: 600 },
+  { key: 'reading',      label: 'Reading document…',         duration: 700 },
+  { key: 'identifying',  label: 'Identifying supplier…',     duration: 650 },
+  { key: 'checking',     label: 'Checking tax treatment…',   duration: 750 },
+  { key: 'categorising', label: 'Categorising…',             duration: 500 },
+];
+
+function UploadCard({ config, onUploaded }: {
+  config: CategoryConfig;
+  onUploaded: (cat: EvidenceCategory, needsReview: boolean) => void;
+}) {
+  const [step, setStep] = useState<ProcessStep>('idle');
   const [isDragging, setIsDragging] = useState(false);
   const Icon = config.icon;
 
   const simulate = () => {
-    setState('uploading');
+    if (step !== 'idle') return;
+    // Randomly decide if this upload needs review (receipts and 'other' sometimes do)
+    const willNeedReview = (config.id === 'receipt' || config.id === 'other') && Math.random() > 0.5;
+
+    // Run through AI steps sequentially
+    let elapsed = 0;
+    AI_STEPS.forEach(({ key, duration }, i) => {
+      setTimeout(() => setStep(key), elapsed);
+      elapsed += duration;
+    });
+    // Final state
     setTimeout(() => {
-      setState('done');
-      onUploaded(config.id);
-      setTimeout(() => setState('idle'), 3000);
-    }, 1800);
+      const finalStep: ProcessStep = willNeedReview ? 'done_review' : 'done_ok';
+      setStep(finalStep);
+      onUploaded(config.id, willNeedReview);
+      // Reset after a few seconds
+      setTimeout(() => setStep('idle'), 4500);
+    }, elapsed);
   };
+
+  const isProcessing = ['uploading', 'reading', 'identifying', 'checking', 'categorising'].includes(step);
+  const isDone = step === 'done_ok' || step === 'done_review';
+  const currentStepLabel = AI_STEPS.find(s => s.key === step)?.label ?? '';
 
   return (
     <div
       className={cn(
-        "border-2 border-dashed rounded-xl p-5 flex flex-col items-center text-center gap-3 transition-all",
+        "border-2 border-dashed rounded-xl p-5 flex flex-col items-center text-center gap-3 transition-all duration-300",
         isDragging ? "border-primary bg-primary/5 scale-[1.02]" : "border-border hover:border-primary/40",
-        state === 'done' && "border-emerald-400 bg-emerald-50"
+        step === 'done_ok'     && "border-emerald-400 bg-emerald-50",
+        step === 'done_review' && "border-amber-400 bg-amber-50",
       )}
       onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
       onDragLeave={() => setIsDragging(false)}
       onDrop={e => { e.preventDefault(); setIsDragging(false); simulate(); }}
     >
-      <div className={cn("w-10 h-10 rounded-full flex items-center justify-center", state === 'done' ? "bg-emerald-100" : "bg-primary/10")}>
-        {state === 'uploading' ? <Loader2 className="w-5 h-5 animate-spin text-primary" /> :
-         state === 'done' ? <CheckCircle2 className="w-5 h-5 text-emerald-600" /> :
-         <Icon className="w-5 h-5 text-primary" />}
+      <div className={cn(
+        "w-10 h-10 rounded-full flex items-center justify-center transition-colors",
+        step === 'done_ok'     ? "bg-emerald-100" :
+        step === 'done_review' ? "bg-amber-100" :
+        isProcessing           ? "bg-primary/10" :
+                                 "bg-primary/10"
+      )}>
+        {isProcessing
+          ? <Loader2 className="w-5 h-5 animate-spin text-primary" />
+          : step === 'done_ok'
+            ? <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+            : step === 'done_review'
+              ? <AlertCircle className="w-5 h-5 text-amber-600" />
+              : <Icon className="w-5 h-5 text-primary" />
+        }
       </div>
-      <div>
+
+      <div className="w-full">
         <p className="font-medium text-sm text-foreground">{config.label}</p>
-        <p className="text-xs text-muted-foreground">{config.description}</p>
-        <p className="text-[10px] text-muted-foreground mt-1 italic">Accepts: {config.accepts}</p>
+        {isProcessing ? (
+          <div className="mt-1 space-y-1.5">
+            <p className="text-xs text-primary font-medium flex items-center justify-center gap-1">
+              <Sparkles className="w-3 h-3 animate-pulse" /> {currentStepLabel}
+            </p>
+            {/* Step progress indicators */}
+            <div className="flex justify-center gap-1">
+              {AI_STEPS.map((s, i) => (
+                <div
+                  key={s.key}
+                  className={cn(
+                    "h-1 w-6 rounded-full transition-colors duration-300",
+                    AI_STEPS.findIndex(x => x.key === step) >= i
+                      ? "bg-primary"
+                      : "bg-secondary"
+                  )}
+                />
+              ))}
+            </div>
+          </div>
+        ) : step === 'done_ok' ? (
+          <p className="text-xs text-emerald-700 mt-1">
+            ✓ Categorised automatically — added to financial records
+          </p>
+        ) : step === 'done_review' ? (
+          <p className="text-xs text-amber-700 mt-1">
+            ⚠ Sent to Inbox — needs your decision before it affects tax
+          </p>
+        ) : (
+          <div>
+            <p className="text-xs text-muted-foreground mt-0.5">{config.description}</p>
+            <p className="text-[10px] text-muted-foreground mt-1 italic">AI will: {config.aiOutcome}</p>
+          </div>
+        )}
       </div>
+
       <Button
         size="sm"
-        variant={state === 'done' ? 'outline' : 'default'}
-        className="w-full cursor-pointer text-xs"
-        disabled={state === 'uploading'}
+        variant={isDone ? 'outline' : 'default'}
+        className={cn(
+          "w-full cursor-pointer text-xs",
+          step === 'done_review' && "border-amber-300 text-amber-700 hover:bg-amber-50"
+        )}
+        disabled={isProcessing}
         onClick={simulate}
       >
-        {state === 'uploading' ? 'Extracting…' : state === 'done' ? '✓ Uploaded — upload another?' : 'Choose file or drag here'}
+        {isProcessing         ? currentStepLabel :
+         step === 'done_ok'   ? '✓ Done — upload another?' :
+         step === 'done_review'? '→ Resolve in Inbox' :
+                                'Choose file or drag here'}
       </Button>
+
+      {!isProcessing && !isDone && (
+        <p className="text-[10px] text-muted-foreground">Accepts: {config.accepts}</p>
+      )}
     </div>
   );
 }
@@ -142,7 +286,7 @@ function UploadCard({ config, onUploaded }: { config: CategoryConfig; onUploaded
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Evidence() {
-  const { evidenceItems, addEvidenceItem, transactions, addTransaction } = useStore();
+  const { evidenceItems, addEvidenceItem, inboxItems, activeProfileId, transactions, addTransaction } = useStore();
   const [showManual, setShowManual] = useState(false);
   const [manualItem, setManualItem] = useState({
     date: new Date().toISOString().split('T')[0],
@@ -151,32 +295,35 @@ export default function Evidence() {
     category: 'General',
   });
 
-  const handleUploaded = (cat: EvidenceCategory) => {
+  const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
+
+  const handleUploaded = (cat: EvidenceCategory, needsReview: boolean) => {
     const demoNames: Record<EvidenceCategory, string> = {
       bank_statement: 'bank-export.csv',
-      invoice_sent: 'invoice-new.pdf',
-      receipt: 'receipt-scan.jpg',
-      prior_return: 'sa302-prior-year.pdf',
-      contract: 'client-contract.pdf',
-      other: 'document.pdf',
+      invoice_sent:   'invoice-new.pdf',
+      receipt:        'receipt-scan.jpg',
+      prior_return:   'sa302-prior-year.pdf',
+      contract:       'client-contract.pdf',
+      other:          'document.pdf',
     };
     addEvidenceItem({
-      profileId: 'p2',
+      profileId: activeProfileId,
       category: cat,
       filename: demoNames[cat],
       uploadedAt: new Date().toISOString().split('T')[0],
-      status: 'processing',
+      status: needsReview ? 'needs_review' : 'categorised',
+      extractedLines: needsReview ? undefined : Math.floor(Math.random() * 40) + 3,
     });
-    // Simulate AI processing -> categorised
-    setTimeout(() => {
+    // For auto-categorised items, also add a demo transaction
+    if (!needsReview) {
       addTransaction({
         date: new Date().toISOString().split('T')[0],
-        description: `[From upload] ${demoNames[cat]}`,
+        description: `[Upload] ${demoNames[cat]}`,
         amount: cat === 'invoice_sent' ? 1200 : -85,
         category: cat === 'invoice_sent' ? 'Sales' : 'Expenses',
         source: 'receipt',
       });
-    }, 2000);
+    }
   };
 
   const handleAddManual = () => {
@@ -201,19 +348,20 @@ export default function Evidence() {
       <div>
         <h1 className="text-3xl font-serif text-foreground">Evidence</h1>
         <p className="text-muted-foreground mt-1 text-lg max-w-2xl">
-          This is where everything starts. Upload your financial evidence and the system extracts, categorises, and feeds it into your financial records.
+          This is where everything starts. Upload your financial evidence and the system extracts,
+          categorises, and feeds it into your financial records.
         </p>
       </div>
 
-      {/* Flow diagram */}
-      <FlowDiagram />
+      {/* Flow diagram — with live Inbox badge */}
+      <FlowDiagram pendingCount={pendingInbox} />
 
       {/* Status bar */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { label: 'Files uploaded', value: evidenceItems.length, color: 'text-foreground' },
-          { label: 'Categorised', value: categorised, color: 'text-emerald-700' },
-          { label: 'Need your review', value: needsReview, color: needsReview > 0 ? 'text-amber-700' : 'text-muted-foreground' },
+          { label: 'Files uploaded',   value: evidenceItems.length, color: 'text-foreground' },
+          { label: 'Auto-categorised', value: categorised,          color: 'text-emerald-700' },
+          { label: 'Need your review', value: needsReview,          color: needsReview > 0 ? 'text-amber-700' : 'text-muted-foreground' },
         ].map(s => (
           <Card key={s.label} className="p-4 text-center shadow-sm">
             <p className={cn("text-2xl font-serif font-semibold", s.color)}>{s.value}</p>
@@ -226,17 +374,18 @@ export default function Evidence() {
         <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <div>
-            <strong>{needsReview} file{needsReview !== 1 ? 's' : ''} need your review</strong> — uploaded but not yet fully classified.
-            Resolve in <Link href="/tasks" className="underline font-medium">Tasks → Action Needed</Link>.
+            <strong>{needsReview} file{needsReview !== 1 ? 's' : ''} in Inbox</strong> — AI flagged
+            {needsReview !== 1 ? ' these' : ' this'} for your decision before affecting tax.{' '}
+            <Link href="/tasks" className="underline font-medium">Resolve in Tasks → To Do</Link>.
           </div>
         </div>
       )}
 
       {/* Upload grid */}
       <div>
-        <h2 className="text-xl font-serif font-medium mb-2">Upload evidence</h2>
+        <h2 className="text-xl font-serif font-medium mb-1">Upload evidence</h2>
         <p className="text-sm text-muted-foreground mb-5">
-          Choose the right category so the AI applies the correct tax rules. Prototype: clicking any card simulates an upload.
+          Choose the right category so the AI applies the correct tax rules. In this prototype, clicking any card simulates an upload with the full AI categorisation sequence.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {CATEGORIES.map(cat => (

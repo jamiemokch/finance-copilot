@@ -140,6 +140,10 @@ export interface AssumptionField {
   step: number;
 }
 
+// Impact ranges — show numerical estimates even when uncertain
+export interface ImpactRange { min: number; max: number; }
+export interface PaybackRange { minMonths: number | null; maxMonths: number | null; }
+
 export interface BusinessIdea {
   id: string;
   profileId: string;
@@ -158,6 +162,13 @@ export interface BusinessIdea {
   deadlines?: string[];
   status: 'new' | 'saved' | 'actioned' | 'dismissed';
   committedDecisionId?: string;
+  // Quantified impact ranges (shown even when uncertain, as ranges)
+  priorityTier: 'do_now' | 'consider' | 'watch';
+  plImpactRange?: ImpactRange;       // annual P&L £ change (+ = gain, - = cost)
+  cashImpactRange?: ImpactRange;     // cash £ change (- = outflow)
+  taxImpactRange?: ImpactRange;      // tax saving £ range (always positive)
+  paybackRange?: PaybackRange;       // null = immediate/N/A
+  urgencyNote?: string;              // why act now vs later
 }
 
 // ─── Decision Memory ──────────────────────────────────────────────────────────
@@ -176,6 +187,11 @@ export interface DecisionMemoryEntry {
   expectedCashImpact: number;
   expectedTaxImpact: number;
   status: 'committed' | 'monitoring' | 'completed' | 'abandoned';
+  // Actual outcomes — filled in later to close the loop
+  actualOutcome?: string;
+  actualPLImpact?: number;
+  actualCashImpact?: number;
+  actualTaxImpact?: number;
 }
 
 // ─── Compliance timeline ──────────────────────────────────────────────────────
@@ -321,6 +337,7 @@ export interface AppState {
   decisionMemory: DecisionMemoryEntry[];
   commitDecision: (entry: Omit<DecisionMemoryEntry, 'id'>) => string;
   updateDecisionMemoryStatus: (id: string, status: DecisionMemoryEntry['status']) => void;
+  updateDecisionMemoryOutcome: (id: string, outcome: string, actualPL?: number, actualCash?: number, actualTax?: number) => void;
 
   complianceItems: ComplianceItem[];
 
@@ -575,88 +592,87 @@ const initialBenchmarks: BenchmarkMetric[] = [
 
 const initialBusinessIdeas: BusinessIdea[] = [
   {
-    id: 'bi1', profileId: 'p2', category: 'hiring',
-    title: 'Hire a junior designer or VA',
-    summary: 'Your revenue per employee (~£39,800) sits below the peer median (£65,000). A part-time hire could extend capacity and grow revenue — but only if the pipeline supports it.',
-    triggerBenchmark: 'Revenue per Employee',
-    benchmarkGap: '39% below peer median of £65,000',
-    currentPosition: 'You are billing ~£39,800 this year as a solo. Peer median for Creative & Design, solo/micro category is £65,000 per employee (illustrative — see benchmark detail).',
-    proposedAction: 'Hire one part-time junior designer or VA (~0.5 FTE)',
-    editableAssumptions: [
-      { key: 'salary', label: 'Annual salary', value: 18000, unit: '£', min: 12000, max: 30000, step: 500 },
-      { key: 'revenueGrowth', label: 'Expected revenue growth', value: 35, unit: '%', min: 0, max: 100, step: 5 },
-      { key: 'recruitmentCost', label: 'One-off recruitment cost', value: 1200, unit: '£', min: 0, max: 5000, step: 100 },
-    ],
-    whatMustBeTrue: [
-      'You have a consistent pipeline of more work than you can handle alone',
-      'Available cash (£6,090) can cover at least 6 months of salary before incremental revenue arrives',
-      'You have capacity to manage and train a junior hire',
-    ],
-    source: 'Financial Memory (YTD revenue £39,800) + ONS UK Business Survey 2022 (illustrative benchmark)',
-    confidence: 'medium', impactLabel: 'Revenue growth + tax deduction', status: 'new',
-  },
-  {
     id: 'bi2', profileId: 'p2', category: 'cash',
-    title: 'Reduce debtor days',
-    summary: 'Your customers are taking ~34 days to pay — 6 days above the peer median. Tighter payment terms could free up the £3,400 AR balance faster.',
+    title: 'Reduce debtor days — chase overdue invoice',
+    summary: 'Axiom Agency #1042 is already 7 days overdue (£2,400). Tighter payment terms and an immediate chase could unlock £1,500–£2,200 in cash this month — the biggest quick win available.',
     triggerBenchmark: 'Debtor Days',
     benchmarkGap: '6 days above peer median of 28 days',
-    currentPosition: '£3,400 outstanding across 2 invoices (one already overdue). Current debtor days ~34. Peer median for your category is 28 days (illustrative).',
-    proposedAction: 'Switch to 14-day payment terms on new contracts; automated reminders at day 10',
+    currentPosition: '£3,400 outstanding across 2 invoices — Axiom #1042 (£2,400) is 7 days overdue. Current debtor days ~34 vs peer median 28 days (illustrative).',
+    proposedAction: 'Chase Axiom #1042 today; switch new contracts to 14-day terms with automated reminders at day 10',
     editableAssumptions: [
       { key: 'targetDebtorDays', label: 'Target debtor days', value: 14, unit: 'days', min: 7, max: 30, step: 1 },
       { key: 'earlyPaymentDiscount', label: 'Early payment discount to offer', value: 0, unit: '%', min: 0, max: 3, step: 0.5 },
     ],
     whatMustBeTrue: [
+      'You contact Axiom today about the overdue invoice',
       'New contract terms updated and communicated to clients',
-      'Invoice template updated with new payment terms',
-      'Automated reminder sequence set up',
+      'Automated reminder sequence set up in your invoicing tool',
     ],
     source: 'Financial Memory (AR £3,400, invoice dates) + Xero Small Business Insights UK 2023 (illustrative benchmark)',
-    confidence: 'high', impactLabel: 'Working capital release', status: 'new',
+    confidence: 'high', impactLabel: 'Cash released: £1,500–£2,200',
+    priorityTier: 'do_now',
+    plImpactRange: { min: -800, max: 0 },
+    cashImpactRange: { min: 1500, max: 2200 },
+    taxImpactRange: { min: 0, max: 0 },
+    paybackRange: { minMonths: 0, maxMonths: 0 },
+    urgencyNote: 'Axiom invoice #1042 already 7 days overdue — every day costs you cash',
+    status: 'new',
+  },
+  {
+    id: 'bi4', profileId: 'p2', category: 'tax',
+    title: 'Claim Working From Home allowance',
+    summary: 'HMRC\'s flat-rate WFH allowance is a zero-cost claim in your SA return. At 4 days/week it saves £24–£62 in tax — small but effort-free, and must be claimed by 31 Jan 2025.',
+    currentPosition: 'You work from home approximately 4 days per week. The HMRC flat rate (£10–£26/month) applies at 25+ hours/month and requires no receipts.',
+    proposedAction: 'Claim HMRC flat-rate WFH allowance in your 23/24 Self-Assessment return — takes 5 minutes',
+    editableAssumptions: [
+      { key: 'daysPerWeek', label: 'Days working from home per week', value: 4, unit: 'days', min: 1, max: 5, step: 1 },
+    ],
+    whatMustBeTrue: [
+      'You genuinely work from home those days (keep a simple log)',
+      'You are not also claiming a separate office rent deduction',
+    ],
+    source: 'HMRC EIM32760 — Working from Home expenses, flat-rate allowances 2023/24 (gov.uk)',
+    confidence: 'high', impactLabel: 'Tax saving: +£24–£62',
+    priorityTier: 'do_now',
+    plImpactRange: { min: 120, max: 312 },
+    cashImpactRange: { min: 24, max: 62 },
+    taxImpactRange: { min: 24, max: 62 },
+    paybackRange: { minMonths: 0, maxMonths: 0 },
+    urgencyNote: 'Must be claimed in SA return by 31 Jan 2025 — zero cost to act now',
+    deadlines: ['Claim in Self-Assessment by 31 Jan 2025'],
+    status: 'new',
   },
   {
     id: 'bi3', profileId: 'p2', category: 'assets',
-    title: 'Buy a professional display before year end',
-    summary: 'Annual Investment Allowance lets you deduct the full purchase price from this year\'s confirmed profit (£35,000) — reducing your January tax bill.',
-    currentPosition: 'A professional display (£800–£1,500) qualifies for AIA — the full cost deductible in year of purchase. Would reduce taxable profit and cut the £6,900 balance due.',
-    proposedAction: 'Purchase a professional display before 5 April 2024 to claim in 23/24 return',
+    title: 'Buy a qualifying asset before 5 April (AIA)',
+    summary: 'Any equipment bought before 5 April 2024 is fully deductible via AIA — reducing your taxable profit by the purchase price and cutting the £6,900 balance due. Hard deadline in days.',
+    currentPosition: 'A professional display or equipment (£500–£1,500) qualifies for AIA — the full purchase price deducted from 23/24 profit (£35,000). Saves 20% of purchase price in tax.',
+    proposedAction: 'Purchase a business asset you genuinely need before 5 April 2024 and claim via AIA in SA return',
     editableAssumptions: [
       { key: 'purchasePrice', label: 'Purchase price', value: 1100, unit: '£', min: 500, max: 2500, step: 50 },
     ],
     whatMustBeTrue: [
       'You genuinely need the asset for business use (HMRC "wholly and exclusively" test)',
-      'Profit of £35,000 is sufficient to benefit from the deduction',
+      'Profit of £35,000 is sufficient to benefit fully from the deduction',
       'Purchase made before 5 April 2024',
     ],
     source: 'HMRC Capital Allowances — Annual Investment Allowance 2023/24 (gov.uk)',
-    confidence: 'high', impactLabel: 'Tax saving via AIA deduction',
-    deadlines: ['Purchase before 5 April 2024'], status: 'new',
-  },
-  {
-    id: 'bi4', profileId: 'p2', category: 'tax',
-    title: 'Claim Working From Home allowance',
-    summary: 'Working from home regularly qualifies for HMRC\'s flat-rate WFH allowance — a simple annual claim that reduces taxable profit.',
-    currentPosition: 'You work from home approximately 4 days per week. The HMRC flat rate applies at 25+ hours/month and covers a proportion of household costs.',
-    proposedAction: 'Claim HMRC flat-rate WFH allowance in your Self-Assessment return',
-    editableAssumptions: [
-      { key: 'daysPerWeek', label: 'Days working from home per week', value: 4, unit: 'days', min: 1, max: 5, step: 1 },
-    ],
-    whatMustBeTrue: [
-      'You genuinely work from home those days (keep a log)',
-      'No separate rented office claimed separately',
-      'Claimed in Self-Assessment by 31 Jan 2025',
-    ],
-    source: 'HMRC EIM32760 — Working from Home expenses, flat-rate allowances 2023/24 (gov.uk)',
-    confidence: 'high', impactLabel: 'Tax saving via WFH allowance',
-    deadlines: ['Claim in Self-Assessment by 31 Jan 2025'], status: 'new',
+    confidence: 'high', impactLabel: 'Tax saving: £100–£300',
+    priorityTier: 'do_now',
+    plImpactRange: { min: 100, max: 300 },
+    cashImpactRange: { min: -2500, max: -500 },
+    taxImpactRange: { min: 100, max: 300 },
+    paybackRange: { minMonths: null, maxMonths: null },
+    urgencyNote: 'Hard deadline: must purchase before 5 April 2024 — after that, benefit deferred by a full year',
+    deadlines: ['Purchase before 5 April 2024'],
+    status: 'new',
   },
   {
     id: 'bi5', profileId: 'p2', category: 'tax',
     title: 'Accelerate planned equipment purchase',
-    summary: 'If you\'re planning equipment purchases anyway, buying before 5 April brings the AIA deduction forward — reducing the £6,900 balance due this January.',
-    currentPosition: 'Trading profit stands at £35,000 (confirmed). Any equipment bought before year-end is fully deductible via AIA (up to £1m/yr).',
-    proposedAction: 'Bring forward planned equipment purchases to before 5 April 2024',
+    summary: 'If you\'re planning any equipment purchase anyway, bringing it forward to before 5 April 2024 pulls the full AIA deduction into this year\'s tax return — reducing the £6,900 January bill.',
+    currentPosition: 'Trading profit stands at £35,000 (confirmed). Any qualifying equipment bought before year-end is fully deductible via AIA (up to £1m/yr). Available cash £6,090.',
+    proposedAction: 'Bring forward any planned equipment purchases to before 5 April 2024',
     editableAssumptions: [
       { key: 'equipmentBudget', label: 'Equipment budget', value: 1100, unit: '£', min: 500, max: 5000, step: 100 },
     ],
@@ -666,8 +682,43 @@ const initialBusinessIdeas: BusinessIdea[] = [
       'Purchase made before 5 April 2024',
     ],
     source: 'HMRC Capital Allowances — AIA 2023/24 (gov.uk)',
-    confidence: 'medium', impactLabel: 'Tax saving — timing benefit',
-    deadlines: ['Purchase before 5 April 2024'], status: 'new',
+    confidence: 'medium', impactLabel: 'Tax saving: £100–£1,000',
+    priorityTier: 'consider',
+    plImpactRange: { min: 100, max: 1000 },
+    cashImpactRange: { min: -5000, max: -500 },
+    taxImpactRange: { min: 100, max: 1000 },
+    paybackRange: { minMonths: null, maxMonths: null },
+    urgencyNote: 'Hard deadline: 5 April 2024 — only act if you have a genuine business need',
+    deadlines: ['Purchase before 5 April 2024'],
+    status: 'new',
+  },
+  {
+    id: 'bi1', profileId: 'p2', category: 'hiring',
+    title: 'Hire a junior designer or VA',
+    summary: 'Your revenue per employee (~£39,800) sits 39% below the peer median (£65,000). A part-time hire could grow revenue — but current available cash (£6,090) covers less than 5 months of salary. Pipeline confidence is the key gate.',
+    triggerBenchmark: 'Revenue per Employee',
+    benchmarkGap: '39% below peer median of £65,000',
+    currentPosition: 'Billing ~£39,800 as a solo consultant. Peer median for Creative & Design, solo/micro is £65,000/employee (illustrative). Available cash £6,090 — below 6-month salary reserve threshold of ~£9,000.',
+    proposedAction: 'Hire one part-time junior designer or VA (~0.5 FTE) once pipeline and reserves are in place',
+    editableAssumptions: [
+      { key: 'salary', label: 'Annual salary', value: 18000, unit: '£', min: 12000, max: 30000, step: 500 },
+      { key: 'revenueGrowth', label: 'Expected revenue growth', value: 35, unit: '%', min: 0, max: 100, step: 5 },
+      { key: 'recruitmentCost', label: 'One-off recruitment cost', value: 1200, unit: '£', min: 0, max: 5000, step: 100 },
+    ],
+    whatMustBeTrue: [
+      'You have a consistent pipeline of more work than you can handle alone',
+      'Available cash covers at least 6 months of salary (need ~£9,000 — currently £6,090)',
+      'You have capacity and systems to manage and train a hire',
+    ],
+    source: 'Financial Memory (YTD revenue £39,800) + ONS UK Business Survey 2022 (illustrative benchmark)',
+    confidence: 'medium', impactLabel: 'Revenue growth +£8k–£14k (year 2+)',
+    priorityTier: 'watch',
+    plImpactRange: { min: -10000, max: 2000 },
+    cashImpactRange: { min: -20000, max: -13000 },
+    taxImpactRange: { min: 2400, max: 3600 },
+    paybackRange: { minMonths: 12, maxMonths: null },
+    urgencyNote: 'Watch: build cash reserves and pipeline confidence first — current cash below safe threshold',
+    status: 'new',
   },
 ];
 
@@ -897,6 +948,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     updateDecisionMemoryStatus: (id, status) =>
       setDecisionMemory(prev => prev.map(d => d.id === id ? { ...d, status } : d)),
+    updateDecisionMemoryOutcome: (id, outcome, actualPL, actualCash, actualTax) =>
+      setDecisionMemory(prev => prev.map(d => d.id === id ? {
+        ...d,
+        actualOutcome: outcome,
+        actualPLImpact: actualPL,
+        actualCashImpact: actualCash,
+        actualTaxImpact: actualTax,
+        status: 'completed',
+      } : d)),
     complianceItems: initialComplianceItems,
     saChecklist,
     updateSAChecklistItem: (id, status) =>

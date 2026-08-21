@@ -8,7 +8,7 @@ import {
 import { useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
 
-type TabId = 'action' | 'deadlines' | 'yearend';
+type TabId = 'todo' | 'timeline';
 
 // ─── Compliance Timeline Tab ──────────────────────────────────────────────────
 
@@ -538,12 +538,11 @@ export default function Tasks() {
   const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
   const urgentDeadlines = complianceItems.filter(c => c.profileId === activeProfileId && (c.status === 'due-soon' || c.status === 'overdue')).length;
 
-  const [activeTab, setActiveTab] = useState<TabId>('action');
+  const [activeTab, setActiveTab] = useState<TabId>('todo');
 
   const tabs: { id: TabId; label: string; count?: number }[] = [
-    { id: 'action', label: 'Action Needed', count: pendingInbox },
-    { id: 'deadlines', label: 'Deadlines', count: urgentDeadlines },
-    { id: 'yearend', label: 'Year-End' },
+    { id: 'todo',     label: 'To Do',     count: pendingInbox + urgentDeadlines },
+    { id: 'timeline', label: 'Timeline' },
   ];
 
   return (
@@ -580,9 +579,20 @@ export default function Tasks() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'action' && <InboxTab />}
-      {activeTab === 'deadlines' && <ComplianceTab />}
-      {activeTab === 'yearend' && <YearEndTab />}
+      {activeTab === 'todo' && <InboxTab />}
+      {activeTab === 'timeline' && (
+        <div className="space-y-10">
+          <ComplianceTab />
+          {/* Year-end pack — merged into Timeline as a bottom section */}
+          <div>
+            <div className="flex items-center gap-2 mb-6 pt-6 border-t border-border">
+              <h2 className="text-xl font-serif font-medium text-foreground">Year-End Pack</h2>
+              <Badge variant="outline" className="text-[10px]">Merged into Timeline</Badge>
+            </div>
+            <YearEndTab />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
