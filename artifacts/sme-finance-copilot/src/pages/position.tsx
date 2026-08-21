@@ -28,7 +28,9 @@ export default function Position() {
   const renderDrilldown = (item: PositionItem) => {
     if (item.title === 'YTD Profit/Loss' && plBreakdown) {
       const totalRev = plBreakdown.revenues.reduce((acc, curr) => acc + curr.amount, 0);
-      const totalExp = plBreakdown.expenses.reduce((acc, curr) => acc + curr.amount, 0);
+      const totalConfirmed = plBreakdown.confirmedExpenses.reduce((acc, curr) => acc + curr.amount, 0);
+      const totalPending = plBreakdown.pendingExpenses.reduce((acc, curr) => acc + curr.amount, 0);
+      const confirmedProfit = totalRev - totalConfirmed;
       return (
         <div className="space-y-6">
           <div>
@@ -38,7 +40,7 @@ export default function Position() {
                 <thead className="bg-secondary/50">
                   <tr>
                     <th className="text-left font-medium p-3">Label</th>
-                    <th className="text-left font-medium p-3">Basis</th>
+                    <th className="text-left font-medium p-3">Basis / Evidence</th>
                     <th className="text-right font-medium p-3">Amount</th>
                   </tr>
                 </thead>
@@ -46,7 +48,10 @@ export default function Position() {
                   {plBreakdown.revenues.map((rev: PLRevenue, i: number) => (
                     <tr key={i} className="bg-background">
                       <td className="p-3">{rev.label}</td>
-                      <td className="p-3 text-muted-foreground text-xs">{rev.basis}</td>
+                      <td className="p-3 text-muted-foreground text-xs">
+                        <div>{rev.basis}</div>
+                        {rev.evidenceRef && <div className="text-primary/70 mt-0.5">↳ {rev.evidenceRef}</div>}
+                      </td>
                       <td className="p-3 text-right font-medium text-emerald-700">£{rev.amount.toLocaleString()}</td>
                     </tr>
                   ))}
@@ -59,35 +64,68 @@ export default function Position() {
             </div>
           </div>
           <div>
-            <h4 className="font-semibold text-sm mb-3">Expenses</h4>
+            <h4 className="font-semibold text-sm mb-3">Confirmed Allowable Expenses</h4>
             <div className="border border-border rounded-lg overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-secondary/50">
                   <tr>
                     <th className="text-left font-medium p-3">Category / Label</th>
-                    <th className="text-left font-medium p-3">Basis</th>
+                    <th className="text-left font-medium p-3">Basis / Evidence</th>
                     <th className="text-right font-medium p-3">Amount</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {plBreakdown.expenses.map((exp: PLExpense, i: number) => (
+                  {plBreakdown.confirmedExpenses.map((exp: PLExpense, i: number) => (
                     <tr key={i} className="bg-background">
                       <td className="p-3">
-                        <div className="font-medium">{exp.category}</div>
-                        <div className="text-muted-foreground text-xs">{exp.label}</div>
+                        <div className="font-medium">{exp.label}</div>
+                        <div className="text-muted-foreground text-xs">{exp.category}</div>
                       </td>
-                      <td className="p-3 text-muted-foreground text-xs">{exp.basis}</td>
-                      <td className="p-3 text-right font-medium text-destructive">£{exp.amount.toLocaleString()}</td>
+                      <td className="p-3 text-muted-foreground text-xs">
+                        <div>{exp.basis}</div>
+                        {exp.evidenceRef && <div className="text-primary/70 mt-0.5">↳ {exp.evidenceRef}</div>}
+                      </td>
+                      <td className="p-3 text-right font-medium">£{exp.amount.toLocaleString()}</td>
                     </tr>
                   ))}
                   <tr className="bg-secondary/20">
-                    <td colSpan={2} className="p-3 font-semibold text-right">Total Expenses</td>
-                    <td className="p-3 font-semibold text-right">£{totalExp.toLocaleString()}</td>
+                    <td colSpan={2} className="p-3 font-semibold text-right">Total Confirmed Expenses</td>
+                    <td className="p-3 font-semibold text-right">£{totalConfirmed.toLocaleString()}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
+          {/* Headline profit */}
+          <div className="border-2 border-primary/20 rounded-lg p-4 bg-primary/5 flex justify-between items-center">
+            <div>
+              <p className="font-semibold">YTD Profit (confirmed basis)</p>
+              <p className="text-xs text-muted-foreground">£{totalRev.toLocaleString()} revenue − £{totalConfirmed.toLocaleString()} confirmed expenses</p>
+            </div>
+            <span className="text-2xl font-serif font-semibold">£{confirmedProfit.toLocaleString()}</span>
+          </div>
+          {/* Pending items */}
+          {plBreakdown.pendingExpenses.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-xs font-semibold uppercase tracking-wider text-amber-700 mb-3 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" /> Excluded — pending Inbox resolution
+              </p>
+              <div className="space-y-2">
+                {plBreakdown.pendingExpenses.map((exp: PLExpense, i: number) => (
+                  <div key={i} className="flex justify-between text-sm text-amber-800 py-1 border-b border-amber-100 last:border-0">
+                    <div>
+                      <p className="font-medium">{exp.label}</p>
+                      <p className="text-xs opacity-70">{exp.basis}</p>
+                    </div>
+                    <span className="font-medium">£{exp.amount.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-amber-700 mt-3">
+                If both resolve as expenses: profit would be £{(confirmedProfit - totalPending).toLocaleString()}.
+              </p>
+            </div>
+          )}
         </div>
       );
     }

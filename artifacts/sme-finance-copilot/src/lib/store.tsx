@@ -23,6 +23,7 @@ export interface PositionItem {
   title: string;
   description: string;
   value: string;
+  rawValue?: number;
   type: 'kpi' | 'fact';
   basis: string;
   documents: string[];
@@ -69,6 +70,29 @@ export interface TransactionItem {
   source: 'bank' | 'manual' | 'receipt';
 }
 
+// ─── Evidence items ───────────────────────────────────────────────────────────
+
+export type EvidenceCategory =
+  | 'bank_statement'
+  | 'invoice_sent'
+  | 'receipt'
+  | 'prior_return'
+  | 'contract'
+  | 'other';
+
+export type EvidenceStatus = 'received' | 'processing' | 'categorised' | 'needs_review';
+
+export interface EvidenceItem {
+  id: string;
+  profileId: string;
+  category: EvidenceCategory;
+  filename: string;
+  uploadedAt: string;
+  status: EvidenceStatus;
+  extractedLines?: number;
+  linkedInboxItemId?: string;
+}
+
 // ─── Peer benchmarking ────────────────────────────────────────────────────────
 
 export interface PeerCategory {
@@ -91,18 +115,18 @@ export interface BenchmarkMetric {
   userCurrent: string;
   userStatus: 'above' | 'inline' | 'below' | 'unknown';
   source: string;
-  sourceFull: string;   // full citation
+  sourceFull: string;
   dataPeriod: string;
   geography: string;
   peerDefinition: string;
   sampleSize: string;
   confidence: 'high' | 'medium' | 'low';
   freshness: string;
-  isIllustrative: boolean; // true = sample/illustrative, false = researched external figure
-  relevanceToIdea?: string; // which business idea this benchmark supports
+  isIllustrative: boolean;
+  relevanceToIdea?: string;
 }
 
-// ─── Business Ideas (merged Decisions + Tax Ideas) ───────────────────────────
+// ─── Business Ideas ───────────────────────────────────────────────────────────
 
 export type BusinessIdeaCategory = 'tax' | 'cash' | 'growth' | 'operations' | 'hiring' | 'pricing' | 'assets';
 
@@ -190,6 +214,7 @@ export interface PLRevenue {
   label: string;
   amount: number;
   basis: string;
+  evidenceRef?: string;
 }
 
 export interface PLExpense {
@@ -197,11 +222,14 @@ export interface PLExpense {
   amount: number;
   category: string;
   basis: string;
+  evidenceRef?: string;
+  isPending?: boolean;
 }
 
 export interface PLBreakdown {
   revenues: PLRevenue[];
-  expenses: PLExpense[];
+  confirmedExpenses: PLExpense[];
+  pendingExpenses: PLExpense[];   // excluded from headline profit until resolved
 }
 
 export interface TaxLine {
@@ -224,6 +252,7 @@ export interface AREntry {
   dueDate: string;
   isOverdue: boolean;
   daysOverdue?: number;
+  evidenceRef?: string;
 }
 
 export interface APEntry {
@@ -232,6 +261,7 @@ export interface APEntry {
   amount: number;
   dueDate: string;
   isOverdue: boolean;
+  evidenceRef?: string;
 }
 
 export interface CashAccount {
@@ -248,7 +278,8 @@ export interface CashFlow {
 
 export interface CashBreakdown {
   accounts: CashAccount[];
-  taxReserve: number;
+  taxReserve: number;           // ringfenced for Jan tax
+  apDueWithin30Days: number;    // committed/due AP
   nearTermInflows: CashFlow[];
   nearTermOutflows: CashFlow[];
 }
@@ -269,6 +300,9 @@ export interface AppState {
   transactions: TransactionItem[];
   addTransaction: (transaction: Omit<TransactionItem, 'id'>) => void;
 
+  evidenceItems: EvidenceItem[];
+  addEvidenceItem: (item: Omit<EvidenceItem, 'id'>) => string;
+
   inboxItems: InboxItem[];
   resolveInboxItem: (id: string, resolution: string) => void;
 
@@ -276,39 +310,32 @@ export interface AppState {
   addChatMessage: (sessionId: string, message: Omit<ChatMessage, 'id'>) => void;
   createChatSession: (title: string, initialMessage?: Omit<ChatMessage, 'id'>) => string;
 
-  // Peer benchmarking
   peerCategory: PeerCategory | null;
   updatePeerCategory: (data: Partial<PeerCategory>) => void;
   benchmarks: BenchmarkMetric[];
 
-  // Business Ideas (merged decisions + tax ideas)
   businessIdeas: BusinessIdea[];
   updateBusinessIdea: (id: string, updates: Partial<BusinessIdea>) => void;
   updateIdeaAssumption: (ideaId: string, key: string, value: number) => void;
 
-  // Decision Memory
   decisionMemory: DecisionMemoryEntry[];
   commitDecision: (entry: Omit<DecisionMemoryEntry, 'id'>) => string;
   updateDecisionMemoryStatus: (id: string, status: DecisionMemoryEntry['status']) => void;
 
-  // Compliance timeline
   complianceItems: ComplianceItem[];
 
-  // SA Checklist
   saChecklist: SAChecklistItem[];
   updateSAChecklistItem: (id: string, status: SAChecklistItem['status']) => void;
 
   yearEndPackGenerated: boolean;
   setYearEndPackGenerated: (val: boolean) => void;
 
-  // Financial drilldowns
   plBreakdown: PLBreakdown;
   taxCalculation: TaxCalculation;
   arEntries: AREntry[];
   apEntries: APEntry[];
   cashBreakdown: CashBreakdown;
 
-  // Copilot trigger (for cross-component communication)
   copilotTrigger: string | null;
   setCopilotTrigger: (msg: string | null) => void;
 }
@@ -320,36 +347,94 @@ const initialProfiles: Profile[] = [
   { id: 'p2', type: 'sole_trader', name: 'Design Consulting (Sole Trader)' },
 ];
 
+// ─── Canonical numbers (all figures must tie to these) ────────────────────────
+//
+//  Revenue (confirmed):          £39,800
+//  Confirmed allowable expenses: £ 4,800
+//  YTD Profit (confirmed only):  £35,000   ← headline
+//  Pending Inbox items:          £ 1,399   (excluded until resolved)
+//
+//  Tax: trading £35k + property £10,200 = £45,200 gross income
+//       less personal allowance £12,570 = £32,630 taxable
+//       income tax 20%:   £6,526
+//       Class 4 NI 9%:    £2,019  (on £35k − £12,570 = £22,430)
+//       Class 2 NI:       £  179
+//       Gross liability:  £8,724
+//       Less PoA paid:   −£1,800
+//       Balance due:     ~£6,924  → displayed as £6,900
+//
+//  Cash:  Total business cash £9,840 (Starling only; no personal mixing)
+//         − Tax reserve £3,500 (ringfenced toward £6,900 balance due)
+//         − AP due ≤30 days £250 (Adobe £50 + WeWork £200)
+//         = Available cash £6,090
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 const initialPositionItems: PositionItem[] = [
   {
-    id: 'kpi1', profileId: 'p2', title: 'YTD Profit/Loss', description: 'your trading performance this year', value: '£24,500', type: 'kpi',
-    basis: 'Calculated from 142 linked bank transactions minus £4,200 allowable expenses.',
-    documents: ['Starling Bank Feed (Synced 2h ago)'], assumptions: ['No major unlogged cash expenses'], confidence: 'high',
+    id: 'kpi1', profileId: 'p2',
+    title: 'YTD Profit/Loss',
+    description: 'your confirmed trading performance this year',
+    value: '£35,000', rawValue: 35000,
+    type: 'kpi',
+    basis: 'Revenue £39,800 minus confirmed allowable expenses £4,800. Two Inbox items (£1,399) excluded until classified.',
+    documents: ['Starling Bank Feed', 'Client Invoices #1001–#1042', 'Axiom retainer agreement'],
+    assumptions: ['Pending items resolve as expenses — would reduce to £33,601', 'No major unlogged cash expenses'],
+    confidence: 'medium',
   },
   {
-    id: 'kpi2', profileId: 'p2', title: 'Estimated Tax', description: 'money you need to set aside', value: '£5,800', type: 'kpi',
-    basis: 'Based on £24,500 trading profit + £12,000 personal property income at Basic Rate.',
-    documents: [], assumptions: ['No further large equipment purchases before April 5th'], confidence: 'medium',
+    id: 'kpi2', profileId: 'p2',
+    title: 'Estimated Tax',
+    description: 'balance due 31 Jan 2025',
+    value: '£6,900', rawValue: 6900,
+    type: 'kpi',
+    basis: 'Trading profit £35,000 + property income £10,200 − personal allowance £12,570 = £32,630 taxable. Income tax £6,526 + NI £2,198 = £8,724 gross − prior PoA £1,800 = £6,924 balance.',
+    documents: [],
+    assumptions: ['No further large equipment purchases before 5 April', 'Pending Inbox items resolve without changing taxable profit materially'],
+    confidence: 'medium',
   },
   {
-    id: 'kpi3', profileId: 'p2', title: 'Accounts Receivable', description: 'money customers still owe you', value: '£3,400', type: 'kpi',
-    basis: '2 unpaid invoices matching sent records.',
-    documents: ['Invoice #1042', 'Invoice #1043'], assumptions: [], confidence: 'high',
+    id: 'kpi3', profileId: 'p2',
+    title: 'Accounts Receivable',
+    description: 'invoices sent, not yet collected',
+    value: '£3,400', rawValue: 3400,
+    type: 'kpi',
+    basis: '2 unpaid invoices: Axiom Agency #1042 (£2,400, overdue 7d) and Studio Nine #1043 (£1,000, due 5 Apr).',
+    documents: ['Invoice #1042', 'Invoice #1043'],
+    assumptions: [],
+    confidence: 'high',
   },
   {
-    id: 'kpi4', profileId: 'p2', title: 'Accounts Payable', description: 'bills you still need to pay', value: '£250', type: 'kpi',
-    basis: '1 upcoming subscription and 1 pending supplier bill.',
-    documents: ['Adobe Invoice', 'WeWork statement'], assumptions: [], confidence: 'high',
+    id: 'kpi4', profileId: 'p2',
+    title: 'Accounts Payable',
+    description: 'bills committed, not yet paid',
+    value: '£250', rawValue: 250,
+    type: 'kpi',
+    basis: 'Adobe Creative Cloud £50 due 1 Apr + WeWork April £200 due 7 Apr.',
+    documents: ['Adobe subscription', 'WeWork statement'],
+    assumptions: [],
+    confidence: 'high',
   },
   {
-    id: 'kpi5', profileId: 'p2', title: 'Available Cash', description: 'money in your business accounts', value: '£8,240', type: 'kpi',
-    basis: 'Current balance of Starling Business Account.',
-    documents: ['Starling Bank Feed'], assumptions: [], confidence: 'high',
+    id: 'kpi5', profileId: 'p2',
+    title: 'Available Cash',
+    description: 'free to use after tax reserve and committed bills',
+    value: '£6,090', rawValue: 6090,
+    type: 'kpi',
+    basis: 'Starling Business £9,840 − tax reserve £3,500 − AP due ≤30 days £250 = £6,090.',
+    documents: ['Starling Bank Feed (synced 2h ago)'],
+    assumptions: ['Tax reserve is held as internal ringfence — not a separate account', 'AR (£3,400) excluded until collected'],
+    confidence: 'high',
   },
   {
-    id: 'f1', profileId: 'p2', title: 'VAT Status', description: 'registration details', value: 'Registered (Effective 01/04/2022)', type: 'fact',
-    basis: 'Confirmed via onboarding input and verified against previous return.',
-    documents: ['VAT Certificate'], assumptions: [], confidence: 'high',
+    id: 'f1', profileId: 'p2',
+    title: 'VAT Status',
+    description: 'registration details',
+    value: 'Registered (Effective 01/04/2022)',
+    type: 'fact',
+    basis: 'Confirmed via onboarding and verified against previous return.',
+    documents: ['VAT Certificate'],
+    assumptions: [], confidence: 'high',
   },
 ];
 
@@ -361,12 +446,12 @@ const initialInboxItems: InboxItem[] = [
       {
         label: 'Hardware (e.g. Laptop, Phone)',
         subOptions: [
-          { label: 'Depreciation 30% p.a.', isSuggested: true },
-          { label: 'Depreciation 20% p.a.' },
+          { label: 'Depreciation 30% p.a. (AIA — full deduction year 1)', isSuggested: true },
+          { label: 'Depreciation 20% p.a. (standard WDA)' },
           { label: 'Manual input' },
         ],
       },
-      { label: 'Software/Services' },
+      { label: 'Software / App subscription (fully deductible as expense)' },
     ],
   },
   {
@@ -379,18 +464,28 @@ const initialInboxItems: InboxItem[] = [
   },
   {
     id: '3', profileId: 'p2', date: '2024-01-10', description: 'Client meeting room hire', amount: 150.00, status: 'pending',
-    aiReasoning: 'This is tagged as "meeting room hire", but it was at a restaurant/hotel location which is often classed as client entertainment (not tax deductible). If it was purely room hire, it is allowable.',
+    aiReasoning: 'Tagged as "meeting room hire" but the merchant is a restaurant/hotel — HMRC often classifies this as client entertainment (not deductible). Purely room hire is allowable.',
     options: [
-      { label: 'Purely room hire (Allowable)', isSuggested: true },
-      { label: 'Client entertainment (Disallowable)' },
+      { label: 'Purely room hire (Allowable — deductible)', isSuggested: true },
+      { label: 'Client entertainment (Disallowable — not deductible)' },
     ],
   },
 ];
 
+const initialEvidenceItems: EvidenceItem[] = [
+  { id: 'ev1', profileId: 'p2', category: 'bank_statement', filename: 'starling-export-jan-mar-2024.csv', uploadedAt: '2024-03-12', status: 'categorised', extractedLines: 142 },
+  { id: 'ev2', profileId: 'p2', category: 'invoice_sent', filename: 'invoice-1042-axiom.pdf', uploadedAt: '2024-03-01', status: 'categorised', extractedLines: 1 },
+  { id: 'ev3', profileId: 'p2', category: 'invoice_sent', filename: 'invoice-1043-studio-nine.pdf', uploadedAt: '2024-03-20', status: 'categorised', extractedLines: 1 },
+  { id: 'ev4', profileId: 'p2', category: 'receipt', filename: 'apple-store-receipt-nov23.pdf', uploadedAt: '2023-11-16', status: 'needs_review', linkedInboxItemId: '1' },
+  { id: 'ev5', profileId: 'p2', category: 'receipt', filename: 'meeting-room-jan24.jpg', uploadedAt: '2024-01-11', status: 'needs_review', linkedInboxItemId: '3' },
+];
+
 const initialTransactions: TransactionItem[] = [
   { id: 't1', date: '2024-03-01', description: 'Adobe Creative Cloud', amount: -49.99, category: 'Software', source: 'bank' },
-  { id: 't2', date: '2024-03-05', description: 'Client Invoice #1042', amount: 3400, category: 'Sales', source: 'bank' },
-  { id: 't3', date: '2024-03-10', description: 'WeWork Desk hire', amount: -250, category: 'Office', source: 'bank' },
+  { id: 't2', date: '2024-03-05', description: 'Client Invoice #1042 — Axiom Agency', amount: 2400, category: 'Sales', source: 'bank' },
+  { id: 't3', date: '2024-03-10', description: 'WeWork Desk hire', amount: -200, category: 'Office', source: 'bank' },
+  { id: 't4', date: '2024-02-15', description: 'Train tickets — client meetings', amount: -68.50, category: 'Travel', source: 'receipt' },
+  { id: 't5', date: '2024-02-01', description: 'Adobe Creative Cloud', amount: -49.99, category: 'Software', source: 'bank' },
 ];
 
 const initialChatHistory: ChatSession[] = [
@@ -402,7 +497,7 @@ const initialChatHistory: ChatSession[] = [
       { id: 'm1', role: 'user', content: 'How much tax do I owe so far this year?', timestamp: '10:00' },
       {
         id: 'm2', role: 'system',
-        content: "Based on your £24,500 trading profit and £12,000 property income, you sit within the Basic Rate band. Your estimated combined income tax and NI liability for 23/24 is currently around £5,800.\n\nPlease note: this is a conservative estimate based only on the transactions we have logged. We still have 1 pending item in your Inbox that could adjust this slightly.",
+        content: "Based on your £35,000 confirmed trading profit and £10,200 property income, your estimated total liability for 23/24 is approximately £8,724 (income tax £6,526 + NI £2,198). After deducting prior payments on account of £1,800, the balance due on 31 January 2025 is approximately £6,924.\n\nNote: two Inbox items (Apple Store £1,249 and meeting room £150) could reduce this by up to £280 if classified as allowable expenses.",
         timestamp: '10:01',
       },
     ],
@@ -412,8 +507,7 @@ const initialChatHistory: ChatSession[] = [
 // ─── Peer category & benchmarks ───────────────────────────────────────────────
 
 const initialPeerCategory: PeerCategory = {
-  id: 'pc1',
-  profileId: 'p2',
+  id: 'pc1', profileId: 'p2',
   sector: 'Creative & Design Services',
   geography: 'UK — London & South East',
   sizeBand: 'Solo / 1–2 employees',
@@ -426,18 +520,15 @@ const initialBenchmarks: BenchmarkMetric[] = [
   {
     id: 'b1', categoryId: 'pc1',
     label: 'Revenue per Employee',
-    peerMedian: '£65,000', peerRange: '£42k–£95k', userCurrent: '~£36,500',
+    peerMedian: '£65,000', peerRange: '£42k–£95k', userCurrent: '~£39,800',
     userStatus: 'below',
     source: 'ONS UK Business Survey 2022 (Creative sector, <10 employees) — illustrative sample',
     sourceFull: 'Office for National Statistics, Annual Business Survey 2022, Creative Industries sub-sector, micro-businesses',
-    dataPeriod: '2022',
-    geography: 'UK (England)',
+    dataPeriod: '2022', geography: 'UK (England)',
     peerDefinition: 'Solo / micro creative businesses, <2 employees, project-fee model, UK-registered',
     sampleSize: 'n ≈ 2,400 (ONS survey — actual figures are illustrative for prototype)',
-    confidence: 'low',
-    freshness: '2022 data — 2–3 years old. Live benchmark refresh is a planned feature.',
-    isIllustrative: true,
-    relevanceToIdea: 'bi1',
+    confidence: 'low', freshness: '2022 data — 2–3 years old. Live benchmark refresh is a planned feature.',
+    isIllustrative: true, relevanceToIdea: 'bi1',
   },
   {
     id: 'b2', categoryId: 'pc1',
@@ -446,30 +537,24 @@ const initialBenchmarks: BenchmarkMetric[] = [
     userStatus: 'above',
     source: 'Companies House micro-entity benchmarks 2022–23 — illustrative sample',
     sourceFull: 'Companies House / HMRC small company accounts analysis, creative sector micro-entities, 2022–23',
-    dataPeriod: '2022–23',
-    geography: 'UK',
+    dataPeriod: '2022–23', geography: 'UK',
     peerDefinition: 'Micro limited companies and sole traders, creative/design services, £20k–£100k revenue',
     sampleSize: 'Not disclosed (illustrative for prototype)',
-    confidence: 'low',
-    freshness: '2022–23 data. Live benchmark refresh is a planned feature.',
-    isIllustrative: true,
-    relevanceToIdea: undefined,
+    confidence: 'low', freshness: '2022–23 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true, relevanceToIdea: undefined,
   },
   {
     id: 'b3', categoryId: 'pc1',
     label: 'Operating Margin',
-    peerMedian: '28%', peerRange: '15–45%', userCurrent: '~67%',
+    peerMedian: '28%', peerRange: '15–45%', userCurrent: '~88%',
     userStatus: 'above',
     source: 'ICAEW SME benchmarking data 2023 — illustrative sample',
     sourceFull: 'Institute of Chartered Accountants in England and Wales, SME Business Conditions Survey 2023, creative services segment',
-    dataPeriod: '2023',
-    geography: 'UK',
+    dataPeriod: '2023', geography: 'UK',
     peerDefinition: 'Sole trader and micro limited company design/creative consultants, B2B clients',
     sampleSize: 'Not disclosed (illustrative for prototype)',
-    confidence: 'low',
-    freshness: '2023 data. Live benchmark refresh is a planned feature.',
-    isIllustrative: true,
-    relevanceToIdea: undefined,
+    confidence: 'low', freshness: '2023 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true, relevanceToIdea: undefined,
   },
   {
     id: 'b4', categoryId: 'pc1',
@@ -478,14 +563,11 @@ const initialBenchmarks: BenchmarkMetric[] = [
     userStatus: 'below',
     source: 'Xero Small Business Insights UK 2023 — illustrative sample',
     sourceFull: 'Xero Small Business Insights, UK, Q3 2023 — Services sector, <10 employees',
-    dataPeriod: '2023',
-    geography: 'UK',
+    dataPeriod: '2023', geography: 'UK',
     peerDefinition: 'UK small service businesses, B2B invoicing model, <10 employees',
     sampleSize: 'Not disclosed (illustrative for prototype)',
-    confidence: 'medium',
-    freshness: '2023 data. Live benchmark refresh is a planned feature.',
-    isIllustrative: true,
-    relevanceToIdea: 'bi2',
+    confidence: 'medium', freshness: '2023 data. Live benchmark refresh is a planned feature.',
+    isIllustrative: true, relevanceToIdea: 'bi2',
   },
 ];
 
@@ -493,14 +575,12 @@ const initialBenchmarks: BenchmarkMetric[] = [
 
 const initialBusinessIdeas: BusinessIdea[] = [
   {
-    id: 'bi1',
-    profileId: 'p2',
-    category: 'hiring',
+    id: 'bi1', profileId: 'p2', category: 'hiring',
     title: 'Hire a junior designer or VA',
-    summary: 'Your revenue per employee sits well below the peer median. A part-time hire could extend capacity and grow revenue — but only if the pipeline supports it.',
+    summary: 'Your revenue per employee (~£39,800) sits below the peer median (£65,000). A part-time hire could extend capacity and grow revenue — but only if the pipeline supports it.',
     triggerBenchmark: 'Revenue per Employee',
-    benchmarkGap: '44% below peer median of £65,000',
-    currentPosition: 'You are billing ~£36,500 this year as a solo. Peer median for Creative & Design, solo/micro category is £65,000 per employee (illustrative — see benchmark detail).',
+    benchmarkGap: '39% below peer median of £65,000',
+    currentPosition: 'You are billing ~£39,800 this year as a solo. Peer median for Creative & Design, solo/micro category is £65,000 per employee (illustrative — see benchmark detail).',
     proposedAction: 'Hire one part-time junior designer or VA (~0.5 FTE)',
     editableAssumptions: [
       { key: 'salary', label: 'Annual salary', value: 18000, unit: '£', min: 12000, max: 30000, step: 500 },
@@ -509,23 +589,19 @@ const initialBusinessIdeas: BusinessIdea[] = [
     ],
     whatMustBeTrue: [
       'You have a consistent pipeline of more work than you can handle alone',
-      'Cash reserves can cover at least 6 months of salary before incremental revenue arrives',
+      'Available cash (£6,090) can cover at least 6 months of salary before incremental revenue arrives',
       'You have capacity to manage and train a junior hire',
     ],
-    source: 'Financial Memory (YTD revenue) + ONS UK Business Survey 2022 (illustrative benchmark)',
-    confidence: 'medium',
-    impactLabel: 'Revenue growth + tax deduction',
-    status: 'new',
+    source: 'Financial Memory (YTD revenue £39,800) + ONS UK Business Survey 2022 (illustrative benchmark)',
+    confidence: 'medium', impactLabel: 'Revenue growth + tax deduction', status: 'new',
   },
   {
-    id: 'bi2',
-    profileId: 'p2',
-    category: 'cash',
+    id: 'bi2', profileId: 'p2', category: 'cash',
     title: 'Reduce debtor days',
-    summary: 'Your customers are taking ~34 days to pay — 6 days above the peer median. Tighter payment terms could free up working capital immediately.',
+    summary: 'Your customers are taking ~34 days to pay — 6 days above the peer median. Tighter payment terms could free up the £3,400 AR balance faster.',
     triggerBenchmark: 'Debtor Days',
     benchmarkGap: '6 days above peer median of 28 days',
-    currentPosition: '£3,400 outstanding across 2 invoices. Current debtor days ~34. Peer median for your category is 28 days (illustrative).',
+    currentPosition: '£3,400 outstanding across 2 invoices (one already overdue). Current debtor days ~34. Peer median for your category is 28 days (illustrative).',
     proposedAction: 'Switch to 14-day payment terms on new contracts; automated reminders at day 10',
     editableAssumptions: [
       { key: 'targetDebtorDays', label: 'Target debtor days', value: 14, unit: 'days', min: 7, max: 30, step: 1 },
@@ -536,76 +612,62 @@ const initialBusinessIdeas: BusinessIdea[] = [
       'Invoice template updated with new payment terms',
       'Automated reminder sequence set up',
     ],
-    source: 'Financial Memory (AR balance, invoice dates) + Xero Small Business Insights UK 2023 (illustrative benchmark)',
-    confidence: 'high',
-    impactLabel: 'Working capital release',
-    status: 'new',
+    source: 'Financial Memory (AR £3,400, invoice dates) + Xero Small Business Insights UK 2023 (illustrative benchmark)',
+    confidence: 'high', impactLabel: 'Working capital release', status: 'new',
   },
   {
-    id: 'bi3',
-    profileId: 'p2',
-    category: 'assets',
+    id: 'bi3', profileId: 'p2', category: 'assets',
     title: 'Buy a professional display before year end',
-    summary: 'Annual Investment Allowance lets you deduct the full purchase price from this year\'s profit — reducing your January tax bill.',
-    currentPosition: 'You use a standard laptop. A professional display (£800–£1,500) qualifies for AIA — the full cost is deductible in the year of purchase under current HMRC rules.',
-    proposedAction: 'Purchase a professional display before 5 April 2024 to claim in the 23/24 return',
+    summary: 'Annual Investment Allowance lets you deduct the full purchase price from this year\'s confirmed profit (£35,000) — reducing your January tax bill.',
+    currentPosition: 'A professional display (£800–£1,500) qualifies for AIA — the full cost deductible in year of purchase. Would reduce taxable profit and cut the £6,900 balance due.',
+    proposedAction: 'Purchase a professional display before 5 April 2024 to claim in 23/24 return',
     editableAssumptions: [
       { key: 'purchasePrice', label: 'Purchase price', value: 1100, unit: '£', min: 500, max: 2500, step: 50 },
     ],
     whatMustBeTrue: [
       'You genuinely need the asset for business use (HMRC "wholly and exclusively" test)',
-      'Profits are sufficient to benefit from the deduction',
-      'Purchase must be made before 5 April 2024',
+      'Profit of £35,000 is sufficient to benefit from the deduction',
+      'Purchase made before 5 April 2024',
     ],
     source: 'HMRC Capital Allowances — Annual Investment Allowance 2023/24 (gov.uk)',
-    confidence: 'high',
-    impactLabel: 'Tax saving via AIA deduction',
-    deadlines: ['Purchase before 5 April 2024'],
-    status: 'new',
+    confidence: 'high', impactLabel: 'Tax saving via AIA deduction',
+    deadlines: ['Purchase before 5 April 2024'], status: 'new',
   },
   {
-    id: 'bi4',
-    profileId: 'p2',
-    category: 'tax',
+    id: 'bi4', profileId: 'p2', category: 'tax',
     title: 'Claim Working From Home allowance',
-    summary: 'Working from home regularly qualifies you for HMRC\'s flat-rate WFH allowance — a simple annual claim that reduces your taxable profit.',
-    currentPosition: 'You work from home approximately 4 days per week. HMRC\'s flat rate applies when you work from home 25+ hours/month and covers a proportion of household costs.',
+    summary: 'Working from home regularly qualifies for HMRC\'s flat-rate WFH allowance — a simple annual claim that reduces taxable profit.',
+    currentPosition: 'You work from home approximately 4 days per week. The HMRC flat rate applies at 25+ hours/month and covers a proportion of household costs.',
     proposedAction: 'Claim HMRC flat-rate WFH allowance in your Self-Assessment return',
     editableAssumptions: [
       { key: 'daysPerWeek', label: 'Days working from home per week', value: 4, unit: 'days', min: 1, max: 5, step: 1 },
     ],
     whatMustBeTrue: [
-      'You genuinely work from home those days (keep a log if HMRC requests evidence)',
-      'No separate rented office — the allowance reduces if you also rent workspace',
-      'Must be claimed in your Self-Assessment return by the filing deadline',
+      'You genuinely work from home those days (keep a log)',
+      'No separate rented office claimed separately',
+      'Claimed in Self-Assessment by 31 Jan 2025',
     ],
     source: 'HMRC EIM32760 — Working from Home expenses, flat-rate allowances 2023/24 (gov.uk)',
-    confidence: 'high',
-    impactLabel: 'Tax saving via WFH allowance',
-    deadlines: ['Claim in Self-Assessment by 31 Jan 2025'],
-    status: 'new',
+    confidence: 'high', impactLabel: 'Tax saving via WFH allowance',
+    deadlines: ['Claim in Self-Assessment by 31 Jan 2025'], status: 'new',
   },
   {
-    id: 'bi5',
-    profileId: 'p2',
-    category: 'tax',
+    id: 'bi5', profileId: 'p2', category: 'tax',
     title: 'Accelerate planned equipment purchase',
-    summary: 'If you\'re planning equipment purchases anyway, buying before 5 April brings the tax deduction forward — reducing this year\'s bill rather than next year\'s.',
-    currentPosition: 'You have room in your basic rate band. Any equipment purchased before year-end is fully deductible via Annual Investment Allowance (up to £1m/yr).',
+    summary: 'If you\'re planning equipment purchases anyway, buying before 5 April brings the AIA deduction forward — reducing the £6,900 balance due this January.',
+    currentPosition: 'Trading profit stands at £35,000 (confirmed). Any equipment bought before year-end is fully deductible via AIA (up to £1m/yr).',
     proposedAction: 'Bring forward planned equipment purchases to before 5 April 2024',
     editableAssumptions: [
       { key: 'equipmentBudget', label: 'Equipment budget', value: 1100, unit: '£', min: 500, max: 5000, step: 100 },
     ],
     whatMustBeTrue: [
       'You genuinely intend to make these purchases — not solely for tax purposes',
-      'Your profits this year are sufficient to benefit from the deduction',
-      'Purchase must be made before 5 April 2024',
+      'Available cash (£6,090) can absorb the outlay before tax saving arrives',
+      'Purchase made before 5 April 2024',
     ],
     source: 'HMRC Capital Allowances — AIA 2023/24 (gov.uk)',
-    confidence: 'medium',
-    impactLabel: 'Tax saving — timing benefit',
-    deadlines: ['Purchase before 5 April 2024'],
-    status: 'new',
+    confidence: 'medium', impactLabel: 'Tax saving — timing benefit',
+    deadlines: ['Purchase before 5 April 2024'], status: 'new',
   },
 ];
 
@@ -618,13 +680,12 @@ const initialComplianceItems: ComplianceItem[] = [
     description: 'Registered as a self-employed sole trader with HMRC.',
     dueDate: '2022-10-05', preparationLeadDays: 0, status: 'done',
     responsibleParty: 'client', category: 'filing', periodCovered: 'One-off',
-    documentsRequired: ['UTR number'],
-    actionsRequired: [],
+    documentsRequired: ['UTR number'], actionsRequired: [],
   },
   {
     id: 'c2', profileId: 'p2',
     title: 'Self-Assessment Tax Return 2023/24',
-    description: 'Annual self-assessment return covering trading income, property income, and NI contributions.',
+    description: 'Annual return covering trading income, property income, and NI contributions.',
     dueDate: '2025-01-31', preparationLeadDays: 60, status: 'due-soon',
     responsibleParty: 'client', category: 'filing', periodCovered: '6 Apr 2023 – 5 Apr 2024',
     documentsRequired: ['P60 (if any PAYE)', 'Rental income statements', 'Business income & expense summary', 'Bank statements'],
@@ -633,11 +694,10 @@ const initialComplianceItems: ComplianceItem[] = [
   {
     id: 'c3', profileId: 'p2',
     title: 'Payment on Account 1 (2024/25)',
-    description: 'First advance payment towards your 2024/25 tax liability, equal to 50% of last year\'s bill.',
+    description: 'First advance payment towards your 2024/25 tax liability — 50% of prior year bill.',
     dueDate: '2025-01-31', preparationLeadDays: 30, status: 'due-soon',
     responsibleParty: 'client', category: 'tax', periodCovered: '2024/25 advance',
-    documentsRequired: [],
-    actionsRequired: ['Pay 50% of estimated 24/25 liability — currently estimated ~£2,900'],
+    documentsRequired: [], actionsRequired: ['Pay ~£3,462 (50% of estimated £6,924 balance)'],
   },
   {
     id: 'c4', profileId: 'p2',
@@ -645,8 +705,7 @@ const initialComplianceItems: ComplianceItem[] = [
     description: 'Second advance payment towards your 2024/25 tax liability.',
     dueDate: '2025-07-31', preparationLeadDays: 30, status: 'upcoming',
     responsibleParty: 'client', category: 'tax', periodCovered: '2024/25 advance',
-    documentsRequired: [],
-    actionsRequired: ['Pay remaining 50% of estimated 24/25 liability'],
+    documentsRequired: [], actionsRequired: ['Pay remaining ~£3,462 (50%)'],
   },
   {
     id: 'c5', profileId: 'p2',
@@ -663,8 +722,7 @@ const initialComplianceItems: ComplianceItem[] = [
     description: 'Quarterly VAT return covering May to July 2024. Platform prepares a draft for your review.',
     dueDate: '2024-08-07', preparationLeadDays: 14, status: 'upcoming',
     responsibleParty: 'platform', category: 'vat', periodCovered: 'May–Jul 2024',
-    documentsRequired: [],
-    actionsRequired: ['Platform prepares draft from linked bank data', 'User reviews and approves before submission'],
+    documentsRequired: [], actionsRequired: ['Platform prepares draft from linked bank data', 'Review and approve before submission'],
   },
 ];
 
@@ -672,81 +730,86 @@ const initialComplianceItems: ComplianceItem[] = [
 
 const initialSAChecklist: SAChecklistItem[] = [
   { id: 'sa1', profileId: 'p2', label: 'Personal details verified', detail: 'UTR, NI number, address confirmed against HMRC records.', status: 'done', category: 'data' },
-  { id: 'sa2', profileId: 'p2', label: 'Bank reconciliation complete', detail: 'All synced accounts balance — 142 transactions matched.', status: 'done', category: 'data' },
-  { id: 'sa3', profileId: 'p2', label: 'Resolve Inbox items (2 pending)', detail: 'Apple Store £1,249 and meeting room £150 need classification before tax figure is final.', status: 'pending', category: 'inbox' },
-  { id: 'sa4', profileId: 'p2', label: 'Upload missing receipts', detail: '3 transactions over £100 have no linked receipt in your records.', status: 'pending', category: 'data' },
-  { id: 'sa5', profileId: 'p2', label: 'Confirm rental income figures', detail: 'Q3 letting agent statement not yet uploaded — rental profit estimate may change.', status: 'pending', category: 'data' },
+  { id: 'sa2', profileId: 'p2', label: 'Bank reconciliation complete', detail: 'All synced accounts balance — 142 transactions matched, revenue £39,800 confirmed.', status: 'done', category: 'data' },
+  { id: 'sa3', profileId: 'p2', label: 'Resolve Inbox items (2 pending)', detail: 'Apple Store £1,249 and meeting room £150 need classification before the tax figure is final. May reduce tax by up to £280.', status: 'pending', category: 'inbox' },
+  { id: 'sa4', profileId: 'p2', label: 'Upload missing receipts', detail: '3 transactions over £100 have no linked receipt. Go to Evidence to upload.', status: 'pending', category: 'data' },
+  { id: 'sa5', profileId: 'p2', label: 'Confirm rental income figures', detail: 'Q3 letting agent statement not yet uploaded — property profit estimate (£10,200) may change.', status: 'pending', category: 'data' },
   { id: 'sa6', profileId: 'p2', label: 'Complete SA100 & SA103 forms', detail: 'Self-assessment form and self-employment supplementary pages.', status: 'pending', category: 'filing' },
   { id: 'sa7', profileId: 'p2', label: 'Submit return by 31 Jan 2025', detail: 'Online filing deadline for 2023/24 tax year.', status: 'pending', category: 'filing' },
-  { id: 'sa8', profileId: 'p2', label: 'Pay balance + first payment on account', detail: '~£5,800 balance due + ~£2,900 first PoA — both due 31 Jan 2025.', status: 'pending', category: 'payment' },
+  { id: 'sa8', profileId: 'p2', label: 'Pay balance + first payment on account', detail: '~£6,924 balance due + ~£3,462 first PoA — both due 31 Jan 2025. Tax reserve (£3,500) set aside.', status: 'pending', category: 'payment' },
 ];
 
-// ─── Financial drilldown data ─────────────────────────────────────────────────
+// ─── Financial drilldowns ─────────────────────────────────────────────────────
 
 const initialPLBreakdown: PLBreakdown = {
   revenues: [
-    { label: 'Design project fees', amount: 31200, basis: 'Client invoices #1001–#1042, 18 projects' },
-    { label: 'Retainer — Axiom Agency', amount: 7200, basis: 'Monthly £600 retainer, 12 months' },
-    { label: 'Stock illustration licensing', amount: 1400, basis: '2 licensing agreements' },
+    { label: 'Design project fees', amount: 31200, basis: 'Client invoices #1001–#1042, 18 projects', evidenceRef: 'Bank feed + PDF invoices' },
+    { label: 'Retainer — Axiom Agency', amount: 7200, basis: 'Monthly £600 retainer × 12 months', evidenceRef: 'Axiom retainer agreement' },
+    { label: 'Stock illustration licensing', amount: 1400, basis: '2 licensing agreements', evidenceRef: 'Licensing contracts on file' },
   ],
-  expenses: [
-    { label: 'Adobe Creative Cloud', amount: 600, category: 'Software & subscriptions', basis: 'Monthly £49.99 × 12' },
-    { label: 'WeWork hot-desk membership', amount: 2400, category: 'Office & workspace', basis: 'Monthly £200 × 12' },
-    { label: 'Professional indemnity insurance', amount: 780, category: 'Insurance', basis: 'Annual premium' },
-    { label: 'Accountancy & bookkeeping (prior year)', amount: 600, category: 'Professional fees', basis: 'Invoice from previous accountant' },
-    { label: 'Travel (client meetings)', amount: 420, category: 'Travel', basis: '15 journeys — rail and TfL receipts' },
-    { label: 'Apple Store purchase (pending classification)', amount: 1249, category: 'Pending — Inbox', basis: 'See Inbox item for resolution' },
-    { label: 'Client meeting room hire', amount: 150, category: 'Pending — Inbox', basis: 'See Inbox item for resolution' },
+  confirmedExpenses: [
+    { label: 'Adobe Creative Cloud', amount: 600, category: 'Software & subscriptions', basis: 'Monthly £50 × 12', evidenceRef: 'Adobe invoices (bank feed)' },
+    { label: 'WeWork hot-desk membership', amount: 2400, category: 'Office & workspace', basis: 'Monthly £200 × 12', evidenceRef: 'WeWork statements' },
+    { label: 'Professional indemnity insurance', amount: 780, category: 'Insurance', basis: 'Annual premium', evidenceRef: 'Insurance certificate' },
+    { label: 'Accountancy & bookkeeping (prior year)', amount: 600, category: 'Professional fees', basis: 'Invoice from previous accountant', evidenceRef: 'Accountant invoice' },
+    { label: 'Travel (client meetings)', amount: 420, category: 'Travel', basis: '15 journeys — rail and TfL receipts', evidenceRef: 'Rail + TfL receipts (15 items)' },
+  ],
+  pendingExpenses: [
+    { label: 'Apple Store purchase', amount: 1249, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: hardware vs software affects deductibility', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox' },
+    { label: 'Client meeting room hire', amount: 150, category: 'Pending — awaiting Inbox resolution', basis: 'See Inbox: room hire vs entertainment affects allowability', isPending: true, evidenceRef: 'Receipt uploaded — in Inbox' },
   ],
 };
 
 const initialTaxCalculation: TaxCalculation = {
   lines: [
-    { label: 'Trading profit (Design Consulting)', amount: '£36,800', note: 'Revenue £39,800 less allowable expenses £3,000 (pending 2 Inbox items)' },
-    { label: 'Property rental profit', amount: '£10,200', note: 'Gross rental £12,000 less letting agent fees £1,800' },
-    { label: 'Personal allowance', amount: '-£12,570', note: 'Standard 2023/24 personal allowance' },
-    { label: 'Taxable income', amount: '£34,430', note: '£36,800 + £10,200 – £12,570' },
-    { label: 'Income tax (Basic Rate 20%)', amount: '£4,886', note: '£34,430 × 20%' },
-    { label: 'Class 4 NI (9% on profits £12,570–£50,270)', amount: '£2,191', note: '£24,230 × 9%' },
+    { label: 'Trading profit (Design Consulting)', amount: '£35,000', note: 'Revenue £39,800 − confirmed expenses £4,800. Excludes 2 pending Inbox items (£1,399).' },
+    { label: 'Property rental profit', amount: '£10,200', note: 'Gross rental £12,000 − letting agent fees £1,800. Estimate pending Q3 statement upload.' },
+    { label: 'Personal allowance', amount: '−£12,570', note: 'Standard 2023/24 personal allowance' },
+    { label: 'Taxable income', amount: '£32,630', note: '£35,000 + £10,200 − £12,570' },
+    { label: 'Income tax (Basic Rate 20%)', amount: '£6,526', note: '£32,630 × 20%' },
+    { label: 'Class 4 NI (9% on trading profit £12,570–£50,270)', amount: '£2,019', note: '(£35,000 − £12,570) × 9% = £22,430 × 9%' },
     { label: 'Class 2 NI', amount: '£179', note: 'Flat rate 2023/24' },
-    { label: 'Total estimated liability', amount: '£7,256' },
-    { label: 'Less: Payments on account already made', amount: '-£1,456', note: 'Prior year payments on account' },
-    { label: 'Balance due 31 Jan 2025', amount: '~£5,800' },
+    { label: 'Total estimated liability', amount: '£8,724', note: '' },
+    { label: 'Less: Prior payments on account', amount: '−£1,800', note: 'Paid Jan and Jul 2024 (50%+50% of prior year bill)' },
+    { label: 'Balance due 31 Jan 2025', amount: '~£6,924' },
   ],
   unresolvedItems: [
-    'Apple Store £1,249 (Inbox) — if Hardware: capital adjustment; if Software: fully deductible — could change tax by up to £250',
-    'Meeting room £150 (Inbox) — if disallowable: adds ~£30 to tax bill',
+    'Apple Store £1,249 (Inbox) — if Hardware with AIA: could reduce tax by ~£250; if Software: already assumed deductible',
+    'Meeting room £150 (Inbox) — if Disallowable entertainment: adds ~£30 to tax bill',
+    'Q3 rental statement missing — property profit £10,200 is an estimate',
   ],
   assumptions: [
-    'Trading profit figure excludes the 2 pending Inbox items',
+    'Trading profit based on confirmed transactions only — 2 pending Inbox items excluded',
     'No further equipment purchases before 5 April 2024',
+    'Personal allowance unchanged (no high-income restriction)',
     'Student Loan repayment not shown (handled via HMRC separately)',
   ],
   taxBasis: 'UK Income Tax and National Insurance 2023/24 — Basic Rate band',
 };
 
 const initialAREntries: AREntry[] = [
-  { customer: 'Axiom Agency', invoiceRef: '#1042', amount: 2400, dueDate: '2024-03-25', isOverdue: true, daysOverdue: 7 },
-  { customer: 'Studio Nine Ltd', invoiceRef: '#1043', amount: 1000, dueDate: '2024-04-05', isOverdue: false },
+  { customer: 'Axiom Agency', invoiceRef: '#1042', amount: 2400, dueDate: '2024-03-25', isOverdue: true, daysOverdue: 7, evidenceRef: 'Invoice PDF on file' },
+  { customer: 'Studio Nine Ltd', invoiceRef: '#1043', amount: 1000, dueDate: '2024-04-05', isOverdue: false, evidenceRef: 'Invoice PDF on file' },
 ];
 
 const initialAPEntries: APEntry[] = [
-  { supplier: 'Adobe Inc', description: 'Creative Cloud monthly', amount: 49.99, dueDate: '2024-04-01', isOverdue: false },
-  { supplier: 'WeWork', description: 'Hot-desk April', amount: 200, dueDate: '2024-04-07', isOverdue: false },
+  { supplier: 'Adobe Inc', description: 'Creative Cloud monthly', amount: 49.99, dueDate: '2024-04-01', isOverdue: false, evidenceRef: 'Adobe subscription' },
+  { supplier: 'WeWork', description: 'Hot-desk April', amount: 200, dueDate: '2024-04-07', isOverdue: false, evidenceRef: 'WeWork statement' },
 ];
 
 const initialCashBreakdown: CashBreakdown = {
   accounts: [
-    { name: 'Starling Business', balance: 7840, type: 'business' },
-    { name: 'Personal Current (Monzo)', balance: 2100, type: 'personal' },
+    { name: 'Starling Business', balance: 9840, type: 'business' },
   ],
-  taxReserve: 2900,
+  taxReserve: 3500,         // ringfenced toward £6,924 balance due
+  apDueWithin30Days: 250,   // Adobe £50 + WeWork £200 (rounded)
   nearTermInflows: [
-    { label: 'Axiom Agency Invoice #1042', amount: 2400, expectedDate: '2024-03-30' },
+    { label: 'Axiom Agency Invoice #1042 (overdue — chasing)', amount: 2400, expectedDate: '2024-03-30' },
+    { label: 'Studio Nine Invoice #1043', amount: 1000, expectedDate: '2024-04-05' },
   ],
   nearTermOutflows: [
     { label: 'Adobe Creative Cloud', amount: 49.99, expectedDate: '2024-04-01' },
-    { label: 'WeWork April', amount: 200, expectedDate: '2024-04-07' },
+    { label: 'WeWork April desk', amount: 200, expectedDate: '2024-04-07' },
     { label: 'Tax reserve top-up', amount: 500, expectedDate: '2024-04-15' },
   ],
 };
@@ -763,6 +826,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   });
   const [positionItems] = useState(initialPositionItems);
   const [inboxItems, setInboxItems] = useState(initialInboxItems);
+  const [evidenceItems, setEvidenceItems] = useState(initialEvidenceItems);
   const [transactions, setTransactions] = useState(initialTransactions);
   const [chatHistory, setChatHistory] = useState(initialChatHistory);
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
@@ -787,16 +851,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     transactions,
     addTransaction: (transaction) =>
       setTransactions(prev => [{ ...transaction, id: Math.random().toString(36).slice(2) }, ...prev]),
+    evidenceItems,
+    addEvidenceItem: (item) => {
+      const id = Math.random().toString(36).slice(2);
+      setEvidenceItems(prev => [{ ...item, id }, ...prev]);
+      return id;
+    },
     inboxItems,
     resolveInboxItem: (id, res) =>
       setInboxItems(prev => prev.map(i => i.id === id ? { ...i, status: 'resolved', customAnswer: res } : i)),
     chatHistory,
     addChatMessage: (sessionId, msg) =>
       setChatHistory(prev =>
-        prev.map(s =>
-          s.id === sessionId
-            ? { ...s, messages: [...s.messages, { ...msg, id: Math.random().toString(36).slice(2) }] }
-            : s
+        prev.map(s => s.id === sessionId
+          ? { ...s, messages: [...s.messages, { ...msg, id: Math.random().toString(36).slice(2) }] }
+          : s
         )
       ),
     createChatSession: (title, initialMsg) => {
@@ -805,13 +874,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setChatHistory(prev => [{ id, title, date: new Date().toISOString().split('T')[0], messages }, ...prev]);
       return id;
     },
-
-    // Peer benchmarking
     peerCategory,
     updatePeerCategory: (data) => setPeerCategory(prev => ({ ...prev, ...data })),
     benchmarks: initialBenchmarks,
-
-    // Business Ideas
     businessIdeas,
     updateBusinessIdea: (id, updates) =>
       setBusinessIdeas(prev => prev.map(b => b.id === id ? { ...b, ...updates } : b)),
@@ -821,13 +886,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ? { ...b, editableAssumptions: b.editableAssumptions.map(a => a.key === key ? { ...a, value } : a) }
           : b
       )),
-
-    // Decision Memory
     decisionMemory,
     commitDecision: (entry) => {
       const id = Math.random().toString(36).slice(2);
       setDecisionMemory(prev => [{ ...entry, id }, ...prev]);
-      // Mark the idea as saved
       setBusinessIdeas(prev => prev.map(b =>
         b.id === entry.ideaId ? { ...b, status: 'saved', committedDecisionId: id } : b
       ));
@@ -835,26 +897,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     updateDecisionMemoryStatus: (id, status) =>
       setDecisionMemory(prev => prev.map(d => d.id === id ? { ...d, status } : d)),
-
-    // Compliance
     complianceItems: initialComplianceItems,
-
-    // SA Checklist
     saChecklist,
     updateSAChecklistItem: (id, status) =>
       setSAChecklist(prev => prev.map(i => i.id === id ? { ...i, status } : i)),
-
     yearEndPackGenerated,
     setYearEndPackGenerated,
-
-    // Drilldowns (static for prototype)
     plBreakdown: initialPLBreakdown,
     taxCalculation: initialTaxCalculation,
     arEntries: initialAREntries,
     apEntries: initialAPEntries,
     cashBreakdown: initialCashBreakdown,
-
-    // Copilot cross-component trigger
     copilotTrigger,
     setCopilotTrigger,
   };

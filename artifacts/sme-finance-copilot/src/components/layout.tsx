@@ -1,14 +1,15 @@
 import { Link, useLocation } from 'wouter';
-import { 
-  LayoutDashboard, 
-  WalletCards, 
-  MessageSquare, 
-  Lightbulb, 
+import {
+  LayoutDashboard,
+  WalletCards,
+  MessageSquare,
+  Lightbulb,
   Settings,
   Menu,
   X,
   Bot,
   CheckSquare,
+  UploadCloud,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -21,18 +22,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { inboxItems, activeProfileId, businessIdeas } = useStore();
   const pendingInbox = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
   const newIdeas = businessIdeas.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
-  const tasksCount = pendingInbox; // surface inbox count on Tasks
 
   const navItems = [
+    {
+      href: '/ingest',
+      label: 'Evidence',
+      icon: UploadCloud,
+      sublabel: 'start here',
+    },
     { href: '/dashboard', label: 'Home', icon: LayoutDashboard },
     { href: '/position', label: 'Finances', icon: WalletCards },
     { href: '/business-ideas', label: 'Business Ideas', icon: Lightbulb, count: newIdeas },
-    { href: '/tasks', label: 'Tasks & Timeline', icon: CheckSquare, count: tasksCount },
+    { href: '/tasks', label: 'Tasks & Timeline', icon: CheckSquare, count: pendingInbox },
     { href: '/copilot', label: 'Copilot', icon: MessageSquare },
   ];
 
-  // Determine which nav item is active (handle aliased routes)
   const getIsActive = (href: string) => {
+    if (href === '/ingest') return ['/ingest', '/evidence'].includes(location);
     if (href === '/business-ideas') return ['/business-ideas', '/decisions', '/tax', '/optimisation'].includes(location);
     if (href === '/tasks') return ['/tasks', '/compliance', '/inbox', '/year-end', '/exceptions'].includes(location);
     if (href === '/position') return ['/position', '/memory'].includes(location);
@@ -66,42 +72,57 @@ export function Layout({ children }: { children: React.ReactNode }) {
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = getIsActive(item.href);
+            const isEvidence = item.href === '/ingest';
             return (
-              <Link 
-                key={item.href} 
-                href={item.href}
-                className={cn(
-                  "flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer",
-                  active 
-                    ? "bg-primary text-primary-foreground shadow-sm" 
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              <div key={item.href}>
+                {isEvidence && (
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-3 pt-3 pb-1">
+                    Input
+                  </p>
                 )}
-                onClick={() => setSidebarOpen(false)}
-              >
-                <div className="flex items-center gap-3">
-                  <Icon className="w-4 h-4" />
-                  {item.label}
-                </div>
-                {item.count !== undefined && item.count > 0 && (
-                  <span className={cn(
-                    "px-2 py-0.5 rounded-full text-xs font-semibold",
-                    active ? "bg-primary-foreground/20 text-primary-foreground" : "bg-accent text-accent-foreground"
-                  )}>
-                    {item.count}
-                  </span>
+                {item.href === '/dashboard' && (
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-3 pt-3 pb-1">
+                    Output
+                  </p>
                 )}
-              </Link>
+                <Link
+                  href={item.href}
+                  className={cn(
+                    "flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer",
+                    active
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  )}
+                  onClick={() => setSidebarOpen(false)}
+                >
+                  <div className="flex items-center gap-3">
+                    <Icon className="w-4 h-4" />
+                    <span>{item.label}</span>
+                    {'sublabel' in item && item.sublabel && !active && (
+                      <span className="text-[10px] font-normal opacity-60">{item.sublabel}</span>
+                    )}
+                  </div>
+                  {item.count !== undefined && item.count > 0 && (
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-xs font-semibold",
+                      active ? "bg-primary-foreground/20 text-primary-foreground" : "bg-accent text-accent-foreground"
+                    )}>
+                      {item.count}
+                    </span>
+                  )}
+                </Link>
+              </div>
             );
           })}
         </nav>
 
         <div className="p-4 border-t border-border">
-          <Link 
+          <Link
             href="/settings"
             className={cn(
               "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer",
               location === '/settings'
-                ? "bg-primary text-primary-foreground shadow-sm" 
+                ? "bg-primary text-primary-foreground shadow-sm"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground"
             )}
             onClick={() => setSidebarOpen(false)}
@@ -114,7 +135,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
       {/* Overlay for mobile sidebar */}
       {sidebarOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/20 z-40 md:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -128,7 +149,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </div>
           {children}
         </div>
-        
+
         {/* Floating Copilot Launcher */}
         <FloatingCopilot />
       </main>
@@ -144,7 +165,7 @@ function FloatingCopilot() {
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  
+
   const { copilotTrigger, setCopilotTrigger } = useStore();
 
   useEffect(() => {
@@ -169,9 +190,9 @@ function FloatingCopilot() {
     setIsTyping(true);
 
     setTimeout(() => {
-      setMessages(prev => [...prev, { 
-        role: 'system', 
-        content: "This is a demo response. When connected to a live AI, I would read your Financial Memory, relevant tax rules, benchmark data, and Decision Memory — then give you a sourced, conservative answer with calculation basis and any caveats flagged."
+      setMessages(prev => [...prev, {
+        role: 'system',
+        content: "This is a demo response. When connected to a live AI, I would read your Financial Memory — confirmed P&L (£35,000 profit), tax position (£6,900 balance due), evidence log, and Decision Memory — then give you a sourced, conservative answer with calculation basis shown.",
       }]);
       setIsTyping(false);
     }, 1000);
@@ -190,7 +211,7 @@ function FloatingCopilot() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            
+
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-background text-sm">
               {messages.map((msg, i) => (
                 <div key={i} className={cn("flex flex-col max-w-[85%]", msg.role === 'user' ? "ml-auto items-end" : "items-start")}>
@@ -201,8 +222,8 @@ function FloatingCopilot() {
                   )}
                   <div className={cn(
                     "p-2.5 rounded-xl leading-relaxed",
-                    msg.role === 'user' 
-                      ? "bg-primary text-primary-foreground rounded-br-sm" 
+                    msg.role === 'user'
+                      ? "bg-primary text-primary-foreground rounded-br-sm"
                       : "bg-secondary text-secondary-foreground rounded-bl-sm"
                   )}>
                     {msg.content}
@@ -220,14 +241,14 @@ function FloatingCopilot() {
               )}
               <div ref={bottomRef} />
             </div>
-            
+
             <div className="p-3 border-t border-border bg-card">
-              <form 
+              <form
                 onSubmit={e => { e.preventDefault(); handleSend(); }}
                 className="flex gap-2"
               >
-                <Input 
-                  placeholder="Ask a question..." 
+                <Input
+                  placeholder="Ask a question..."
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   className="h-9 text-sm"
@@ -237,8 +258,8 @@ function FloatingCopilot() {
             </div>
           </Card>
         )}
-        
-        <Button 
+
+        <Button
           onClick={() => setIsOpen(!isOpen)}
           size="icon"
           className="h-14 w-14 rounded-full shadow-lg cursor-pointer bg-primary hover:bg-primary/90 transition-transform hover:scale-105 active:scale-95"
