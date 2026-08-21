@@ -43,6 +43,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, msg);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -382,6 +383,19 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions`, {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+  update: (
+    profileId: string,
+    transactionId: string,
+    data: { date?: string; description?: string; amount?: number; category?: string; taxTreatment?: string },
+  ) =>
+    apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  remove: (profileId: string, transactionId: string) =>
+    apiFetch<void>(`/profiles/${profileId}/transactions/${transactionId}`, {
+      method: "DELETE",
     }),
   attachEvidence: (profileId: string, transactionId: string, evidenceId: string) =>
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {

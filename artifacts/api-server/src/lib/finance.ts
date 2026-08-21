@@ -181,6 +181,7 @@ export function computeTaxImpactDiff(profitBefore: number, profitAfter: number):
 export function computePLBreakdown(
   transactions: Array<{
     amount: number;
+    recordType?: string;
     category: string;
     taxTreatment: string;
     allowableAmount?: number | null;
@@ -193,9 +194,14 @@ export function computePLBreakdown(
   let nonDeductibleExpenses = 0;
 
   for (const tx of transactions) {
-    const isIncome = tx.category === 'income' || tx.taxTreatment === 'income';
+    // recordType is the canonical ledger classification. Category-based checks
+    // remain only for legacy rows that predate recordType.
+    const recordType = tx.recordType === 'income' || tx.recordType === 'expense'
+      ? tx.recordType
+      : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+    const isIncome = recordType === 'income';
     const isDeductible =
-      (tx.category === 'expense' || tx.category === 'expense_deductible') &&
+      recordType === 'expense' &&
       tx.taxTreatment === 'deductible' &&
       tx.amount < 0;
     const isNonDeductible =
@@ -321,6 +327,7 @@ export function computeMonthlyTrend(
   transactions: Array<{
     date: string;
     amount: number;
+    recordType?: string;
     taxTreatment: string;
     category: string;
     allowableAmount?: number | null;
@@ -333,7 +340,10 @@ export function computeMonthlyTrend(
     if (!byMonth.has(month)) byMonth.set(month, { revenue: 0, expenses: 0 });
     const m = byMonth.get(month)!;
 
-    if (tx.taxTreatment === 'income' || tx.category === 'income') {
+    const recordType = tx.recordType === 'income' || tx.recordType === 'expense'
+      ? tx.recordType
+      : tx.taxTreatment === 'income' || tx.category === 'income' ? 'income' : 'expense';
+    if (recordType === 'income') {
       m.revenue += Math.abs(tx.amount);
     } else if (tx.taxTreatment === 'deductible' && tx.amount < 0) {
       const allowable =

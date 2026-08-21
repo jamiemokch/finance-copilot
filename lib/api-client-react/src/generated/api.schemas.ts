@@ -496,6 +496,14 @@ export interface TransactionInput {
   note?: string | null;
 }
 
+export interface TransactionUpdate {
+  date?: string;
+  description?: string;
+  amount?: number;
+  category?: string;
+  taxTreatment?: string;
+}
+
 export interface InboxSubOption {
   label: string;
   isSuggested?: boolean;

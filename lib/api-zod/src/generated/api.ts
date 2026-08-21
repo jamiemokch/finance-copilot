@@ -774,6 +774,50 @@ export const GetTransactionResponse = zod.object({
 
 
 /**
+ * @summary Edit a manually added transaction
+ */
+export const UpdateTransactionParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "transactionId": zod.coerce.string()
+})
+
+export const UpdateTransactionBody = zod.object({
+  "date": zod.string().optional(),
+  "description": zod.string().optional(),
+  "amount": zod.number().optional(),
+  "category": zod.string().optional(),
+  "taxTreatment": zod.string().optional()
+})
+
+export const UpdateTransactionResponse = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "date": zod.string(),
+  "description": zod.string(),
+  "amount": zod.number(),
+  "recordType": zod.enum(['income', 'expense']),
+  "category": zod.string(),
+  "note": zod.string().nullish(),
+  "taxTreatment": zod.string(),
+  "source": zod.string(),
+  "evidenceId": zod.string().nullish(),
+  "createdAt": zod.string(),
+  "updatedAt": zod.string()
+})
+
+
+/**
+ * @summary Delete a manually added transaction
+ */
+export const DeleteTransactionParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "transactionId": zod.coerce.string()
+})
+
+export const DeleteTransactionResponse = zod.void()
+
+
+/**
  * @summary List inbox items for a profile
  */
 export const ListInboxItemsParams = zod.object({

@@ -3,6 +3,7 @@ import test from 'node:test';
 import { buildSelfAssessmentReadiness } from './self-assessment-readiness.js';
 import { maskTaxIdentifier } from './tax-identifiers.js';
 import { summarizeTaxYearLedger } from './tax-year-ledger.js';
+import { computePLBreakdown } from './finance.js';
 
 const baseInput = {
   taxYear: '2025/26',
@@ -154,4 +155,17 @@ test('a future tax year has no impossible coverage range or included records', (
   assert.equal(summary?.period.start, '2027-04-06');
   assert.equal(summary?.period.end, '2027-04-06');
   assert.equal(summary?.records.length, 0);
+});
+
+test('YTD P&L respects canonical record type for manually categorised expenses', () => {
+  const pl = computePLBreakdown([
+    { amount: 1000, recordType: 'income', category: 'Sales', taxTreatment: 'income' },
+    { amount: -125, recordType: 'expense', category: 'Travel', taxTreatment: 'deductible' },
+    { amount: -40, recordType: 'expense', category: 'Entertainment', taxTreatment: 'non_deductible' },
+  ], []);
+
+  assert.equal(pl.revenues, 1000);
+  assert.equal(pl.confirmedExpenses, 125);
+  assert.equal(pl.nonDeductibleExpenses, 40);
+  assert.equal(pl.profit, 875);
 });

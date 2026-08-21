@@ -57,6 +57,7 @@ import type {
   SelfAssessmentSa103sContextUpdate,
   Transaction,
   TransactionInput,
+  TransactionUpdate,
   UploadUrlRequest,
   UploadUrlResponse
 } from './api.schemas';
@@ -2134,6 +2135,153 @@ export function useGetTransaction<TData = Awaited<ReturnType<typeof getTransacti
 
 
 
+
+export const getUpdateTransactionUrl = (profileId: string,
+    transactionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/transactions/${transactionId}`
+}
+
+/**
+ * @summary Edit a manually added transaction
+ */
+export const updateTransaction = async (profileId: string,
+    transactionId: string,
+    transactionUpdate: TransactionUpdate, options?: Parameters<typeof customFetch>[1]): Promise<Transaction> => {
+
+  return customFetch<Transaction>(getUpdateTransactionUrl(profileId,transactionId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(transactionUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateTransactionMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTransaction>>, TError,{profileId: string;transactionId: string;data: BodyType<TransactionUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateTransaction>>, TError,{profileId: string;transactionId: string;data: BodyType<TransactionUpdate>}, TContext> => {
+
+const mutationKey = ['updateTransaction'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTransaction>>, {profileId: string;transactionId: string;data: BodyType<TransactionUpdate>}> = (props) => {
+          const {profileId,transactionId,data} = props ?? {};
+
+          return  updateTransaction(profileId,transactionId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateTransactionMutationResult = NonNullable<Awaited<ReturnType<typeof updateTransaction>>>
+    export type UpdateTransactionMutationBody = BodyType<TransactionUpdate>
+    export type UpdateTransactionMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Edit a manually added transaction
+ */
+export const useUpdateTransaction = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTransaction>>, TError,{profileId: string;transactionId: string;data: BodyType<TransactionUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateTransaction>>,
+        TError,
+        {profileId: string;transactionId: string;data: BodyType<TransactionUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateTransactionMutationOptions(options));
+    }
+
+export const getDeleteTransactionUrl = (profileId: string,
+    transactionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/transactions/${transactionId}`
+}
+
+/**
+ * @summary Delete a manually added transaction
+ */
+export const deleteTransaction = async (profileId: string,
+    transactionId: string, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
+
+  return customFetch<void>(getDeleteTransactionUrl(profileId,transactionId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDeleteTransactionMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTransaction>>, TError,{profileId: string;transactionId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteTransaction>>, TError,{profileId: string;transactionId: string}, TContext> => {
+
+const mutationKey = ['deleteTransaction'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteTransaction>>, {profileId: string;transactionId: string}> = (props) => {
+          const {profileId,transactionId} = props ?? {};
+
+          return  deleteTransaction(profileId,transactionId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteTransactionMutationResult = NonNullable<Awaited<ReturnType<typeof deleteTransaction>>>
+
+    export type DeleteTransactionMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Delete a manually added transaction
+ */
+export const useDeleteTransaction = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTransaction>>, TError,{profileId: string;transactionId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof deleteTransaction>>,
+        TError,
+        {profileId: string;transactionId: string},
+        TContext
+      > => {
+      return useMutation(getDeleteTransactionMutationOptions(options));
+    }
 
 export const getListInboxItemsUrl = (profileId: string,) => {
 

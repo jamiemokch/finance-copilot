@@ -87,7 +87,7 @@ export interface TransactionItem {
   description: string;
   amount: number;
   category: string;
-  source: 'bank' | 'manual' | 'receipt';
+  source: 'bank' | 'manual' | 'receipt' | 'extracted' | 'demo';
   evidenceTier?: number;
   evidenceId?: string | null;
 }
@@ -344,6 +344,7 @@ export interface AppState {
   setActiveProfileId: (id: string) => void;
   addProfile: (profile: Omit<Profile, 'id'>) => Promise<string>;
   profilesLoaded: boolean;
+  profileLoadError: boolean;
   updateProfile: (id: string, updates: Partial<Omit<Profile, 'id'>>) => Promise<void>;
   refreshData: () => Promise<void>;
   loadSampleData: () => Promise<void>;
@@ -634,7 +635,7 @@ function mapTransaction(t: APITransaction): TransactionItem {
     description: t.description,
     amount: t.amount,
     category: t.category,
-    source: (src === 'bank' || src === 'manual' || src === 'receipt') ? src : 'manual',
+    source: (src === 'bank' || src === 'manual' || src === 'receipt' || src === 'extracted' || src === 'demo') ? src : 'manual',
     evidenceTier: t.evidenceTier,
     evidenceId: t.evidenceId,
   };
@@ -674,6 +675,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState('');
   const [profilesLoaded, setProfilesLoaded] = useState(false);
+  const [profileLoadError, setProfileLoadError] = useState(false);
 
   // ── API data (raw, for computing derived types)
   const [rawPosition, setRawPosition] = useState<APIFinancialPosition | null>(null);
@@ -694,6 +696,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
   const resolvingInboxIds = useRef(new Set<string>());
   const dataFetchVersion = useRef(0);
+
+  const selectActiveProfile = useCallback((profileId: string) => {
+    // Invalidate pending requests before clearing. This prevents old profile
+    // responses from briefly re-populating a newly selected profile.
+    dataFetchVersion.current += 1;
+    setRawPosition(null);
+    setRawTransactions([]);
+    setInboxItems([]);
+    setEvidenceItems([]);
+    setDecisionMemory([]);
+    setBusinessIdeas([]);
+    setSAChecklist([]);
+    setActiveProfileId(profileId);
+  }, []);
 
   // ── Auth check on mount
   useEffect(() => {
@@ -747,7 +763,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (authLoading || !authUser) return;
     (async () => {
       try {
-        const profs = await profilesApi.list().catch(() => []);
+        setProfileLoadError(false);
+        const profs = await profilesApi.list();
         if (profs.length === 0) {
           // New user — no profiles yet; signal routing to redirect to /onboarding
           setProfilesLoaded(true);
@@ -772,14 +789,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const mapped = profs.map(mapProfile);
         setProfiles(mapped);
         const firstId = profs[0].id;
-        setActiveProfileId(firstId);
+        selectActiveProfile(firstId);
         setProfilesLoaded(true);
       } catch (err) {
         console.error('[store] init failed', err);
-        setProfilesLoaded(true); // Unblock routing even on error
+        // A failed profile request is not evidence of a new user. Preserve a
+        // recoverable error state rather than routing to onboarding.
+        setProfileLoadError(true);
+        setProfilesLoaded(true);
       }
     })();
-  }, [authUser, authLoading, fetchAll]);
+  }, [authUser, authLoading, fetchAll, selectActiveProfile]);
 
   // ── Re-fetch when active profile changes
   useEffect(() => {
@@ -1068,9 +1088,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
     });
     setProfiles(profs.map(mapProfile));
-    setActiveProfileId(profileId);
+    selectActiveProfile(profileId);
     await fetchAll(profileId);
-  }, [fetchAll]);
+  }, [fetchAll, selectActiveProfile]);
 
   const updateSharedContext = useCallback((data: Partial<SharedContext>) => {
     setSharedContext(prev => ({ ...prev, ...data }));
@@ -1090,9 +1110,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     profiles,
     activeProfileId,
-    setActiveProfileId,
+    setActiveProfileId: selectActiveProfile,
     addProfile,
     profilesLoaded,
+    profileLoadError,
     updateProfile,
     refreshData,
     loadSampleData,

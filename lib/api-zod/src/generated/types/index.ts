@@ -81,6 +81,7 @@ export * from './transaction';
 export * from './transactionInput';
 export * from './transactionInputRecordType';
 export * from './transactionRecordType';
+export * from './transactionUpdate';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';
 export * from './ytdProfitLoss';

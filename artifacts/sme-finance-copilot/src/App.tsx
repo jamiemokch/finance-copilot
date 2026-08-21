@@ -27,13 +27,24 @@ const queryClient = new QueryClient();
 
 function Router() {
   const [location] = useLocation();
-  const { isAuthenticated, isLoading, profiles, profilesLoaded } = useStore();
+  const { isAuthenticated, isLoading, profiles, profilesLoaded, profileLoadError } = useStore();
 
   // Block while auth resolves
   if (isLoading) return null;
 
   // Block while authenticated — profile list is still loading from API
   if (isAuthenticated && !profilesLoaded) return null;
+  if (isAuthenticated && profileLoadError) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-4 p-6">
+        <h1 className="font-serif text-2xl text-foreground">We couldn’t load your businesses</h1>
+        <p className="text-muted-foreground">Your data has not been changed. Check your connection and try again.</p>
+        <button className="w-fit rounded-lg bg-primary px-4 py-2 text-primary-foreground" onClick={() => window.location.reload()}>
+          Try again
+        </button>
+      </main>
+    );
+  }
 
   const isPublicRoute = location === '/' || location === '/welcome';
 

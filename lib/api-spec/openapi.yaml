@@ -575,6 +575,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      tags: [Transactions]
+      operationId: updateTransaction
+      summary: Edit a manually added transaction
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionUpdate'
+      responses:
+        '200':
+          description: Transaction updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+    delete:
+      tags: [Transactions]
+      operationId: deleteTransaction
+      summary: Delete a manually added transaction
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Transaction deleted.
 
   /profiles/{profileId}/inbox:
     get:
@@ -1605,6 +1643,19 @@ components:
           type: string
         note:
           type: [string, 'null']
+    TransactionUpdate:
+      type: object
+      properties:
+        date:
+          type: string
+        description:
+          type: string
+        amount:
+          type: number
+        category:
+          type: string
+        taxTreatment:
+          type: string
 
     InboxSubOption:
       type: object

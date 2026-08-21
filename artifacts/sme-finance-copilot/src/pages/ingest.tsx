@@ -149,7 +149,9 @@ export default function AddRecords() {
   const { evidenceItems, inboxItems, activeProfileId, transactions, refreshData } = useStore();
   const [intake, setIntake] = useState<Intake>(null);
   const [attachTo, setAttachTo] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; date: string; amount: string; description: string; category: string } | null>(null);
   const [attaching, setAttaching] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [attachError, setAttachError] = useState('');
   const attachInFlight = useRef(false);
   const pending = inboxItems.filter(i => i.status === 'pending').length;
@@ -160,14 +162,38 @@ export default function AddRecords() {
     catch { setAttachError('We could not attach that receipt. Please try again.'); }
     finally { attachInFlight.current = false; setAttaching(false); }
   };
+  const saveEdit = async () => {
+    if (!editing || !editing.description.trim() || !Number(editing.amount)) return;
+    setSavingEdit(true);
+    try {
+      const amount = Number(editing.amount);
+      await transactionsApi.update(activeProfileId, editing.id, {
+        date: editing.date,
+        amount,
+        description: editing.description.trim(),
+        category: editing.category,
+        taxTreatment: amount > 0 ? 'income' : 'deductible',
+      });
+      await refreshData();
+      setEditing(null);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+  const deleteRecord = async (id: string) => {
+    if (!window.confirm('Delete this manual record? This cannot be undone.')) return;
+    await transactionsApi.remove(activeProfileId, id);
+    await refreshData();
+  };
   return <div className="space-y-7 animate-in fade-in duration-500 max-w-5xl mx-auto pb-12">
     <div><h1 className="text-3xl font-serif">Add Records</h1><p className="text-muted-foreground mt-1 text-lg">Bring in the records that keep your financial picture current and defensible.</p></div>
     {pending > 0 && <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800"><strong>{pending} item{pending !== 1 ? 's' : ''} need a decision.</strong> <Link href="/tasks" className="underline">Review them in Tasks</Link>.</div>}
     {!intake ? <><div className="grid sm:grid-cols-2 gap-4">{INTAKES.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setIntake(option.id)} className="text-left border border-border rounded-xl p-5 bg-card hover:border-primary/40 hover:bg-primary/[.02] transition-all cursor-pointer"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-4"><Icon className="w-5 h-5" /></div><h2 className="font-serif text-lg">{option.title}</h2><p className="text-sm text-muted-foreground mt-1">{option.text}</p><p className="text-xs text-primary mt-3">{option.note} →</p></button>; })}</div>
-      <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}</div></div><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
+      <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}{t.source === 'manual' && <><button onClick={() => setEditing({ id: t.id, date: t.date, amount: String(t.amount), description: t.description, category: t.category })} className="text-xs text-primary hover:underline">Edit</button><button onClick={() => void deleteRecord(t.id)} className="text-xs text-destructive hover:underline">Delete</button></>}</div></div><div className="flex items-center gap-3"><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span>{t.source === 'manual' && <Pencil className="w-4 h-4 text-muted-foreground" />}</div></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
       intake === 'document' ? <DocumentFlow profileId={activeProfileId} refresh={refreshData} onBack={() => setIntake(null)} /> :
       intake === 'manual' ? <ManualFlow onBack={() => setIntake(null)} /> :
       <BatchFlow kind={intake} profileId={activeProfileId} refresh={refreshData} onBack={() => setIntake(null)} />}
     {attachTo && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="p-6 w-full max-w-md space-y-4"><h2 className="font-serif text-xl">Attach a receipt</h2><p className="text-sm text-muted-foreground">Adding an original receipt upgrades this record’s evidence quality.</p>{attaching ? <Loader2 className="animate-spin text-primary mx-auto" /> : <FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={attachReceipt} label="Choose receipt" />}{attachError && <p className="text-sm text-destructive">{attachError}</p>}<Button variant="outline" className="w-full" onClick={() => setAttachTo(null)}>Cancel</Button></Card></div>}
+    {editing && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="w-full max-w-lg space-y-4 p-6"><div><h2 className="font-serif text-xl">Edit manual record</h2><p className="mt-1 text-sm text-muted-foreground">Updating this record refreshes Financial Memory and tax figures.</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1"><span className="text-sm">Date</span><Input type="date" value={editing.date} onChange={e => setEditing({ ...editing, date: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Amount (£)</span><Input type="number" value={editing.amount} onChange={e => setEditing({ ...editing, amount: e.target.value })} /></label><label className="space-y-1 sm:col-span-2"><span className="text-sm">Description</span><Input value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Category</span><Input value={editing.category} onChange={e => setEditing({ ...editing, category: e.target.value })} /></label></div><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button><Button disabled={savingEdit} onClick={() => void saveEdit()}>{savingEdit ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pencil className="mr-2 h-4 w-4" />}Save changes</Button></div></Card></div>}
   </div>;
 }
