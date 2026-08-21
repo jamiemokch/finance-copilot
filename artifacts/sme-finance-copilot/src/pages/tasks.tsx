@@ -222,7 +222,30 @@ function InboxTab() {
       </div>
 
       <div className="space-y-5">
-        {subTab === 'pending' && pendingItems.length === 0 && (
+        {subTab === 'pending' && pendingItems.length === 0 && resolvedItems.length > 0 && (
+          <div className="text-center py-14 bg-emerald-50 border border-emerald-200 rounded-xl shadow-sm">
+            <CheckCircle2 className="w-12 h-12 mx-auto mb-4 text-emerald-500" />
+            <h3 className="text-lg font-semibold text-emerald-800">All items resolved!</h3>
+            <p className="text-emerald-700 mt-1 max-w-sm mx-auto text-sm">
+              Your financial figures have been updated. Ready to see the impact?
+            </p>
+            <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
+              <a
+                href="/dashboard"
+                className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors cursor-pointer"
+              >
+                View updated Home →
+              </a>
+              <a
+                href="/position"
+                className="inline-flex items-center gap-2 bg-background border border-emerald-300 text-emerald-800 px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-emerald-50 transition-colors cursor-pointer"
+              >
+                View updated Finances →
+              </a>
+            </div>
+          </div>
+        )}
+        {subTab === 'pending' && pendingItems.length === 0 && resolvedItems.length === 0 && (
           <div className="text-center py-16 bg-card rounded-xl border border-border shadow-sm">
             <CheckCircle2 className="w-12 h-12 mx-auto mb-4 text-emerald-500 opacity-80" />
             <h3 className="text-lg font-medium">You're all caught up!</h3>

@@ -27,11 +27,17 @@ description: Root causes and fixes from the full-app sanity check and two report
 - Changed `plBreakdown:` and `taxCalculation:` in store `value` object to use the reactive state variables
 - Fixed dashboard to read `taxBalanceDue = taxKpi?.rawValue ?? 6900` and `taxReserve = cashBreakdown.taxReserve` from store
 
-## Other bugs found
+## Other bugs found (pre-sprint)
 
 - `complianceItems`, `arEntries`, `apEntries` are passed as direct constant references (no `useState`) — immutable. Low priority for prototype.
-- State resets on every page refresh (pure in-memory React state, no localStorage). Known prototype limitation.
 - `computeScenario()` in business-ideas.tsx uses hardcoded revenue (39800) not derived from store. Acceptable since revenue doesn't change on inbox resolve; only expenses change.
+
+## Pre-Alpha sprint fixes (Aug 2026)
+
+- **position.tsx**: Available Cash drilldown was missing `cashBreakdown.apDueWithin30Days` (£250) from `netAvailable` calc — showed £6,340 not £6,090. Fixed by subtracting AP; now shows both "Tax Reserve" and "AP due within 30 days" in the Ringfenced card.
+- **layout.tsx**: Added two-click Reset demo button to amber banner (first click shows "Confirm reset?", 4s auto-cancel). Rewrote FloatingCopilot responses to be context-aware — pulls live store values (taxDue, profit, cash, AR, gap) so Copilot answers reference real numbers.
+- **ingest.tsx**: Added `useRef` + hidden `<input type="file">` to each UploadCard so the browser file-picker opens on button click. Captures real filename and shows it during processing and in the done state. "Resolve in Inbox" button now navigates to `/tasks`. Manual entry has inline validation (required description, valid non-zero number amount).
+- **tasks.tsx**: Empty pending state now shows a full golden-journey CTA (emerald panel) with two buttons ("View updated Home →" and "View updated Finances →") only when resolvedItems.length > 0; falls back to the old "all caught up" panel when no items have ever been resolved.
 
 ## Source of truth after fix
 

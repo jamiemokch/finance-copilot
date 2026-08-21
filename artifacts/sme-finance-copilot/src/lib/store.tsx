@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 
 // ─── Core entity types ────────────────────────────────────────────────────────
 
@@ -356,6 +356,8 @@ export interface AppState {
 
   copilotTrigger: string | null;
   setCopilotTrigger: (msg: string | null) => void;
+
+  resetDemoData: () => void;
 }
 
 // ─── Initial data ─────────────────────────────────────────────────────────────
@@ -439,7 +441,7 @@ const initialPositionItems: PositionItem[] = [
     description: 'free to use after tax reserve and committed bills',
     value: '£6,090', rawValue: 6090,
     type: 'kpi',
-    basis: 'Starling Business £9,840 − tax reserve £3,500 − AP due ≤30 days £250 = £6,090.',
+    basis: 'Starling Business £9,840 − tax reserve £3,500 − AP due ≤30 days £250 = £6,090. Tax reserve gap: £3,400 toward £6,900 balance due 31 Jan.',
     documents: ['Starling Bank Feed (synced 2h ago)'],
     assumptions: ['Tax reserve is held as internal ringfence — not a separate account', 'AR (£3,400) excluded until collected'],
     confidence: 'high',
@@ -904,29 +906,97 @@ function classifyResolution(res: string): 'deductible' | 'personal' {
 // reported in SA checklist sa3 after inbox resolutions.
 const INITIAL_TAX_BALANCE_DUE = initialPositionItems.find(p => p.id === 'kpi2')?.rawValue ?? 6900;
 
+// ─── Storage persistence ──────────────────────────────────────────────────────
+
+const STORAGE_KEY = 'sme-copilot-demo-v1';
+
+function loadPersistedState(): Record<string, unknown> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function clearPersistedState() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+}
+
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 const StoreContext = createContext<AppState | undefined>(undefined);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [profiles, setProfiles] = useState(initialProfiles);
-  const [activeProfileId, setActiveProfileId] = useState('p2');
-  const [sharedContext, setSharedContext] = useState<SharedContext>({
+  // Load from localStorage once on mount — used as initial values only
+  const initRef = useRef<Record<string, unknown> | null>(null);
+  if (initRef.current === null) initRef.current = loadPersistedState();
+  const sv = initRef.current;
+
+  // Helper to safely read a typed value from persisted state with a fallback
+  function sv_<T>(key: string, fallback: T): T {
+    return (key in sv && sv[key] !== undefined && sv[key] !== null)
+      ? (sv[key] as T)
+      : fallback;
+  }
+
+  const [profiles, setProfiles] = useState<Profile[]>(sv_('profiles', initialProfiles));
+  const [activeProfileId, setActiveProfileId] = useState<string>(sv_('activeProfileId', 'p2'));
+  const [sharedContext, setSharedContext] = useState<SharedContext>(sv_('sharedContext', {
     name: 'Priya Shah', address: 'Flat 4, London, E8 2PC', utr: '1234567890', niNumber: 'AB123456C',
-  });
-  const [positionItems, setPositionItems] = useState(initialPositionItems);
-  const [plBreakdown, setPlBreakdown] = useState(initialPLBreakdown);
-  const [taxCalculation, setTaxCalculation] = useState(initialTaxCalculation);
-  const [inboxItems, setInboxItems] = useState(initialInboxItems);
-  const [evidenceItems, setEvidenceItems] = useState(initialEvidenceItems);
-  const [transactions, setTransactions] = useState(initialTransactions);
-  const [chatHistory, setChatHistory] = useState(initialChatHistory);
-  const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
-  const [peerCategory, setPeerCategory] = useState<PeerCategory>(initialPeerCategory);
-  const [businessIdeas, setBusinessIdeas] = useState(initialBusinessIdeas);
-  const [decisionMemory, setDecisionMemory] = useState<DecisionMemoryEntry[]>([]);
-  const [saChecklist, setSAChecklist] = useState(initialSAChecklist);
+  }));
+  const [positionItems, setPositionItems] = useState<PositionItem[]>(sv_('positionItems', initialPositionItems));
+  const [plBreakdown, setPlBreakdown] = useState<PLBreakdown>(sv_('plBreakdown', initialPLBreakdown));
+  const [taxCalculation, setTaxCalculation] = useState<TaxCalculation>(sv_('taxCalculation', initialTaxCalculation));
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>(sv_('inboxItems', initialInboxItems));
+  const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>(sv_('evidenceItems', initialEvidenceItems));
+  const [transactions, setTransactions] = useState<TransactionItem[]>(sv_('transactions', initialTransactions));
+  const [chatHistory, setChatHistory] = useState<ChatSession[]>(sv_('chatHistory', initialChatHistory));
+  const [yearEndPackGenerated, setYearEndPackGenerated] = useState<boolean>(sv_('yearEndPackGenerated', false));
+  const [peerCategory, setPeerCategory] = useState<PeerCategory>(sv_('peerCategory', initialPeerCategory));
+  const [businessIdeas, setBusinessIdeas] = useState<BusinessIdea[]>(sv_('businessIdeas', initialBusinessIdeas));
+  const [decisionMemory, setDecisionMemory] = useState<DecisionMemoryEntry[]>(sv_('decisionMemory', []));
+  const [saChecklist, setSAChecklist] = useState<SAChecklistItem[]>(sv_('saChecklist', initialSAChecklist));
+  const [cashBreakdown, setCashBreakdown] = useState<CashBreakdown>(sv_('cashBreakdown', initialCashBreakdown));
   const [copilotTrigger, setCopilotTrigger] = useState<string | null>(null);
+
+  // Persist all mutable state to localStorage whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        profiles, activeProfileId, sharedContext, positionItems, plBreakdown, taxCalculation,
+        inboxItems, evidenceItems, transactions, chatHistory, businessIdeas, decisionMemory,
+        saChecklist, yearEndPackGenerated, peerCategory, cashBreakdown,
+      }));
+    } catch {
+      // localStorage full or unavailable — ignore
+    }
+  }, [
+    profiles, activeProfileId, sharedContext, positionItems, plBreakdown, taxCalculation,
+    inboxItems, evidenceItems, transactions, chatHistory, businessIdeas, decisionMemory,
+    saChecklist, yearEndPackGenerated, peerCategory, cashBreakdown,
+  ]);
+
+  // Reset all state to initial sample data (and clear localStorage)
+  const resetDemoData = () => {
+    clearPersistedState();
+    setProfiles(initialProfiles);
+    setActiveProfileId('p2');
+    setSharedContext({ name: 'Priya Shah', address: 'Flat 4, London, E8 2PC', utr: '1234567890', niNumber: 'AB123456C' });
+    setPositionItems(initialPositionItems);
+    setPlBreakdown(initialPLBreakdown);
+    setTaxCalculation(initialTaxCalculation);
+    setInboxItems(initialInboxItems);
+    setEvidenceItems(initialEvidenceItems);
+    setTransactions(initialTransactions);
+    setChatHistory(initialChatHistory);
+    setBusinessIdeas(initialBusinessIdeas);
+    setDecisionMemory([]);
+    setSAChecklist(initialSAChecklist);
+    setYearEndPackGenerated(false);
+    setPeerCategory(initialPeerCategory);
+    setCashBreakdown(initialCashBreakdown);
+  };
 
   const value: AppState = {
     profiles,
@@ -1039,7 +1109,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
 
-      // 7. Update KPI positionItems so Dashboard and Finances reflect the change immediately
+      // 7. Update KPI positionItems (kpi1, kpi2, kpi5) so all screens stay consistent
+      const newGap = Math.max(0, tax.balanceDue - initialCashBreakdown.taxReserve);
       setPositionItems(prev => prev.map(p => {
         if (p.id === 'kpi1') return {
           ...p,
@@ -1052,6 +1123,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           value: `£${tax.balanceDue.toLocaleString()}`,
           rawValue: tax.balanceDue,
           basis: `Updated after resolving Inbox: "${item.description}" → ${res}. Taxable income £${tax.taxableIncome.toLocaleString()}.`,
+        };
+        if (p.id === 'kpi5') return {
+          ...p,
+          basis: `Starling Business £9,840 − tax reserve £3,500 − AP due ≤30 days £250 = £6,090.${
+            newGap > 0
+              ? ` Tax reserve gap: £${newGap.toLocaleString()} toward £${tax.balanceDue.toLocaleString()} balance due 31 Jan.`
+              : ` Tax reserve now covers your £${tax.balanceDue.toLocaleString()} balance due — gap closed.`
+          }`,
         };
         return p;
       }));
@@ -1124,9 +1203,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     taxCalculation,        // reactive — updated by resolveInboxItem
     arEntries: initialAREntries,
     apEntries: initialAPEntries,
-    cashBreakdown: initialCashBreakdown,
+    cashBreakdown,         // reactive — persisted
     copilotTrigger,
     setCopilotTrigger,
+    resetDemoData,
   };
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

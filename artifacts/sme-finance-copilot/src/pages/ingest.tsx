@@ -1,13 +1,13 @@
 import { Card, Badge, Button, Input, Label, Select } from '@/components/ui';
 import { useStore, EvidenceCategory, EvidenceStatus } from '@/lib/store';
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import {
   UploadCloud, CheckCircle2, FileText, Plus, Database, Loader2,
   ArrowRight, Building2, Receipt, FileClock, FileSignature, FolderOpen,
   AlertCircle, ChevronDown, ChevronUp, Sparkles,
 } from 'lucide-react';
 import { cn } from '@/components/ui';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 
 // ─── Product flow diagram ──────────────────────────────────────────────────────
 
@@ -162,31 +162,66 @@ const AI_STEPS: { key: ProcessStep; label: string; duration: number }[] = [
 
 function UploadCard({ config, onUploaded }: {
   config: CategoryConfig;
-  onUploaded: (cat: EvidenceCategory, needsReview: boolean) => void;
+  onUploaded: (cat: EvidenceCategory, needsReview: boolean, filename: string) => void;
 }) {
   const [step, setStep] = useState<ProcessStep>('idle');
   const [isDragging, setIsDragging] = useState(false);
+  const [pickedFilename, setPickedFilename] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [, navigate] = useLocation();
   const Icon = config.icon;
 
-  const simulate = () => {
+  const simulate = (filename?: string) => {
     if (step !== 'idle') return;
     // Randomly decide if this upload needs review (receipts and 'other' sometimes do)
     const willNeedReview = (config.id === 'receipt' || config.id === 'other') && Math.random() > 0.5;
+    const resolvedName = filename ?? pickedFilename ?? `${config.id.replace('_', '-')}.pdf`;
 
     // Run through AI steps sequentially
     let elapsed = 0;
-    AI_STEPS.forEach(({ key, duration }, i) => {
+    AI_STEPS.forEach(({ key }) => {
       setTimeout(() => setStep(key), elapsed);
-      elapsed += duration;
+      elapsed += AI_STEPS.find(s => s.key === key)!.duration;
     });
     // Final state
     setTimeout(() => {
       const finalStep: ProcessStep = willNeedReview ? 'done_review' : 'done_ok';
       setStep(finalStep);
-      onUploaded(config.id, willNeedReview);
-      // Reset after a few seconds
-      setTimeout(() => setStep('idle'), 4500);
+      onUploaded(config.id, willNeedReview, resolvedName);
+      // Reset after a few seconds so the card can accept another upload
+      setTimeout(() => { setStep('idle'); setPickedFilename(null); }, 4500);
     }, elapsed);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPickedFilename(file.name);
+    simulate(file.name);
+    // Reset input so same file can be re-selected
+    e.target.value = '';
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    simulate(file?.name);
+  };
+
+  const handleButtonClick = () => {
+    if (step === 'done_review') {
+      navigate('/tasks');
+      return;
+    }
+    if (step === 'done_ok') {
+      setStep('idle');
+      setPickedFilename(null);
+      return;
+    }
+    if (step === 'idle') {
+      fileInputRef.current?.click();
+    }
   };
 
   const isProcessing = ['uploading', 'reading', 'identifying', 'checking', 'categorising'].includes(step);
@@ -203,13 +238,21 @@ function UploadCard({ config, onUploaded }: {
       )}
       onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
       onDragLeave={() => setIsDragging(false)}
-      onDrop={e => { e.preventDefault(); setIsDragging(false); simulate(); }}
+      onDrop={handleDrop}
     >
+      {/* Hidden real file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={config.accepts}
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
       <div className={cn(
         "w-10 h-10 rounded-full flex items-center justify-center transition-colors",
         step === 'done_ok'     ? "bg-emerald-100" :
         step === 'done_review' ? "bg-amber-100" :
-        isProcessing           ? "bg-primary/10" :
                                  "bg-primary/10"
       )}>
         {isProcessing
@@ -226,6 +269,9 @@ function UploadCard({ config, onUploaded }: {
         <p className="font-medium text-sm text-foreground">{config.label}</p>
         {isProcessing ? (
           <div className="mt-1 space-y-1.5">
+            {pickedFilename && (
+              <p className="text-[10px] text-muted-foreground truncate px-2">{pickedFilename}</p>
+            )}
             <p className="text-xs text-primary font-medium flex items-center justify-center gap-1">
               <Sparkles className="w-3 h-3 animate-pulse" /> {currentStepLabel}
             </p>
@@ -245,13 +291,23 @@ function UploadCard({ config, onUploaded }: {
             </div>
           </div>
         ) : step === 'done_ok' ? (
-          <p className="text-xs text-emerald-700 mt-1">
-            ✓ Categorised automatically — added to financial records
-          </p>
+          <div>
+            <p className="text-xs text-emerald-700 mt-1">
+              ✓ Categorised automatically — added to financial records
+            </p>
+            {pickedFilename && (
+              <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>
+            )}
+          </div>
         ) : step === 'done_review' ? (
-          <p className="text-xs text-amber-700 mt-1">
-            ⚠ Sent to Inbox — needs your decision before it affects tax
-          </p>
+          <div>
+            <p className="text-xs text-amber-700 mt-1">
+              ⚠ Sent to Inbox — needs your decision before it affects tax
+            </p>
+            {pickedFilename && (
+              <p className="text-[10px] text-muted-foreground mt-0.5 truncate px-2">{pickedFilename}</p>
+            )}
+          </div>
         ) : (
           <div>
             <p className="text-xs text-muted-foreground mt-0.5">{config.description}</p>
@@ -265,15 +321,15 @@ function UploadCard({ config, onUploaded }: {
         variant={isDone ? 'outline' : 'default'}
         className={cn(
           "w-full cursor-pointer text-xs",
-          step === 'done_review' && "border-amber-300 text-amber-700 hover:bg-amber-50"
+          step === 'done_review' && "border-amber-400 bg-amber-100 text-amber-800 hover:bg-amber-200"
         )}
         disabled={isProcessing}
-        onClick={simulate}
+        onClick={handleButtonClick}
       >
-        {isProcessing         ? currentStepLabel :
-         step === 'done_ok'   ? '✓ Done — upload another?' :
-         step === 'done_review'? '→ Resolve in Inbox' :
-                                'Choose file or drag here'}
+        {isProcessing          ? currentStepLabel :
+         step === 'done_ok'    ? '✓ Done — upload another?' :
+         step === 'done_review' ? '→ Go to Inbox to resolve' :
+                                  'Choose file or drag here'}
       </Button>
 
       {!isProcessing && !isDone && (
@@ -294,11 +350,12 @@ export default function Evidence() {
     amount: '',
     category: 'General',
   });
+  const [manualErrors, setManualErrors] = useState<{ description?: string; amount?: string }>({});
 
   const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
 
-  const handleUploaded = (cat: EvidenceCategory, needsReview: boolean) => {
-    const demoNames: Record<EvidenceCategory, string> = {
+  const handleUploaded = (cat: EvidenceCategory, needsReview: boolean, filename: string) => {
+    const fallbackNames: Record<EvidenceCategory, string> = {
       bank_statement: 'bank-export.csv',
       invoice_sent:   'invoice-new.pdf',
       receipt:        'receipt-scan.jpg',
@@ -309,7 +366,7 @@ export default function Evidence() {
     addEvidenceItem({
       profileId: activeProfileId,
       category: cat,
-      filename: demoNames[cat],
+      filename: filename || fallbackNames[cat],
       uploadedAt: new Date().toISOString().split('T')[0],
       status: needsReview ? 'needs_review' : 'categorised',
       extractedLines: needsReview ? undefined : Math.floor(Math.random() * 40) + 3,
@@ -318,7 +375,7 @@ export default function Evidence() {
     if (!needsReview) {
       addTransaction({
         date: new Date().toISOString().split('T')[0],
-        description: `[Upload] ${demoNames[cat]}`,
+        description: `[Upload] ${filename || fallbackNames[cat]}`,
         amount: cat === 'invoice_sent' ? 1200 : -85,
         category: cat === 'invoice_sent' ? 'Sales' : 'Expenses',
         source: 'receipt',
@@ -327,16 +384,23 @@ export default function Evidence() {
   };
 
   const handleAddManual = () => {
-    if (manualItem.description && manualItem.amount) {
-      addTransaction({
-        date: manualItem.date,
-        description: manualItem.description,
-        amount: parseFloat(manualItem.amount),
-        category: manualItem.category,
-        source: 'manual',
-      });
-      setManualItem({ ...manualItem, description: '', amount: '' });
-    }
+    const errors: typeof manualErrors = {};
+    if (!manualItem.description.trim()) errors.description = 'Description is required.';
+    const parsed = parseFloat(manualItem.amount);
+    if (!manualItem.amount || isNaN(parsed)) errors.amount = 'Enter a valid amount (e.g. -50 or 1200).';
+    else if (parsed === 0) errors.amount = 'Amount cannot be zero.';
+    setManualErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    addTransaction({
+      date: manualItem.date,
+      description: manualItem.description.trim(),
+      amount: parsed,
+      category: manualItem.category,
+      source: 'manual',
+    });
+    setManualItem({ ...manualItem, description: '', amount: '' });
+    setManualErrors({});
   };
 
   const needsReview = evidenceItems.filter(e => e.status === 'needs_review').length;
@@ -412,11 +476,32 @@ export default function Evidence() {
               </div>
               <div className="space-y-2">
                 <Label>Amount (£, negative = expense)</Label>
-                <Input type="number" placeholder="-50.00" value={manualItem.amount} onChange={e => setManualItem({ ...manualItem, amount: e.target.value })} />
+                <Input
+                  type="number"
+                  placeholder="-50.00"
+                  value={manualItem.amount}
+                  onChange={e => { setManualItem({ ...manualItem, amount: e.target.value }); setManualErrors(prev => ({ ...prev, amount: undefined })); }}
+                  className={manualErrors.amount ? 'border-destructive ring-1 ring-destructive' : ''}
+                />
+                {manualErrors.amount && (
+                  <p className="text-xs text-destructive flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 shrink-0" /> {manualErrors.amount}
+                  </p>
+                )}
               </div>
               <div className="space-y-2 sm:col-span-2">
                 <Label>Description</Label>
-                <Input placeholder="e.g. Client Dinner at Dishoom" value={manualItem.description} onChange={e => setManualItem({ ...manualItem, description: e.target.value })} />
+                <Input
+                  placeholder="e.g. Client Dinner at Dishoom"
+                  value={manualItem.description}
+                  onChange={e => { setManualItem({ ...manualItem, description: e.target.value }); setManualErrors(prev => ({ ...prev, description: undefined })); }}
+                  className={manualErrors.description ? 'border-destructive ring-1 ring-destructive' : ''}
+                />
+                {manualErrors.description && (
+                  <p className="text-xs text-destructive flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 shrink-0" /> {manualErrors.description}
+                  </p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label>Category</Label>

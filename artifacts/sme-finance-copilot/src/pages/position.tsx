@@ -242,7 +242,8 @@ export default function Position() {
     }
 
     if (item.title === 'Available Cash' && cashBreakdown) {
-      const netAvailable = cashBreakdown.accounts.reduce((sum: number, a: CashAccount) => sum + a.balance, 0) - cashBreakdown.taxReserve;
+      const grossCash = cashBreakdown.accounts.reduce((sum: number, a: CashAccount) => sum + a.balance, 0);
+      const netAvailable = grossCash - cashBreakdown.taxReserve - cashBreakdown.apDueWithin30Days;
       return (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -258,12 +259,18 @@ export default function Position() {
               </div>
             </Card>
             <Card className="p-4 bg-background shadow-sm border-border">
-              <h4 className="text-sm font-medium text-muted-foreground mb-3">Ringfenced</h4>
-              <div className="flex justify-between text-sm mb-2">
-                <span className="text-amber-700">Estimated Tax Reserve</span>
-                <span className="font-medium text-amber-700">-£{cashBreakdown.taxReserve.toLocaleString()}</span>
+              <h4 className="text-sm font-medium text-muted-foreground mb-3">Ringfenced / Reserved</h4>
+              <div className="space-y-2 mb-3">
+                <div className="flex justify-between text-sm">
+                  <span className="text-amber-700">Estimated Tax Reserve</span>
+                  <span className="font-medium text-amber-700">-£{cashBreakdown.taxReserve.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">AP due within 30 days</span>
+                  <span className="font-medium text-muted-foreground">-£{cashBreakdown.apDueWithin30Days.toLocaleString()}</span>
+                </div>
               </div>
-              <div className="pt-3 border-t border-border flex justify-between font-semibold mt-auto">
+              <div className="pt-3 border-t border-border flex justify-between font-semibold">
                 <span>Net Available Cash</span>
                 <span>£{netAvailable.toLocaleString()}</span>
               </div>
