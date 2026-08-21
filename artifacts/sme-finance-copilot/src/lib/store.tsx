@@ -87,7 +87,8 @@ export interface TransactionItem {
   description: string;
   amount: number;
   category: string;
-  source: 'bank' | 'manual' | 'receipt' | 'extracted' | 'demo';
+  recordType?: 'income' | 'expense' | 'unknown';
+  source: 'bank' | 'bank_csv' | 'manual' | 'receipt' | 'extracted' | 'demo';
   evidenceTier?: number;
   evidenceId?: string | null;
 }
@@ -635,7 +636,8 @@ function mapTransaction(t: APITransaction): TransactionItem {
     description: t.description,
     amount: t.amount,
     category: t.category,
-    source: (src === 'bank' || src === 'manual' || src === 'receipt' || src === 'extracted' || src === 'demo') ? src : 'manual',
+    recordType: t.recordType,
+    source: (src === 'bank' || src === 'bank_csv' || src === 'manual' || src === 'receipt' || src === 'extracted' || src === 'demo') ? src : 'manual',
     evidenceTier: t.evidenceTier,
     evidenceId: t.evidenceId,
   };

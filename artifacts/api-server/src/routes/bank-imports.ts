@@ -60,6 +60,52 @@ const MappingInput = z.object({
 type Batch = typeof bankImportBatchesTable.$inferSelect;
 type BankRow = typeof bankImportRowsTable.$inferSelect;
 
+/**
+ * Atomically create (or recover) the one staging batch for a profile/file hash.
+ * Keeping this as a small, storage-free primitive makes the idempotency fence
+ * directly regression-testable without requiring an object-storage emulator.
+ */
+export async function registerBankImportBatch(
+  batchValues: typeof bankImportBatchesTable.$inferInsert,
+): Promise<{ batch: Batch; reused: boolean } | null> {
+  return db.transaction(async (tx) => {
+    const [inserted] = await tx.insert(bankImportBatchesTable)
+      .values(batchValues)
+      .onConflictDoNothing({
+        target: [bankImportBatchesTable.profileId, bankImportBatchesTable.fileHash],
+      })
+      .returning();
+    if (inserted) return { batch: inserted, reused: false };
+
+    // Another request won the unique insert race. Lock and return its batch
+    // rather than exposing the expected conflict as a 500.
+    const [winner] = await tx.select().from(bankImportBatchesTable).where(and(
+      eq(bankImportBatchesTable.profileId, batchValues.profileId),
+      eq(bankImportBatchesTable.fileHash, batchValues.fileHash),
+    )).for("update");
+    if (!winner) return null;
+    if (winner.status !== "discarded") return { batch: winner, reused: true };
+
+    // Preserve the prior behavior for a discarded same-file batch, but do it
+    // under the same lock so concurrent retries cannot reset it inconsistently.
+    const [reopened] = await tx.update(bankImportBatchesTable).set({
+      ...batchValues,
+      mappingVersion: 0,
+      previewVersion: 0,
+      totalRows: 0,
+      validRows: 0,
+      invalidRows: 0,
+      duplicateRows: 0,
+      possibleDuplicateRows: 0,
+      outOfScopeRows: 0,
+      selectedRows: 0,
+      committedRows: 0,
+    }).where(eq(bankImportBatchesTable.id, winner.id)).returning();
+    await tx.delete(bankImportRowsTable).where(eq(bankImportRowsTable.batchId, winner.id));
+    return reopened ? { batch: reopened, reused: false } : null;
+  });
+}
+
 // GET /profiles/:profileId/financial-accounts
 router.get("/profiles/:profileId/financial-accounts", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -174,23 +220,18 @@ router.post("/profiles/:profileId/bank-imports", async (req, res) => {
       processingLeaseExpiresAt: null,
       processingToken: null,
     } as const;
-    const batch = existing
-      ? (await db.update(bankImportBatchesTable).set({
-          ...batchValues,
-          mappingVersion: 0,
-          previewVersion: 0,
-          totalRows: 0,
-          validRows: 0,
-          invalidRows: 0,
-          duplicateRows: 0,
-          possibleDuplicateRows: 0,
-          outOfScopeRows: 0,
-          selectedRows: 0,
-          committedRows: 0,
-        }).where(eq(bankImportBatchesTable.id, existing.id)).returning())[0]
-      : (await db.insert(bankImportBatchesTable).values(batchValues).returning())[0];
-    if (existing) await db.delete(bankImportRowsTable).where(eq(bankImportRowsTable.batchId, existing.id));
-    res.status(existing ? 200 : 201).json({ batch: publicBatch(batch), rows: [], proposal, reused: false });
+    const registration = await registerBankImportBatch(batchValues);
+    if (!registration) {
+      res.status(409).json({ error: "The bank import registration changed. Please try the same file again." });
+      return;
+    }
+    const rows = registration.reused ? await batchRows(registration.batch.id) : [];
+    res.status(registration.reused ? 200 : 201).json({
+      batch: publicBatch(registration.batch),
+      rows,
+      proposal,
+      reused: registration.reused,
+    });
   } catch (err) {
     if (err instanceof BankCsvError) { res.status(400).json({ error: err.message }); return; }
     req.log.error(err, "Failed to register bank CSV");
@@ -366,7 +407,11 @@ router.post("/profiles/:profileId/bank-imports/:batchId/commit", async (req, res
       res.json({ batch: publicBatch(batch), rows: await batchRows(batch.id), replayed: true });
       return;
     }
-    if (batch.previewVersion !== body.data.previewVersion || batch.status !== "preview_ready") {
+    const expiredCommitLease = batch.status === "committing" && !hasActiveLease(batch);
+    if (
+      batch.previewVersion !== body.data.previewVersion
+      || (batch.status !== "preview_ready" && !expiredCommitLease)
+    ) {
       res.status(409).json({ error: "This preview is no longer current. Review the CSV again before importing." });
       return;
     }
@@ -578,7 +623,7 @@ type PreviewRow = ReturnType<typeof parseMappedBankRows>[number] & {
   occurrenceIdentity: number;
 };
 
-async function previewRowsForProfile(
+export async function previewRowsForProfile(
   profileId: string,
   financialAccountId: string,
   parsedRows: ReturnType<typeof parseMappedBankRows>,

@@ -357,6 +357,7 @@ export interface APITransaction {
   date: string;
   description: string;
   amount: number;
+  recordType?: 'income' | 'expense' | 'unknown';
   category: string;
   taxTreatment: string;
   source: string;

@@ -35,10 +35,16 @@ function formatTimestamp(value?: string) {
 }
 
 function recordType(record: Pick<TransactionItem, 'amount' | 'recordType'>) {
-  return record.recordType ?? (record.amount > 0 ? 'income' : 'expense');
+  if (record.recordType === 'income' || record.recordType === 'expense') {
+    return record.recordType;
+  }
+  return 'unreviewed';
 }
 
-function RecordBadge({ type }: { type: 'income' | 'expense' }) {
+function RecordBadge({ type }: { type: 'income' | 'expense' | 'unreviewed' }) {
+  if (type === 'unreviewed') {
+    return <Badge variant="outline">Needs classification</Badge>;
+  }
   return <Badge variant={type === 'income' ? 'success' : 'warning'}>{type === 'income' ? 'Income' : 'Expense'}</Badge>;
 }
 
@@ -83,7 +89,9 @@ export default function FinancialMemory() {
     return () => { cancelled = true; };
   }, [activeProfileId, entryId]);
 
-  const records = transactions.filter(record => record.recordType === 'income' || record.recordType === 'expense');
+  // Bank CSV movements are durable Financial Memory records immediately, but
+  // remain visibly unreviewed until a person assigns their accounting meaning.
+  const records = transactions;
 
   const refresh = async () => {
     setRefreshing(true);
@@ -105,12 +113,12 @@ export default function FinancialMemory() {
       return <div className="max-w-3xl mx-auto space-y-4"><Button variant="outline" onClick={() => navigate('/memory')}><ArrowLeft className="w-4 h-4 mr-2" />Back to Financial Memory</Button><Card className="p-8"><h1 className="font-serif text-2xl">Record unavailable</h1><p className="text-muted-foreground mt-2">{error || 'This record could not be found.'}</p></Card></div>;
     }
 
-    const type = entry.recordType ?? (entry.amount > 0 ? 'income' : 'expense');
+    const type = recordType(entry);
     return <div className="max-w-3xl mx-auto space-y-5">
       <Button variant="outline" onClick={() => navigate('/memory')}><ArrowLeft className="w-4 h-4 mr-2" />Back to Financial Memory</Button>
       <div>
         <p className="text-sm font-medium text-primary">Financial Memory</p>
-        <div className="flex flex-wrap items-center justify-between gap-3 mt-1"><h1 className="font-serif text-3xl">{entry.description}</h1><span className={`text-2xl font-semibold ${type === 'income' ? 'text-emerald-700' : 'text-amber-700'}`}>{money(entry.amount)}</span></div>
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-1"><h1 className="font-serif text-3xl">{entry.description}</h1><span className={`text-2xl font-semibold ${type === 'income' ? 'text-emerald-700' : type === 'expense' ? 'text-amber-700' : 'text-slate-700'}`}>{money(entry.amount)}</span></div>
       </div>
       <Card className="p-6 space-y-6">
         <div className="flex items-center gap-3"><RecordBadge type={type} /><span className="text-sm text-muted-foreground">{formatDate(entry.date)}</span></div>
@@ -128,7 +136,7 @@ export default function FinancialMemory() {
 
   return <div className="max-w-4xl mx-auto space-y-6">
     <div className="flex flex-wrap items-end justify-between gap-4">
-      <div><p className="text-sm font-medium text-primary">Financial Memory</p><h1 className="font-serif text-3xl mt-1">Your financial records</h1><p className="text-muted-foreground mt-2">A lasting record of the income and expenses saved to this business profile.</p></div>
+      <div><p className="text-sm font-medium text-primary">Financial Memory</p><h1 className="font-serif text-3xl mt-1">Your financial records</h1><p className="text-muted-foreground mt-2">A lasting record of the movements, income, and expenses saved to this business profile.</p></div>
       <Button variant="outline" disabled={refreshing} onClick={refresh}><RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? 'Refreshing…' : 'Refresh records'}</Button>
     </div>
     {error && <Card className="p-4 text-sm text-destructive">{error}</Card>}
@@ -138,7 +146,7 @@ export default function FinancialMemory() {
         return <Link key={record.id} href={`/memory/${record.id}`} className="block p-4 hover:bg-muted/40 transition-colors">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><RecordBadge type={type} /><span className="text-xs text-muted-foreground inline-flex items-center gap-1"><CalendarDays className="w-3.5 h-3.5" />{formatDate(record.date)}</span></div><p className="font-medium mt-2 truncate">{record.description}</p><p className="text-sm text-muted-foreground mt-1">{readableCategory(record.category)}{record.note ? ` · ${record.note}` : ''}</p></div>
-            <div className="flex shrink-0 items-center gap-3"><span className={`font-semibold ${type === 'income' ? 'text-emerald-700' : 'text-amber-700'}`}>{money(record.amount)}</span><ChevronRight className="w-5 h-5 text-muted-foreground" /></div>
+            <div className="flex shrink-0 items-center gap-3"><span className={`font-semibold ${type === 'income' ? 'text-emerald-700' : type === 'expense' ? 'text-amber-700' : 'text-slate-700'}`}>{money(record.amount)}</span><ChevronRight className="w-5 h-5 text-muted-foreground" /></div>
           </div>
         </Link>;
       }) : <div className="p-10 text-center"><Clock3 className="w-6 h-6 text-muted-foreground mx-auto mb-3" /><h2 className="font-medium">No financial records yet</h2><p className="text-sm text-muted-foreground mt-1">Add your first income or expense to start your Financial Memory.</p><Button className="mt-4" onClick={() => navigate('/ingest')}>Add a record</Button></div>}
