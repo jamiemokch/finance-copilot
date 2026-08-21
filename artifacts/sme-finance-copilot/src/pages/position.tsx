@@ -6,7 +6,7 @@ import { Link } from 'wouter';
 import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Legend } from 'recharts';
 
 export default function Position() {
-  const { positionItems, activeProfileId, profiles, plBreakdown, taxCalculation, arEntries, apEntries, cashBreakdown, decisionMemory, monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal } = useStore();
+  const { positionItems, activeProfileId, profiles, plBreakdown, taxCalculation, arEntries, apEntries, cashBreakdown, decisionMemory, monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal, evidenceCoverage } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeItems = positionItems.filter(i => i.profileId === activeProfileId);
   const activeDecisionMemory = decisionMemory.filter(d => d.profileId === activeProfileId && d.status === 'committed');
@@ -41,7 +41,7 @@ export default function Position() {
                 <thead className="bg-secondary/50">
                   <tr>
                     <th className="text-left font-medium p-3">Label</th>
-                    <th className="text-left font-medium p-3">Basis / Evidence</th>
+                    <th className="text-left font-medium p-3">Basis / record</th>
                     <th className="text-right font-medium p-3">Amount</th>
                   </tr>
                 </thead>
@@ -71,7 +71,7 @@ export default function Position() {
                 <thead className="bg-secondary/50">
                   <tr>
                     <th className="text-left font-medium p-3">Category / Label</th>
-                    <th className="text-left font-medium p-3">Basis / Evidence</th>
+                    <th className="text-left font-medium p-3">Basis / record</th>
                     <th className="text-right font-medium p-3">Amount</th>
                   </tr>
                 </thead>
@@ -363,7 +363,7 @@ export default function Position() {
                 </div>
               )}
               <div>
-                <h4 className="text-sm font-semibold text-foreground mb-2">Supporting Evidence</h4>
+                <h4 className="text-sm font-semibold text-foreground mb-2">Supporting records</h4>
                 {item.documents.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {item.documents.map((doc, i) => (
@@ -373,7 +373,7 @@ export default function Position() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground italic">No formal evidence linked yet.</p>
+                  <p className="text-sm text-muted-foreground italic">No formal records linked yet.</p>
                 )}
               </div>
             </div>
@@ -422,6 +422,24 @@ export default function Position() {
           <div className="space-y-3">{facts.map(renderItem)}</div>
         </div>
       )}
+
+      <Card className="p-5 shadow-sm border-border">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div><h2 className="text-xl font-serif">Evidence coverage</h2><p className="text-sm text-muted-foreground mt-1">A practical view of how complete and defensible your financial records are.</p></div>
+          <Badge className="capitalize bg-primary/10 text-primary">{evidenceCoverage.financialConfidenceLabel.replace('_', ' ')} confidence</Badge>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-3 mb-5">
+          {[
+            ['Record completeness', evidenceCoverage.coveragePct],
+            ['Evidence defensibility', evidenceCoverage.defensibilityPct],
+            ['Classification confidence', evidenceCoverage.classificationPct],
+          ].map(([label, value]) => <div key={String(label)} className="rounded-lg bg-secondary/35 p-3"><p className="text-xs text-muted-foreground">{label}</p><p className="text-2xl font-serif mt-1">{value}%</p></div>)}
+        </div>
+        <div className="overflow-x-auto border border-border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr><th className="p-3 text-left font-medium">Record source</th><th className="p-3 text-right font-medium">Amount covered</th></tr></thead><tbody className="divide-y divide-border">
+          {[['Receipt or invoice', '1'], ['Bank export', '2'], ['Spreadsheet', '3'], ['Quick entry', '4']].map(([label, tier]) => <tr key={tier}><td className="p-3">{label}</td><td className="p-3 text-right font-medium">£{(evidenceCoverage.tierAmounts[tier as '1' | '2' | '3' | '4'] ?? 0).toLocaleString()}</td></tr>)}
+        </tbody></table></div>
+        <p className="text-xs text-muted-foreground mt-3">For HMRC purposes, original documents and bank exports generally provide stronger support than self-declared entries.</p>
+      </Card>
 
       {/* Visualisations */}
       <div className="space-y-4 pt-4">

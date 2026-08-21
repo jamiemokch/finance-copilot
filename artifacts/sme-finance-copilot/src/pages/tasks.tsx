@@ -156,13 +156,14 @@ function ComplianceTab() {
 // ─── Inbox Tab ────────────────────────────────────────────────────────────────
 
 function InboxTab() {
-  const { inboxItems, resolveInboxItem, activeProfileId, profiles, setCopilotTrigger } = useStore();
+  const { inboxItems, evidenceItems, resolveInboxItem, activeProfileId, profiles, setCopilotTrigger } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeItems = inboxItems.filter(i => i.profileId === activeProfileId);
   const pendingItems = activeItems.filter(i => i.status === 'pending');
   const resolvedItems = activeItems.filter(i => i.status === 'resolved');
   const [subTab, setSubTab] = useState<'pending' | 'resolved'>('pending');
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
+  const [collapsedBatches, setCollapsedBatches] = useState<Record<string, boolean>>({});
 
   const handleOptionSelect = (itemId: string, optionLabel: string, hasSubOptions: boolean) => {
     if (!hasSubOptions) {
@@ -195,6 +196,14 @@ function InboxTab() {
     if (selectedOpt?.subOptions && !selectedOptions[`${item.id}_sub`]) return false;
     return true;
   };
+  const currentItems = [...(subTab === 'pending' ? pendingItems : resolvedItems)].sort((a, b) => {
+    if (!a.evidenceId && !b.evidenceId) return 0;
+    if (!a.evidenceId) return 1;
+    if (!b.evidenceId) return -1;
+    return a.evidenceId.localeCompare(b.evidenceId);
+  });
+  const batchItems = (evidenceId: string) => pendingItems.filter(item => item.evidenceId === evidenceId);
+  const batchName = (evidenceId: string) => evidenceItems.find(item => item.id === evidenceId)?.filename ?? 'Imported file';
 
   return (
     <div className="space-y-6">
@@ -256,8 +265,24 @@ function InboxTab() {
           <div className="text-center py-12 text-muted-foreground">No resolved items yet.</div>
         )}
 
-        {(subTab === 'pending' ? pendingItems : resolvedItems).map(item => (
-          <Card key={item.id} className="overflow-hidden shadow-sm">
+        {currentItems.map((item, index) => {
+          const isBatchStart = subTab === 'pending' && !!item.evidenceId && !currentItems.slice(0, index).some(previous => previous.evidenceId === item.evidenceId);
+          const batch = item.evidenceId ? batchItems(item.evidenceId) : [];
+          if (item.evidenceId && collapsedBatches[item.evidenceId]) {
+            return isBatchStart ? (
+              <button key={`batch-${item.evidenceId}`} onClick={() => setCollapsedBatches(prev => ({ ...prev, [item.evidenceId!]: false }))} className="w-full text-left bg-secondary/40 border border-border rounded-xl p-4 flex justify-between cursor-pointer">
+                <span className="text-sm font-medium">Imported batch · {batchName(item.evidenceId)} ({batch.length} items)</span><ChevronDown className="w-4 h-4" />
+              </button>
+            ) : null;
+          }
+          return <div key={item.id} className="space-y-3">
+          {isBatchStart && <div className="bg-secondary/40 border border-border rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <button onClick={() => setCollapsedBatches(prev => ({ ...prev, [item.evidenceId!]: true }))} className="text-left flex items-center gap-2 cursor-pointer"><FileText className="w-4 h-4 text-primary" /><span className="text-sm font-medium">Imported batch · {batchName(item.evidenceId!)} ({batch.length} items)</span><ChevronUp className="w-4 h-4" /></button>
+            {batch.every(batchItem => (batchItem.amount ?? 0) < 0)
+              ? <Button size="sm" variant="outline" className="cursor-pointer" onClick={() => batch.forEach(batchItem => resolveInboxItem(batchItem.id, 'Fully deductible business expense'))}>Resolve all as business expenses</Button>
+              : <span className="text-xs text-muted-foreground">This batch includes money in and out — review each row.</span>}
+          </div>}
+          <Card className="overflow-hidden shadow-sm">
             <div className="p-5">
               <div className="flex justify-between items-start mb-4">
                 <div>
@@ -361,7 +386,8 @@ function InboxTab() {
               )}
             </div>
           </Card>
-        ))}
+          </div>;
+        })}
       </div>
     </div>
   );
@@ -553,7 +579,7 @@ function YearEndTab() {
                   {[
                     'General Ledger (CSV)',
                     'Profit & Loss Statement (PDF)',
-                    `Evidence Archive (${profileEvidenceItems.length} file${profileEvidenceItems.length !== 1 ? 's' : ''})`,
+                    `Records Archive (${profileEvidenceItems.length} file${profileEvidenceItems.length !== 1 ? 's' : ''})`,
                     'Assumptions & AI Reasoning Log',
                   ].map(f => (
                     <li key={f} className="flex items-center gap-3 p-2 rounded hover:bg-secondary/50">

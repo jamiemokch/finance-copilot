@@ -15,7 +15,7 @@ export default function Dashboard() {
   const {
     positionItems, activeProfileId, profiles, inboxItems, businessIdeas,
     complianceItems, saChecklist, plBreakdown, taxCalculation, arEntries,
-    apEntries, cashBreakdown, updateSAChecklistItem, vatWarning
+    apEntries, cashBreakdown, updateSAChecklistItem, vatWarning, evidenceCoverage
   } = useStore();
 
   const [expanded, setExpanded] = useState<ExpandedPanel>(null);
@@ -144,6 +144,30 @@ export default function Dashboard() {
             Full detail <ChevronRight className="w-4 h-4" />
           </Link>
         </div>
+
+        <Card className="p-5 mb-4 shadow-sm border-border">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Financial Confidence</p>
+              <p className="text-xs text-muted-foreground mt-1">How well your figures are supported by records.</p>
+            </div>
+            <Badge className={cn(
+              'w-fit capitalize',
+              evidenceCoverage.financialConfidenceLabel === 'high' ? 'bg-emerald-100 text-emerald-800' :
+              evidenceCoverage.financialConfidenceLabel === 'medium' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
+            )}>{evidenceCoverage.financialConfidenceLabel.replace('_', ' ')} · {evidenceCoverage.financialConfidenceScore}%</Badge>
+          </div>
+          {(() => {
+            const total = Object.values(evidenceCoverage.tierAmounts).reduce((sum, amount) => sum + amount, 0);
+            const bankSupported = total ? ((evidenceCoverage.tierAmounts['1'] + evidenceCoverage.tierAmounts['2']) / total) * 100 : 0;
+            const spreadsheet = total ? (evidenceCoverage.tierAmounts['3'] / total) * 100 : 0;
+            const manual = total ? (evidenceCoverage.tierAmounts['4'] / total) * 100 : 0;
+            return <><div className="flex h-3 rounded-full overflow-hidden bg-secondary mt-4" aria-label="Financial confidence coverage">
+              <div className="bg-emerald-500" style={{ width: `${bankSupported}%` }} /><div className="bg-amber-400" style={{ width: `${spreadsheet}%` }} /><div className="bg-red-400" style={{ width: `${manual}%` }} />
+            </div><div className="flex justify-between text-[11px] text-muted-foreground mt-2"><span>Receipts + bank {Math.round(bankSupported)}%</span><span>Spreadsheet {Math.round(spreadsheet)}%</span><span>Quick entry {Math.round(manual)}%</span></div></>;
+          })()}
+          {evidenceCoverage.financialConfidenceScore < 70 && <p className="text-sm text-primary mt-4">Add bank exports or attach receipts to strengthen your figures.</p>}
+        </Card>
 
         {/* ── Cash (full width) ── */}
         {cashKpi && (

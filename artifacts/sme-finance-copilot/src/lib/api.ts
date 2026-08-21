@@ -223,6 +223,8 @@ export interface APIInboxItem {
   id: string;
   profileId: string;
   evidenceId?: string | null;
+  sourceRowIndex?: number | null;
+  rawRowData?: unknown;
   date: string;
   description: string;
   amount?: number | null;
@@ -265,6 +267,14 @@ export interface APIEvidenceItem {
   confidence?: number | null;
   extractedData?: unknown;
   aiReasoning?: string | null;
+  evidenceType?: 'document' | 'bank_csv' | 'ledger' | 'manual';
+  mappingSchema?: unknown;
+  totalRows?: number;
+  processedRows?: number;
+  autoPostedRows?: number;
+  inboxRows?: number;
+  skippedRows?: number;
+  importStatus?: string;
   uploadedAt?: string;
 }
 

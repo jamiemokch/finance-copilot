@@ -58,6 +58,8 @@ export interface InboxItem {
     subOptions?: { label: string; isSuggested?: boolean }[];
   }[];
   customAnswer?: string;
+  evidenceId?: string | null;
+  sourceRowIndex?: number | null;
 }
 
 export interface ChatMessage {
@@ -81,6 +83,8 @@ export interface TransactionItem {
   amount: number;
   category: string;
   source: 'bank' | 'manual' | 'receipt';
+  evidenceTier?: number;
+  evidenceId?: string | null;
 }
 
 // ─── Evidence items ───────────────────────────────────────────────────────────
@@ -104,6 +108,13 @@ export interface EvidenceItem {
   status: EvidenceStatus;
   extractedLines?: number;
   linkedInboxItemId?: string;
+  evidenceType?: 'document' | 'bank_csv' | 'ledger' | 'manual';
+  totalRows?: number;
+  processedRows?: number;
+  autoPostedRows?: number;
+  inboxRows?: number;
+  skippedRows?: number;
+  importStatus?: string;
 }
 
 // ─── Peer benchmarking ────────────────────────────────────────────────────────
@@ -338,7 +349,7 @@ export interface AppState {
   positionItems: PositionItem[];
 
   transactions: TransactionItem[];
-  addTransaction: (transaction: Omit<TransactionItem, 'id'>) => void;
+  addTransaction: (transaction: Omit<TransactionItem, 'id'>) => Promise<void>;
 
   evidenceItems: EvidenceItem[];
   addEvidenceItem: (item: Omit<EvidenceItem, 'id'>) => string;
@@ -515,6 +526,8 @@ function mapInboxItem(item: APIInboxItem): InboxItem {
       { label: 'Not deductible — personal purchase', isSuggested: false },
     ],
     customAnswer: item.resolution ?? undefined,
+    evidenceId: item.evidenceId,
+    sourceRowIndex: item.sourceRowIndex,
   };
 }
 
@@ -533,6 +546,13 @@ function mapEvidenceItem(item: APIEvidenceItem): EvidenceItem {
     filename: item.filename,
     uploadedAt: item.uploadedAt?.split('T')[0] ?? new Date().toISOString().split('T')[0],
     status: statusMap[item.status] ?? 'received',
+    evidenceType: item.evidenceType,
+    totalRows: item.totalRows,
+    processedRows: item.processedRows,
+    autoPostedRows: item.autoPostedRows,
+    inboxRows: item.inboxRows,
+    skippedRows: item.skippedRows,
+    importStatus: item.importStatus,
   };
 }
 
@@ -609,6 +629,8 @@ function mapTransaction(t: APITransaction): TransactionItem {
     amount: t.amount,
     category: t.category,
     source: (src === 'bank' || src === 'manual' || src === 'receipt') ? src : 'manual',
+    evidenceTier: t.evidenceTier,
+    evidenceId: t.evidenceId,
   };
 }
 
@@ -825,12 +847,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
-  const addTransaction = useCallback((tx: Omit<TransactionItem, 'id'>) => {
+  const addTransaction = useCallback(async (tx: Omit<TransactionItem, 'id'>): Promise<void> => {
     const taxTreatment = tx.amount > 0 ? 'income' : 'deductible';
-    transactionsApi.create(activeProfileId, {
+    await transactionsApi.create(activeProfileId, {
       date: tx.date, description: tx.description, amount: tx.amount,
       category: tx.category, taxTreatment,
-    }).then(() => fetchAll(activeProfileId)).catch(console.error);
+    });
+    await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
 
   const addEvidenceItem = useCallback((item: Omit<EvidenceItem, 'id'>): string => {

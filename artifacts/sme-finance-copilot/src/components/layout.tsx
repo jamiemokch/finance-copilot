@@ -35,7 +35,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   };
 
   const navItems = [
-    { href: '/ingest',         label: 'Evidence',         icon: UploadCloud, sublabel: 'start here' },
+    { href: '/ingest',         label: 'Add Records',      icon: UploadCloud, sublabel: 'start here' },
     { href: '/dashboard',      label: 'Home',             icon: LayoutDashboard },
     { href: '/position',       label: 'Finances',         icon: WalletCards },
     { href: '/business-ideas', label: 'Business Ideas',   icon: Lightbulb, count: newIdeas },
