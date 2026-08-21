@@ -52,9 +52,10 @@ async function request(
     ...init,
     headers,
   });
+  const text = await response.text();
   return {
     status: response.status,
-    body: await response.json() as ResponseBody,
+    body: text ? JSON.parse(text) as ResponseBody : {},
   };
 }
 
@@ -113,8 +114,9 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
 
   try {
     await Promise.all(Object.values(userIds).map(createUser));
-    const [aliceProfileId, bobProfileId] = await Promise.all([
+    const [aliceProfileId, aliceSecondaryProfileId, bobProfileId] = await Promise.all([
       createProfile(userIds.alice, 'Alice import test'),
+      createProfile(userIds.alice, 'Alice second import test'),
       createProfile(userIds.bob, 'Bob import test'),
     ]);
     const [account] = await db.insert(financialAccountsTable).values({
@@ -129,6 +131,12 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
       currency: 'GBP',
       accountType: 'current',
     }).returning();
+    const [aliceSecondaryAccount] = await db.insert(financialAccountsTable).values({
+      profileId: aliceSecondaryProfileId,
+      displayName: 'Alice second account',
+      currency: 'GBP',
+      accountType: 'current',
+    }).returning();
     const [aliceSession, bobSession] = await Promise.all([
       createSessionFor(userIds.alice),
       createSessionFor(userIds.bob),
@@ -137,6 +145,66 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
     server = app.listen(0);
     await new Promise<void>((resolve) => server!.once('listening', resolve));
     testPort = (server.address() as AddressInfo).port;
+
+    const previewOnlyRows = [{
+      sourceRowNumber: 2,
+      sourceFingerprint: `preview-only-${suffix}`,
+      date: '2025-06-01',
+      amount: 42,
+      direction: 'money_in' as const,
+      description: 'Preview only',
+      reference: 'PREVIEW-1',
+      balance: 999,
+      validationStatus: 'valid' as const,
+      validationErrors: [],
+      rawRowData: ['2025-06-01', 'Preview only', '42.00'],
+    }];
+    const previewLedgerCountBefore = await db.select().from(transactionsTable)
+      .where(eq(transactionsTable.profileId, aliceProfileId));
+    const previewOnly = await previewRowsForProfile(aliceProfileId, account.id, previewOnlyRows);
+    const previewLedgerCountAfter = await db.select().from(transactionsTable)
+      .where(eq(transactionsTable.profileId, aliceProfileId));
+    assert.equal(previewOnly[0]?.selectedForCommit, true);
+    assert.equal(
+      previewLedgerCountAfter.length,
+      previewLedgerCountBefore.length,
+      'a preview must stage decisions without creating canonical ledger records',
+    );
+
+    const indistinguishablePreview = await previewRowsForProfile(aliceProfileId, account.id, [
+      {
+        sourceRowNumber: 2,
+        sourceFingerprint: `indistinguishable-${suffix}`,
+        date: '2025-06-03',
+        amount: -15,
+        direction: 'money_out' as const,
+        description: 'Unreferenced movement',
+        reference: null,
+        balance: null,
+        validationStatus: 'valid' as const,
+        validationErrors: [],
+        rawRowData: [],
+      },
+      {
+        sourceRowNumber: 3,
+        sourceFingerprint: `indistinguishable-${suffix}`,
+        date: '2025-06-03',
+        amount: -15,
+        direction: 'money_out' as const,
+        description: 'Unreferenced movement',
+        reference: null,
+        balance: null,
+        validationStatus: 'valid' as const,
+        validationErrors: [],
+        rawRowData: [],
+      },
+    ]);
+    assert.ok(
+      indistinguishablePreview.every((row) =>
+        row.duplicateStatus === 'possible_duplicate' && !row.selectedForCommit,
+      ),
+      'indistinguishable legitimate movements need an explicit selection decision',
+    );
 
     const registrationValues = {
       profileId: aliceProfileId,
@@ -240,6 +308,20 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
       1000,
     );
 
+    const [position, incomeTaxEstimate, selfAssessment] = await Promise.all([
+      request(aliceSession, `/api/profiles/${aliceProfileId}/position`),
+      request(aliceSession, `/api/profiles/${aliceProfileId}/income-tax-estimate`),
+      request(aliceSession, `/api/profiles/${aliceProfileId}/self-assessment/readiness`),
+    ]);
+    assert.equal(position.status, 200);
+    assert.equal(position.body.plBreakdown.profit, 0, 'unreviewed imports must not affect the position P&L');
+    assert.equal(incomeTaxEstimate.status, 200);
+    assert.equal(incomeTaxEstimate.body.profitLoss.taxableBusinessProfit, 0);
+    assert.equal(selfAssessment.status, 200);
+    assert.equal(selfAssessment.body.readiness.financialCoverage.taxableBusinessProfit, 0);
+    assert.equal(selfAssessment.body.readiness.financialCoverage.recordCount, 0);
+    assert.equal(position.body.cashPosition.netAvailable, -3500, 'bank balance metadata must not change cash position');
+
     const replay = await concurrentCommit();
     assert.equal(replay.status, 200);
     assert.equal(replay.body.replayed, true);
@@ -248,6 +330,41 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
       1,
       'a committed replay must not add a second canonical record',
     );
+
+    const crossFileDuplicate = await previewRowsForProfile(aliceProfileId, account.id, [{
+      sourceRowNumber: 7,
+      sourceFingerprint: row.sourceFingerprint,
+      date: row.date,
+      amount: row.amount,
+      direction: row.direction as 'money_in' | 'money_out' | null,
+      description: row.description,
+      reference: row.reference,
+      balance: row.balance,
+      validationStatus: 'valid',
+      validationErrors: [],
+      rawRowData: row.rawRowData as string[],
+    }]);
+    assert.equal(
+      crossFileDuplicate[0]?.duplicateStatus,
+      'already_imported',
+      'a matching movement with a stable reference must be blocked across files',
+    );
+
+    const crossFileDecision = await previewRowsForProfile(aliceProfileId, account.id, [{
+      sourceRowNumber: 8,
+      sourceFingerprint: row.sourceFingerprint,
+      date: row.date,
+      amount: row.amount,
+      direction: row.direction as 'money_in' | 'money_out' | null,
+      description: row.description,
+      reference: null,
+      balance: row.balance,
+      validationStatus: 'valid',
+      validationErrors: [],
+      rawRowData: row.rawRowData as string[],
+    }]);
+    assert.equal(crossFileDecision[0]?.duplicateStatus, 'possible_duplicate');
+    assert.equal(crossFileDecision[0]?.selectedForCommit, false);
 
     const pAndL = computePLBreakdown([imported], []);
     assert.equal(pAndL.profit, 0, 'unreviewed imports must not affect P&L');
@@ -317,6 +434,52 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
     assert.equal(reclaimed.status, 200, 'an expired worker lease must be recoverable');
     assert.equal(reclaimed.body.batch.status, 'committed');
 
+    const [resumableBatch] = await db.insert(bankImportBatchesTable).values({
+      profileId: aliceProfileId,
+      financialAccountId: account.id,
+      taxYearSnapshot: '2025/26',
+      accountingBasisSnapshot: 'cash',
+      filename: 'resume.csv',
+      objectPath: `/objects/uploads/${suffix}-resume`,
+      fileHash: `resume-${suffix}`,
+      status: 'preview_ready',
+      previewVersion: 1,
+      mappingVersion: 1,
+      confirmedMapping: {},
+    }).returning();
+    const resumed = await request(
+      aliceSession,
+      `/api/profiles/${aliceProfileId}/bank-imports/${resumableBatch.id}`,
+    );
+    assert.equal(resumed.status, 200, 'a saved preview must be retrievable after reload');
+    assert.equal(resumed.body.batch.status, 'preview_ready');
+    const discarded = await request(
+      aliceSession,
+      `/api/profiles/${aliceProfileId}/bank-imports/${resumableBatch.id}`,
+      { method: 'DELETE' },
+    );
+    assert.equal(discarded.status, 200);
+    assert.equal(discarded.body.batch.status, 'discarded');
+
+    const aliceSecondaryBatchAccess = await request(
+      aliceSession,
+      `/api/profiles/${aliceSecondaryProfileId}/bank-imports/${batch.id}`,
+    );
+    assert.equal(aliceSecondaryBatchAccess.status, 404, 'switching profiles must not expose another profile’s saved import');
+    const [alicePrimaryTransactions, aliceSecondaryTransactions] = await Promise.all([
+      request(aliceSession, `/api/profiles/${aliceProfileId}/transactions`),
+      request(aliceSession, `/api/profiles/${aliceSecondaryProfileId}/transactions`),
+    ]);
+    assert.equal(alicePrimaryTransactions.status, 200);
+    assert.ok(
+      alicePrimaryTransactions.body.some((transaction: { source: string; ledgerStatus: string }) =>
+        transaction.source === 'bank_csv' && transaction.ledgerStatus === 'active',
+      ),
+      'the active profile’s Financial Memory must contain its committed bank record',
+    );
+    assert.equal(aliceSecondaryTransactions.status, 200);
+    assert.equal(aliceSecondaryTransactions.body.length, 0, 'profile switching must refresh Financial Memory records');
+
     const privatePath = `/objects/uploads/${suffix}-commit`;
     const privateDownload = await request(aliceSession, `/api/storage/objects/uploads/${suffix}-commit`);
     assert.equal(privateDownload.status, 404, 'bank CSVs must not be downloadable by object path');
@@ -327,6 +490,7 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
     assert.equal(crossUserFile.status, 404, 'a different profile cannot download another profile’s CSV');
     assert.ok(privatePath);
     assert.ok(bobAccount.id);
+    assert.ok(aliceSecondaryAccount.id);
   } finally {
     if (server) await closeServer(server);
     if (sessionIds.length) {

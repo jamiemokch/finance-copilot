@@ -19,3 +19,12 @@ confirmed P&L and tax figures. Preserve immutable import snapshots; soft-void
 imported records instead of deleting them. Same-file retry handling relies on
 profile plus file hash, and commit processing requires a fenced lease token and
 row-level provenance uniqueness.
+
+**Verification:** Database-backed import safety tests must create a uniquely
+named disposable database, apply the current schema only there, and force-drop
+that database after the suite. The runner requires database create/drop
+privileges and must never fall back to shared development tables.
+
+**Why:** These tests deliberately exercise commits, leases, soft-voids, and
+profile isolation. Running them against development data could create or remove
+financial records during verification.

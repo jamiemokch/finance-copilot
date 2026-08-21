@@ -24,25 +24,26 @@ export function summarizeTaxYearLedger(
   if (!period) return null;
   const hasStarted = asOf >= period.start;
   const end = !hasStarted ? period.start : asOf < period.end ? asOf : period.end;
-  const records = hasStarted
+  const inScopeRecords = hasStarted
     ? transactions.filter((transaction) =>
       transaction.ledgerStatus !== 'voided'
       && transaction.date >= period.start
       && transaction.date <= end,
     )
     : [];
+  // Unreviewed bank movements are visible financial memory, not Self Assessment
+  // ledger input. Keep them out of both derived values and readiness record counts
+  // until the user explicitly classifies their accounting meaning.
+  const records = inScopeRecords.filter((transaction) =>
+    canonicalRecordType(transaction) !== 'unknown',
+  );
   const categoryMap = new Map<string, TaxYearLedgerCategory>();
   let totalIncome = 0;
   let totalExpenses = 0;
   let allowableExpenses = 0;
 
   for (const transaction of records) {
-    // Explicit record type is canonical. Signed amount remains a legacy fallback.
-    const recordType = transaction.recordType === 'income' || transaction.recordType === 'expense'
-      ? transaction.recordType
-      : transaction.recordType === 'unknown'
-        ? 'unknown'
-        : transaction.amount >= 0 ? 'income' : 'expense';
+    const recordType = canonicalRecordType(transaction);
     if (recordType === 'unknown') continue;
     const amount = Math.abs(transaction.amount);
     if (recordType === 'income') totalIncome += amount;
@@ -88,4 +89,13 @@ export function summarizeTaxYearLedger(
 
 function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function canonicalRecordType(transaction: Pick<Transaction, 'recordType' | 'amount'>) {
+  // Explicit record type is canonical. Signed amount remains a legacy fallback.
+  if (transaction.recordType === 'income' || transaction.recordType === 'expense') {
+    return transaction.recordType;
+  }
+  if (transaction.recordType === 'unknown') return 'unknown';
+  return transaction.amount >= 0 ? 'income' : 'expense';
 }
