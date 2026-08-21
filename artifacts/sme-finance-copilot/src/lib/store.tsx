@@ -515,7 +515,7 @@ const initialChatHistory: ChatSession[] = [
       { id: 'm1', role: 'user', content: 'How much tax do I owe so far this year?', timestamp: '10:00' },
       {
         id: 'm2', role: 'system',
-        content: "Based on your £35,000 confirmed trading profit and £10,200 property income, your estimated total liability for 23/24 is approximately £8,724 (income tax £6,526 + NI £2,198). After deducting prior payments on account of £1,800, the balance due on 31 January 2025 is approximately £6,924.\n\nNote: two Inbox items (Apple Store £1,249 and meeting room £150) could reduce this by up to £280 if classified as allowable expenses.",
+        content: "Based on your £35,000 confirmed trading profit and £10,200 property income, your estimated total liability for 23/24 is approximately £8,724 (income tax £6,526 + NI £2,198). After deducting prior payments on account of £1,800, the balance due on 31 January 2025 is approximately £6,924.\n\nNote: two Inbox items (Apple Store £1,249 and meeting room £150) could reduce this by up to £382 (income tax + Class 4 NI combined) if classified as allowable business expenses.",
         timestamp: '10:01',
       },
     ],
@@ -783,7 +783,7 @@ const initialComplianceItems: ComplianceItem[] = [
 const initialSAChecklist: SAChecklistItem[] = [
   { id: 'sa1', profileId: 'p2', label: 'Personal details verified', detail: 'UTR, NI number, address confirmed against HMRC records.', status: 'done', category: 'data' },
   { id: 'sa2', profileId: 'p2', label: 'Bank reconciliation complete', detail: 'All synced accounts balance — 142 transactions matched, revenue £39,800 confirmed.', status: 'done', category: 'data' },
-  { id: 'sa3', profileId: 'p2', label: 'Resolve Inbox items (2 pending)', detail: 'Apple Store £1,249 and meeting room £150 need classification before the tax figure is final. May reduce tax by up to £280.', status: 'pending', category: 'inbox' },
+  { id: 'sa3', profileId: 'p2', label: 'Resolve Inbox items (2 pending)', detail: 'Apple Store £1,249 and meeting room £150 need classification before the tax figure is final. Resolving as business expenses could reduce your tax bill by up to £382 (income tax + Class 4 NI combined).', status: 'pending', category: 'inbox' },
   { id: 'sa4', profileId: 'p2', label: 'Upload missing receipts', detail: '3 transactions over £100 have no linked receipt. Go to Evidence to upload.', status: 'pending', category: 'data' },
   { id: 'sa5', profileId: 'p2', label: 'Confirm rental income figures', detail: 'Q3 letting agent statement not yet uploaded — property profit estimate (£10,200) may change.', status: 'pending', category: 'data' },
   { id: 'sa6', profileId: 'p2', label: 'Complete SA100 & SA103 forms', detail: 'Self-assessment form and self-employment supplementary pages.', status: 'pending', category: 'filing' },
@@ -900,6 +900,10 @@ function classifyResolution(res: string): 'deductible' | 'personal' {
   return 'deductible';
 }
 
+// Baseline tax balance before any session changes — used to compute total savings
+// reported in SA checklist sa3 after inbox resolutions.
+const INITIAL_TAX_BALANCE_DUE = initialPositionItems.find(p => p.id === 'kpi2')?.rawValue ?? 6900;
+
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 const StoreContext = createContext<AppState | undefined>(undefined);
@@ -947,22 +951,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     inboxItems,
     resolveInboxItem: (id, res) => {
-      // 1. Mark inbox item as resolved
+      // 1. Locate item and mark it resolved
       const item = inboxItems.find(i => i.id === id);
       setInboxItems(prev => prev.map(i => i.id === id ? { ...i, status: 'resolved', customAnswer: res } : i));
 
-      // 2. Auto-mark SA checklist sa3 done when ALL p2 inbox items have been resolved
-      const otherPending = inboxItems.filter(i => i.profileId === item?.profileId && i.id !== id && i.status === 'pending');
-      if (otherPending.length === 0) {
-        setSAChecklist(prev => prev.map(sa => sa.id === 'sa3' ? { ...sa, status: 'done' as const } : sa));
+      // Determine whether ALL profile inbox items will be resolved after this action
+      const otherPending = inboxItems.filter(
+        i => i.profileId === item?.profileId && i.id !== id && i.status === 'pending'
+      );
+      const allDone = otherPending.length === 0;
+
+      // Helper: trim long classification labels for SA detail copy
+      const shortLabel = (s: string) => s.length > 48 ? s.slice(0, 45) + '…' : s;
+
+      // 2. Items with no amount — update SA status only, then return
+      if (!item?.amount) {
+        if (allDone) {
+          setSAChecklist(prev => prev.map(sa =>
+            sa.id === 'sa3' ? { ...sa, status: 'done' as const, detail: 'All Inbox items resolved.' } : sa
+          ));
+        }
+        return;
       }
 
-      // 3. If item has no amount, nothing more to do
-      if (!item?.amount) return;
+      // 3. Capture pre-resolve tax balance for savings calculation
+      const prevTaxBalanceDue = positionItems.find(p => p.id === 'kpi2')?.rawValue ?? INITIAL_TAX_BALANCE_DUE;
 
       // 4. Classify resolution
       const effect = classifyResolution(res);
-      if (effect === 'personal') return; // personal — no financial change
+      if (effect === 'personal') {
+        // Personal — no financial change; confirm classification in sa3 detail
+        setSAChecklist(prev => prev.map(sa => {
+          if (sa.id !== 'sa3') return sa;
+          const detail = `${item.description}: classified as personal expense — no tax change. ${
+            allDone ? 'All items resolved.' : '1 item still needs your input.'
+          }`;
+          return { ...sa, status: allDone ? 'done' as const : sa.status, detail };
+        }));
+        return;
+      }
 
       // 5. Compute updated P&L
       const amount = item.amount;
@@ -1027,6 +1054,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           basis: `Updated after resolving Inbox: "${item.description}" → ${res}. Taxable income £${tax.taxableIncome.toLocaleString()}.`,
         };
         return p;
+      }));
+
+      // 8. Update SA checklist sa3 with the actual confirmed tax saving
+      const taxSavingThisItem = Math.max(0, prevTaxBalanceDue - tax.balanceDue);
+      const totalSavingFromStart = Math.max(0, INITIAL_TAX_BALANCE_DUE - tax.balanceDue);
+
+      setSAChecklist(prev => prev.map(sa => {
+        if (sa.id !== 'sa3') return sa;
+        const detail = allDone
+          ? `All items resolved — £${totalSavingFromStart.toLocaleString()} total confirmed tax saving. Latest: ${item.description} → "${shortLabel(res)}".`
+          : `${item.description} → "${shortLabel(res)}" — £${taxSavingThisItem.toLocaleString()} tax saving confirmed. 1 item still needs your input.`;
+        return { ...sa, status: allDone ? 'done' as const : sa.status, detail };
       }));
     },
     chatHistory,

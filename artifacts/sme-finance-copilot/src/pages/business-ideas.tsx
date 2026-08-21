@@ -173,14 +173,21 @@ interface ScenarioMetrics {
   breakEvenNote?: string;
 }
 
-function computeScenario(ideaId: string, assumptions: AssumptionField[]): ScenarioMetrics {
+interface LiveFinancials {
+  totalRevenue: number;
+  tradingProfit: number;
+  taxBalanceDue: number;
+  availableCash: number;
+}
+
+function computeScenario(ideaId: string, assumptions: AssumptionField[], live: LiveFinancials): ScenarioMetrics {
   const v = (key: string) => assumptions.find(a => a.key === key)?.value ?? 0;
 
   if (ideaId === 'bi1') {
     const salary = v('salary');
     const growthPct = v('revenueGrowth');
     const recruitment = v('recruitmentCost');
-    const currentRevenue = 39800; // canonical: YTD revenue £39,800
+    const currentRevenue = live.totalRevenue; // live from Financial Memory
     const incrementalRevenue = Math.round(currentRevenue * growthPct / 100);
     const netOngoingYear1 = incrementalRevenue - salary;
     const taxSaving = Math.round(salary * 0.20);
@@ -192,7 +199,7 @@ function computeScenario(ideaId: string, assumptions: AssumptionField[]): Scenar
       plImpactYear1: netOngoingYear1,
       taxImpact: taxSaving,
       paybackMonths: payback,
-      benchmarkEffect: `Revenue per employee: ~£${newRevenuePerHead.toLocaleString()}/yr (from £39,800 solo) vs peer median £65,000`,
+      benchmarkEffect: `Revenue per employee: ~£${newRevenuePerHead.toLocaleString()}/yr (from £${currentRevenue.toLocaleString()} solo) vs peer median £65,000`,
       downsideNote: netOngoingYear1 < 0
         ? `If revenue grows by only ${growthPct}%, net annual shortfall is £${Math.abs(netOngoingYear1).toLocaleString()}. Ensure 6-month salary reserve (~£${Math.round(salary / 2).toLocaleString()}) before hiring.`
         : `Monitor monthly: if pipeline dries up, cash position deteriorates quickly. Keep 6-month reserve.`,
@@ -206,7 +213,7 @@ function computeScenario(ideaId: string, assumptions: AssumptionField[]): Scenar
     const targetDays = v('targetDebtorDays');
     const discountPct = v('earlyPaymentDiscount');
     const currentDays = 34;
-    const annualRevenue = 39800;
+    const annualRevenue = live.totalRevenue; // live from Financial Memory
     const daysImproved = Math.max(0, currentDays - targetDays);
     const cashReleased = Math.round(annualRevenue * daysImproved / 365);
     const discountCost = Math.round(annualRevenue * discountPct / 100);
@@ -457,15 +464,60 @@ function CommitForm({ idea, metrics, onCommit, onCancel }: {
   );
 }
 
+// ─── Live-derived idea text ───────────────────────────────────────────────────
+// Returns summary / currentPosition / whatMustBeTrue with live financial values
+// substituted, so idea cards stay consistent with Home and Finances after any
+// inbox resolution changes confirmed P&L or estimated tax.
+
+function getIdeaDynamicText(idea: BusinessIdea, live: LiveFinancials) {
+  switch (idea.id) {
+    case 'bi3':
+      return {
+        summary: `Any equipment bought before 5 April 2024 is fully deductible via AIA — reducing your taxable profit by the purchase price and cutting the £${live.taxBalanceDue.toLocaleString()} balance due. Hard deadline in days.`,
+        currentPosition: `A professional display or equipment (£500–£1,500) qualifies for AIA — the full purchase price deducted from 23/24 profit (£${live.tradingProfit.toLocaleString()}). Saves 20% of purchase price in tax.`,
+        whatMustBeTrue: [
+          idea.whatMustBeTrue[0],
+          `Profit of £${live.tradingProfit.toLocaleString()} is sufficient to benefit fully from the deduction`,
+          ...idea.whatMustBeTrue.slice(2),
+        ],
+      };
+    case 'bi5':
+      return {
+        summary: `If you're planning any equipment purchase anyway, bringing it forward to before 5 April 2024 pulls the full AIA deduction into this year's tax return — reducing the £${live.taxBalanceDue.toLocaleString()} January bill.`,
+        currentPosition: `Trading profit stands at £${live.tradingProfit.toLocaleString()} (confirmed). Any qualifying equipment bought before year-end is fully deductible via AIA (up to £1m/yr). Available cash £${live.availableCash.toLocaleString()}.`,
+        whatMustBeTrue: idea.whatMustBeTrue,
+      };
+    default:
+      return {
+        summary: idea.summary,
+        currentPosition: idea.currentPosition,
+        whatMustBeTrue: idea.whatMustBeTrue,
+      };
+  }
+}
+
 // ─── Idea Card ────────────────────────────────────────────────────────────────
 
 function IdeaCard({ idea }: { idea: BusinessIdea }) {
-  const { updateBusinessIdea, updateIdeaAssumption, commitDecision, setCopilotTrigger, decisionMemory, activeProfileId } = useStore();
+  const { updateBusinessIdea, updateIdeaAssumption, commitDecision, setCopilotTrigger, decisionMemory, activeProfileId,
+          plBreakdown, positionItems, cashBreakdown } = useStore();
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const [showBenchmarkDetail, setShowBenchmarkDetail] = useState(false);
 
-  const metrics = computeScenario(idea.id, idea.editableAssumptions);
+  // Derive live financial baseline from the same canonical store used by Home and Finances
+  const totalRevenue  = plBreakdown.revenues.reduce((s, r) => s + r.amount, 0);
+  const confirmedExp  = plBreakdown.confirmedExpenses.reduce((s, e) => s + e.amount, 0);
+  const tradingProfit = totalRevenue - confirmedExp;
+  const taxBalanceDue = positionItems.find(p => p.id === 'kpi2')?.rawValue ?? 6900;
+  const totalCash     = cashBreakdown.accounts.reduce((s, a) => s + a.balance, 0);
+  const availableCash = totalCash - cashBreakdown.taxReserve - cashBreakdown.apDueWithin30Days;
+  const live: LiveFinancials = { totalRevenue, tradingProfit, taxBalanceDue, availableCash };
+
+  // Dynamic text: idea cards that reference specific £ amounts derive them from live state
+  const dynamicText = getIdeaDynamicText(idea, live);
+
+  const metrics = computeScenario(idea.id, idea.editableAssumptions, live);
 
   const handleAssumptionChange = (key: string, value: number) => {
     updateIdeaAssumption(idea.id, key, value);
@@ -527,7 +579,7 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
           </div>
 
           <h3 className="text-xl font-serif text-foreground">{idea.title}</h3>
-          <p className="text-sm text-muted-foreground leading-relaxed max-w-3xl">{idea.summary}</p>
+          <p className="text-sm text-muted-foreground leading-relaxed max-w-3xl">{dynamicText.summary}</p>
 
           {/* Quantified impact pills */}
           <div className="flex flex-wrap gap-1.5 pt-0.5">
@@ -598,7 +650,7 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="p-4 bg-background border border-border rounded-xl">
                 <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mb-2 block">Current Position</span>
-                <p className="text-sm leading-relaxed">{idea.currentPosition}</p>
+                <p className="text-sm leading-relaxed">{dynamicText.currentPosition}</p>
               </div>
               <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl">
                 <span className="text-xs uppercase tracking-wider text-primary font-semibold mb-2 block">Proposed Action</span>
@@ -684,7 +736,7 @@ function IdeaCard({ idea }: { idea: BusinessIdea }) {
               <div>
                 <h4 className="font-semibold text-sm text-foreground mb-2">What must be true</h4>
                 <ul className="space-y-1.5">
-                  {idea.whatMustBeTrue.map((w, i) => (
+                  {dynamicText.whatMustBeTrue.map((w, i) => (
                     <li key={i} className="text-sm text-muted-foreground flex items-start gap-2">
                       <div className="w-1.5 h-1.5 rounded-full bg-primary/40 mt-1.5 shrink-0" />
                       {w}
