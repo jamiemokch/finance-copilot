@@ -64,6 +64,8 @@ export interface APIProfile {
   type: string;
   taxYear?: string | null;
   taxReserve?: number | null;
+  industry?: string;
+  vatRegistered?: boolean;
   cashAccounts?: unknown;
   arEntries?: unknown;
   apEntries?: unknown;
@@ -72,9 +74,25 @@ export interface APIProfile {
 
 export const profilesApi = {
   list: () => apiFetch<APIProfile[]>("/profiles"),
-  create: (data: { name: string; type?: string }) =>
+  create: (data: { name: string; type?: string; industry?: string }) =>
     apiFetch<APIProfile>("/profiles", {
       method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (
+    profileId: string,
+    data: {
+      name?: string;
+      industry?: string;
+      vatRegistered?: boolean;
+      taxReserve?: number;
+      cashAccounts?: Array<{ name: string; balance: number }>;
+      arEntries?: Array<{ name: string; amount: number; daysPastDue?: number; invoiceCount?: number }>;
+      apEntries?: Array<{ name: string; amount: number; daysUntilDue?: number }>;
+    },
+  ) =>
+    apiFetch<APIProfile>(`/profiles/${profileId}`, {
+      method: "PATCH",
       body: JSON.stringify(data),
     }),
 };
@@ -95,6 +113,7 @@ export interface APITaxCalculation {
 export interface APIPLBreakdown {
   revenues: number;
   confirmedExpenses: number;
+  nonDeductibleExpenses: number;
   pendingExpenses: number;
   profit: number;
 }
@@ -140,6 +159,23 @@ export interface APISAReadiness {
   totalCount: number;
 }
 
+export interface APIMonthlyDataPoint {
+  month: string;          // "2024-11"
+  revenue: number;
+  expenses: number;
+  profit: number;
+  cumulativeProfit: number;
+}
+
+export interface APIVATWarning {
+  currentRevenue: number;
+  threshold: number;
+  registrationThreshold: number;
+  warning: boolean;
+  urgency: 'none' | 'watch' | 'urgent';
+  message: string;
+}
+
 export interface APIFinancialPosition {
   plBreakdown: APIPLBreakdown;
   taxCalculation: APITaxCalculation;
@@ -149,6 +185,9 @@ export interface APIFinancialPosition {
   kpis: APIKPI[];
   saReadiness: APISAReadiness;
   pendingInboxCount: number;
+  monthlyTrend: APIMonthlyDataPoint[];
+  vatWarning: APIVATWarning | null;
+  nonDeductibleTotal?: number;
 }
 
 export const positionApi = {
@@ -246,6 +285,12 @@ export interface APITransaction {
   taxTreatment: string;
   source: string;
   evidenceId?: string | null;
+  accountingCategory?: string;
+  allowablePercentage?: number;
+  allowableAmount?: number | null;
+  capitalAllowanceType?: string | null;
+  vatMetadata?: { rate: 0 | 5 | 20; vatAmount: number | null; isVatInclusive: boolean } | null;
+  userOverride?: boolean;
   createdAt?: string;
 }
 

@@ -1,11 +1,12 @@
 /**
  * OpenAI integration for SME Finance Copilot.
- * Uses the Replit-managed AI Integrations proxy (AI_INTEGRATIONS_OPENAI_BASE_URL +
- * AI_INTEGRATIONS_OPENAI_API_KEY) with direct OPENAI_API_KEY as fallback.
+ * Uses Replit-managed AI Integrations proxy with direct key as fallback.
  *
- * - Evidence extraction: reads uploaded files and extracts financial fields.
- * - Copilot: answers questions grounded in the user's live financial context.
- * All arithmetic is done in finance.ts; this module only interprets/explains.
+ * - Evidence extraction: context-aware, structured accounting fields, VAT metadata.
+ * - Business ideas: real AI generation grounded in live financial data.
+ * - Copilot: answers grounded in live financial context.
+ *
+ * All arithmetic lives in finance.ts; this module interprets and advises only.
  */
 
 import OpenAI from 'openai';
@@ -16,116 +17,195 @@ let _client: OpenAI | null = null;
 function getClient(): OpenAI {
   if (!_client) {
     const baseURL = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
-    const apiKey  = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error('No OpenAI API key configured (AI_INTEGRATIONS_OPENAI_API_KEY or OPENAI_API_KEY)');
-    }
+    const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error('No OpenAI API key configured');
     _client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
   return _client;
 }
 
 export function isConfigured(): boolean {
-  return Boolean(
-    process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY,
-  );
+  return Boolean(process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY);
 }
 
 // ─── Evidence Extraction ──────────────────────────────────────────────────────
+
+export interface ExtractionContext {
+  businessType: string;  // sole_trader | limited_company
+  industry: string;      // technology | creative | professional_services | retail | other
+  uploadCategory: string; // user-selected category at upload time
+  priorTreatments: Array<{ description: string; treatment: string; category: string }>;
+}
 
 export interface ExtractedData {
   supplier: string | null;
   date: string | null;
   amount: number | null;
   description: string | null;
+  incomeOrExpense: 'income' | 'expense' | 'unclear';
   taxTreatment: 'deductible' | 'non_deductible' | 'income' | 'unclear';
+  accountingCategory: string; // office_costs | professional_fees | equipment | travel | meals | subscriptions | utilities | training | insurance | income | capital | other
+  capitalOrRevenue: 'revenue' | 'capital' | 'unclear';
+  allowablePercentage: number; // 0–100
+  capitalAllowanceType: 'AIA' | 'main_pool' | 'nil' | null;
+  vatMetadata: { rate: 0 | 5 | 20; vatAmount: number | null; isVatInclusive: boolean } | null;
+  hmrcBasisNote: string | null;
   confidence: number; // 0–1
   needsReview: boolean;
-  rawText?: string;
+  aiReasoning: string;
 }
 
-const EXTRACT_SYSTEM_PROMPT = `You are a UK sole-trader bookkeeping assistant. Extract financial details from the document provided.
+function buildExtractionPrompt(context: ExtractionContext): string {
+  const priorStr =
+    context.priorTreatments.length > 0
+      ? context.priorTreatments
+          .slice(-5)
+          .map((t) => `  • "${t.description}" → ${t.treatment} (${t.category})`)
+          .join('\n')
+      : '  (none yet)';
 
-Return ONLY valid JSON with these fields:
-- supplier: string or null (business/person who issued the document)
-- date: string or null (ISO 8601 date, e.g. "2024-11-15")
-- amount: number or null (total amount in GBP, positive for expenses, negative is wrong)
-- description: string or null (brief description of what was purchased/charged)
-- taxTreatment: one of "deductible" | "non_deductible" | "income" | "unclear"
-  - deductible: clear business expense (software, equipment, professional services, travel, etc.)
-  - non_deductible: personal expense or entertainment
-  - income: money received (invoice, payment receipt)
-  - unclear: mixed use or ambiguous purpose
-- confidence: number 0-1 (how confident are you in this extraction)
-- needsReview: boolean (true if confidence < 0.75 or taxTreatment is "unclear")
-- aiReasoning: string (1-2 sentences explaining your classification decision)
+  return `You are a UK sole-trader bookkeeping assistant. Extract and classify a financial document.
 
-UK tax rules to apply:
-- Software/subscriptions with business purpose: deductible
-- Equipment: deductible (capital allowance may apply for large amounts)
-- Personal phone bill: partially deductible (typically 50% business use)
-- Client entertainment: NOT deductible (HMRC disallows most entertainment)
-- Home office: deductible only if exclusively business use
-- Professional development directly relevant to trade: deductible`;
+BUSINESS CONTEXT:
+- Entity: ${context.businessType} in the ${context.industry} industry
+- User-selected category: "${context.uploadCategory}"
+- Recently confirmed treatments:
+${priorStr}
+
+Return ONLY valid JSON with these exact fields:
+- supplier: string | null
+- date: string | null (ISO 8601, e.g. "2024-11-15")
+- amount: number | null (total GBP, always positive — even for expenses)
+- description: string | null (concise, ≤10 words)
+- incomeOrExpense: "income" | "expense" | "unclear"
+- taxTreatment: "deductible" | "non_deductible" | "income" | "unclear"
+- accountingCategory: one of office_costs | professional_fees | equipment | travel | meals | subscriptions | utilities | training | insurance | income | capital | other
+- capitalOrRevenue: "revenue" | "capital" | "unclear"
+  (capital = asset useful life > 1 year, e.g. laptop, camera, tools; revenue = recurring cost)
+- allowablePercentage: integer 0–100 (business use %; 100 if fully business, 50 if half personal)
+- capitalAllowanceType: "AIA" | "main_pool" | "nil" | null
+  (AIA for qualifying plant & machinery; null if not capital)
+- vatMetadata: { "rate": 0|5|20, "vatAmount": number|null, "isVatInclusive": boolean } | null
+- hmrcBasisNote: string | null (e.g. "ITTOIA 2005 s34" or "CAA 2001 s38A")
+- confidence: number 0–1
+- needsReview: boolean (true if confidence < 0.75 OR mixed-use OR unclear)
+- aiReasoning: string (2–3 sentences: what you saw, how you classified it, HMRC basis)
+
+UK TAX RULES (apply these):
+- Software/cloud subscriptions for business: deductible, subscriptions, revenue, 100%
+- Equipment (laptop/camera/tools) ≥ £1,000 and useful life > 1yr: deductible, capital, AIA (sole trader < £1M/yr limit), capitalAllowanceType "AIA"
+- Equipment < £1,000: deductible, equipment, revenue, 100% (still fully deductible as revenue expense)
+- Mobile phone — wholly business: deductible, 100%; mixed-use: deductible, allowablePercentage e.g. 50%
+- Client entertainment (meals/events where clients present): NOT deductible — non_deductible, meals, allowablePercentage 0 (ITTOIA 2005 s45)
+- Business meals (working lunch, no clients): deductible, meals, 100%
+- Travel (business journey, not commuting): deductible, travel
+- Home office (simplified HMRC rate): deductible, office_costs
+- Professional services (accountant, solicitor, consultant): deductible, professional_fees
+- Training directly relevant to current trade: deductible, training
+- Insurance for business: deductible, insurance
+- Income / payment received (invoice paid): income, accountingCategory "income", allowablePercentage 100
+- Personal goods, groceries, clothing (non-uniform): non_deductible, allowablePercentage 0
+- If user's prior treatments suggest a pattern, apply it consistently`;
+}
+
+function normalizeExtracted(parsed: Record<string, unknown>): ExtractedData {
+  const allowablePct =
+    typeof parsed.allowablePercentage === 'number'
+      ? Math.min(100, Math.max(0, parsed.allowablePercentage))
+      : 100;
+
+  let vatMetadata: ExtractedData['vatMetadata'] = null;
+  if (parsed.vatMetadata && typeof parsed.vatMetadata === 'object') {
+    const v = parsed.vatMetadata as Record<string, unknown>;
+    vatMetadata = {
+      rate: ([0, 5, 20].includes(Number(v.rate)) ? Number(v.rate) : 0) as 0 | 5 | 20,
+      vatAmount: typeof v.vatAmount === 'number' ? v.vatAmount : null,
+      isVatInclusive: Boolean(v.isVatInclusive),
+    };
+  }
+
+  return {
+    supplier: typeof parsed.supplier === 'string' ? parsed.supplier : null,
+    date: typeof parsed.date === 'string' ? parsed.date : null,
+    amount:
+      typeof parsed.amount === 'number' ? Math.abs(parsed.amount) : null,
+    description: typeof parsed.description === 'string' ? parsed.description : null,
+    incomeOrExpense:
+      parsed.incomeOrExpense === 'income' || parsed.incomeOrExpense === 'expense'
+        ? parsed.incomeOrExpense
+        : 'unclear',
+    taxTreatment:
+      (['deductible', 'non_deductible', 'income', 'unclear'] as const).includes(
+        parsed.taxTreatment as string,
+      )
+        ? (parsed.taxTreatment as ExtractedData['taxTreatment'])
+        : 'unclear',
+    accountingCategory:
+      typeof parsed.accountingCategory === 'string' ? parsed.accountingCategory : 'other',
+    capitalOrRevenue:
+      parsed.capitalOrRevenue === 'capital' || parsed.capitalOrRevenue === 'revenue'
+        ? parsed.capitalOrRevenue
+        : 'unclear',
+    allowablePercentage: allowablePct,
+    capitalAllowanceType:
+      (['AIA', 'main_pool', 'nil'] as const).includes(
+        parsed.capitalAllowanceType as string,
+      )
+        ? (parsed.capitalAllowanceType as 'AIA' | 'main_pool' | 'nil')
+        : null,
+    vatMetadata,
+    hmrcBasisNote:
+      typeof parsed.hmrcBasisNote === 'string' ? parsed.hmrcBasisNote : null,
+    confidence:
+      typeof parsed.confidence === 'number'
+        ? Math.min(1, Math.max(0, parsed.confidence))
+        : 0.5,
+    needsReview:
+      typeof parsed.needsReview === 'boolean' ? parsed.needsReview : true,
+    aiReasoning:
+      typeof parsed.aiReasoning === 'string' ? parsed.aiReasoning : 'Extraction completed.',
+  };
+}
 
 export async function extractFromImageFile(
   base64Image: string,
   mimeType: string,
   filename: string,
-): Promise<ExtractedData & { aiReasoning: string }> {
+  context: ExtractionContext,
+): Promise<ExtractedData> {
   const client = getClient();
+  const systemPrompt = buildExtractionPrompt(context);
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o-mini',
-    max_tokens: 500,
+    max_tokens: 600,
     messages: [
-      {
-        role: 'system',
-        content: EXTRACT_SYSTEM_PROMPT,
-      },
+      { role: 'system', content: systemPrompt },
       {
         role: 'user',
         content: [
           {
             type: 'image_url',
-            image_url: {
-              url: `data:${mimeType};base64,${base64Image}`,
-              detail: 'high',
-            },
+            image_url: { url: `data:${mimeType};base64,${base64Image}`, detail: 'high' },
           },
-          {
-            type: 'text',
-            text: `Filename: ${filename}. Extract the financial details from this document.`,
-          },
+          { type: 'text', text: `Filename: ${filename}. Extract the financial details.` },
         ],
       },
     ],
     response_format: { type: 'json_object' },
   });
 
-  const raw = response.choices[0]?.message?.content ?? '{}';
   try {
-    const parsed = JSON.parse(raw);
-    return {
-      supplier: parsed.supplier ?? null,
-      date: parsed.date ?? null,
-      amount: typeof parsed.amount === 'number' ? Math.abs(parsed.amount) : null,
-      description: parsed.description ?? null,
-      taxTreatment: parsed.taxTreatment ?? 'unclear',
-      confidence: typeof parsed.confidence === 'number' ? Math.min(1, Math.max(0, parsed.confidence)) : 0.5,
-      needsReview: parsed.needsReview ?? true,
-      aiReasoning: parsed.aiReasoning ?? 'Extraction completed.',
-    };
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}');
+    return normalizeExtracted(parsed);
   } catch {
     return {
-      supplier: null,
-      date: null,
-      amount: null,
-      description: null,
-      taxTreatment: 'unclear',
-      confidence: 0,
-      needsReview: true,
-      aiReasoning: 'Could not parse document content.',
+      supplier: null, date: null, amount: null, description: null,
+      incomeOrExpense: 'unclear', taxTreatment: 'unclear',
+      accountingCategory: 'other', capitalOrRevenue: 'unclear',
+      allowablePercentage: 100, capitalAllowanceType: null, vatMetadata: null,
+      hmrcBasisNote: null, confidence: 0, needsReview: true,
+      aiReasoning: 'Could not parse image content.',
     };
   }
 }
@@ -133,69 +213,227 @@ export async function extractFromImageFile(
 export async function extractFromText(
   text: string,
   filename: string,
-): Promise<ExtractedData & { aiReasoning: string }> {
+  context: ExtractionContext,
+): Promise<ExtractedData> {
   const client = getClient();
+  const systemPrompt = buildExtractionPrompt(context);
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o-mini',
-    max_tokens: 500,
+    max_tokens: 600,
     messages: [
-      {
-        role: 'system',
-        content: EXTRACT_SYSTEM_PROMPT,
-      },
+      { role: 'system', content: systemPrompt },
       {
         role: 'user',
-        content: `Filename: ${filename}\n\nDocument text:\n${text.slice(0, 4000)}`,
+        content: `Filename: ${filename}\n\n${text.slice(0, 4000)}`,
       },
     ],
     response_format: { type: 'json_object' },
   });
 
-  const raw = response.choices[0]?.message?.content ?? '{}';
   try {
-    const parsed = JSON.parse(raw);
-    return {
-      supplier: parsed.supplier ?? null,
-      date: parsed.date ?? null,
-      amount: typeof parsed.amount === 'number' ? Math.abs(parsed.amount) : null,
-      description: parsed.description ?? null,
-      taxTreatment: parsed.taxTreatment ?? 'unclear',
-      confidence: typeof parsed.confidence === 'number' ? Math.min(1, Math.max(0, parsed.confidence)) : 0.5,
-      needsReview: parsed.needsReview ?? true,
-      rawText: text.slice(0, 500),
-      aiReasoning: parsed.aiReasoning ?? 'Extraction completed.',
-    };
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}');
+    return normalizeExtracted(parsed);
   } catch {
     return {
-      supplier: null,
-      date: null,
-      amount: null,
-      description: null,
-      taxTreatment: 'unclear',
-      confidence: 0,
-      needsReview: true,
-      rawText: text.slice(0, 200),
+      supplier: null, date: null, amount: null, description: null,
+      incomeOrExpense: 'unclear', taxTreatment: 'unclear',
+      accountingCategory: 'other', capitalOrRevenue: 'unclear',
+      allowablePercentage: 100, capitalAllowanceType: null, vatMetadata: null,
+      hmrcBasisNote: null, confidence: 0, needsReview: true,
       aiReasoning: 'Could not parse document content.',
     };
   }
 }
 
+// ─── Business Ideas (AI-generated) ───────────────────────────────────────────
+
+export interface AIBusinessIdea {
+  id: string;
+  category: 'tax' | 'cash' | 'growth' | 'operations' | 'pricing';
+  title: string;                // ≤8 words
+  summary: string;              // 1–2 sentences, cite actual numbers
+  currentPosition: string;      // 1 sentence describing current state
+  proposedAction: string;       // 1–2 actionable sentences
+  priorityTier: 'do_now' | 'consider' | 'watch';
+  plImpactRange: { min: number; max: number } | null;
+  cashImpactRange: { min: number; max: number } | null;
+  taxImpactRange: { min: number; max: number } | null;
+  paybackRange: { minMonths: number | null; maxMonths: number | null } | null;
+  urgencyNote: string | null;
+  editableAssumptions: Array<{
+    key: string; label: string; value: number; unit: string;
+    min: number; max: number; step: number;
+  }>;
+  whatMustBeTrue: string[];
+  source: string;               // HMRC rule or business principle
+  confidence: 'high' | 'medium' | 'low';
+  aiInsight: string;            // one-sentence insight for chart/card
+  status: 'new';
+  committedDecisionId: null;
+}
+
+const IDEAS_SYSTEM_PROMPT = `You are a UK sole-trader financial advisor generating specific, actionable business ideas.
+
+RULES:
+- Ground every idea in the exact numbers from the financial context. Do NOT invent numbers.
+- Calculate impacts mathematically from the provided figures (e.g. marginal tax rate × deduction amount).
+- Reference specific HMRC rules or credible business principles.
+- No generic advice. Every idea must be specific to the numbers shown.
+- Provide quantified impact ranges — not vague statements.
+- Do NOT reference specific client names from the AR data — use generic "outstanding invoices" language.
+- If pending inbox exists, include a tax/deduction idea prioritised do_now.
+- If AR is overdue, include a cash collection idea.
+- Include 1 growth or pricing idea grounded in current revenue level.
+- Generate exactly 4–6 ideas total.
+
+Return a JSON array named "ideas" with objects matching this schema exactly:
+{
+  "id": "snake_case_unique_id",
+  "category": "tax"|"cash"|"growth"|"operations"|"pricing",
+  "title": "≤8 words",
+  "summary": "1-2 sentences citing specific numbers",
+  "currentPosition": "1 sentence with exact numbers",
+  "proposedAction": "1-2 actionable sentences",
+  "priorityTier": "do_now"|"consider"|"watch",
+  "plImpactRange": {"min": number, "max": number} | null,
+  "cashImpactRange": {"min": number, "max": number} | null,
+  "taxImpactRange": {"min": number, "max": number} | null,
+  "paybackRange": {"minMonths": number|null, "maxMonths": number|null} | null,
+  "urgencyNote": "string"|null,
+  "editableAssumptions": [{"key":"string","label":"string","value":number,"unit":"string","min":number,"max":number,"step":number}],
+  "whatMustBeTrue": ["string"],
+  "source": "HMRC section or business principle",
+  "confidence": "high"|"medium"|"low",
+  "aiInsight": "one sentence insight"
+}`;
+
+export async function generateBusinessIdeasAI(
+  position: FinancialPosition,
+  profile: { name: string; industry: string; businessType: string; taxYear: string },
+  committedIdeaIds: string[],
+): Promise<AIBusinessIdea[]> {
+  const client = getClient();
+
+  const pl = position.plBreakdown;
+  const tax = position.taxCalculation;
+  const cash = position.cashPosition;
+  const totalAR = position.arEntries.reduce((s, e) => s + e.amount, 0);
+  const overdueAR = position.arEntries.filter((e) => e.daysPastDue > 0);
+  const totalGross = cash.accounts.reduce((s, a) => s + a.balance, 0);
+  const marginalRate = pl.profit > 50270 ? 42 : pl.profit > 12570 ? 29 : 0;
+
+  const context = `
+FINANCIAL POSITION — ${profile.name} (${profile.businessType}, ${profile.industry}, ${profile.taxYear})
+
+P&L:
+- Revenue YTD: £${pl.revenues.toLocaleString()}
+- Confirmed deductible expenses: £${pl.confirmedExpenses.toLocaleString()}
+- Non-deductible recorded: £${pl.nonDeductibleExpenses.toLocaleString()}
+- Taxable profit: £${pl.profit.toLocaleString()}
+- Pending (Inbox, unclassified): £${pl.pendingExpenses.toLocaleString()} across ${position.pendingInboxCount} items
+
+Tax (UK ${profile.taxYear}):
+${tax.lines.map((l) => `- ${l.label}: £${l.amount.toLocaleString()}`).join('\n')}
+- Total tax due: £${tax.balanceDue.toLocaleString()}
+- Reserve held: £${cash.taxReserve.toLocaleString()}
+- Shortfall: £${Math.max(0, tax.reserveGap).toLocaleString()}
+- Effective marginal rate (income tax + NI): ~${marginalRate}%
+
+Cash:
+- Total gross cash: £${totalGross.toLocaleString()}
+- Less tax reserve: £${cash.taxReserve.toLocaleString()}
+- Less AP due ≤30 days: £${cash.apDueWithin30Days.toLocaleString()}
+- Net available: £${cash.netAvailable.toLocaleString()}
+
+Receivables (AR): £${totalAR.toLocaleString()} outstanding (${overdueAR.length} overdue)
+Payables (AP) due within 30 days: £${cash.apDueWithin30Days.toLocaleString()}
+
+SA Readiness: ${position.saReadiness.completedCount}/${position.saReadiness.totalCount} items complete
+Already committed ideas (exclude from new generation): ${committedIdeaIds.join(', ') || 'none'}`;
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    max_tokens: 2000,
+    messages: [
+      { role: 'system', content: IDEAS_SYSTEM_PROMPT },
+      { role: 'user', content: context },
+    ],
+    response_format: { type: 'json_object' },
+  });
+
+  try {
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}');
+    const raw: unknown[] = Array.isArray(parsed.ideas) ? parsed.ideas : [];
+    return raw
+      .filter((i): i is Record<string, unknown> => typeof i === 'object' && i !== null)
+      .map((idea, idx) => ({
+        id: typeof idea.id === 'string' ? idea.id : `idea-${idx}`,
+        category: (['tax', 'cash', 'growth', 'operations', 'pricing'] as const).includes(
+          idea.category as string,
+        )
+          ? (idea.category as AIBusinessIdea['category'])
+          : 'operations',
+        title: typeof idea.title === 'string' ? idea.title : 'Opportunity',
+        summary: typeof idea.summary === 'string' ? idea.summary : '',
+        currentPosition: typeof idea.currentPosition === 'string' ? idea.currentPosition : '',
+        proposedAction: typeof idea.proposedAction === 'string' ? idea.proposedAction : '',
+        priorityTier: (['do_now', 'consider', 'watch'] as const).includes(
+          idea.priorityTier as string,
+        )
+          ? (idea.priorityTier as AIBusinessIdea['priorityTier'])
+          : 'consider',
+        plImpactRange:
+          idea.plImpactRange && typeof idea.plImpactRange === 'object'
+            ? (idea.plImpactRange as { min: number; max: number })
+            : null,
+        cashImpactRange:
+          idea.cashImpactRange && typeof idea.cashImpactRange === 'object'
+            ? (idea.cashImpactRange as { min: number; max: number })
+            : null,
+        taxImpactRange:
+          idea.taxImpactRange && typeof idea.taxImpactRange === 'object'
+            ? (idea.taxImpactRange as { min: number; max: number })
+            : null,
+        paybackRange:
+          idea.paybackRange && typeof idea.paybackRange === 'object'
+            ? (idea.paybackRange as { minMonths: number | null; maxMonths: number | null })
+            : null,
+        urgencyNote:
+          typeof idea.urgencyNote === 'string' ? idea.urgencyNote : null,
+        editableAssumptions: Array.isArray(idea.editableAssumptions)
+          ? (idea.editableAssumptions as AIBusinessIdea['editableAssumptions'])
+          : [],
+        whatMustBeTrue: Array.isArray(idea.whatMustBeTrue)
+          ? (idea.whatMustBeTrue as string[])
+          : [],
+        source: typeof idea.source === 'string' ? idea.source : 'Business best practice',
+        confidence: (['high', 'medium', 'low'] as const).includes(idea.confidence as string)
+          ? (idea.confidence as AIBusinessIdea['confidence'])
+          : 'medium',
+        aiInsight: typeof idea.aiInsight === 'string' ? idea.aiInsight : '',
+        status: 'new' as const,
+        committedDecisionId: null,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // ─── Copilot ──────────────────────────────────────────────────────────────────
 
-const COPILOT_SYSTEM_PROMPT = `You are a calm, plain-English financial co-pilot for a UK sole trader. 
-You have access to their current financial data shown below. 
-The numbers were calculated by deterministic UK tax logic — do NOT recalculate them. 
+const COPILOT_SYSTEM_PROMPT = `You are a calm, plain-English financial co-pilot for a UK sole trader.
+You have access to their current financial data shown below.
+The numbers were calculated by deterministic UK tax logic — do NOT recalculate them.
 Instead, explain, interpret, and advise based on them.
 
 Rules:
 - Always reference specific numbers from the financial context
-- Be concise: 2-4 paragraphs maximum
-- Flag uncertainty clearly ("this depends on...", "you should confirm with an accountant")  
+- Be concise: 2–4 paragraphs maximum
+- Flag uncertainty clearly ("this depends on…", "confirm with an accountant")
 - Never invent numbers not in the context
-- UK-specific: use HMRC terminology, reference correct allowances and deadlines
-- If the question is about something not in the context, say so honestly
-- Do NOT give generic financial advice — always ground it in their specific data`;
+- UK-specific: use HMRC terminology, correct allowances and deadlines
+- If the question is outside the context, say so honestly`;
 
 export async function getCopilotReply(
   message: string,
@@ -203,7 +441,6 @@ export async function getCopilotReply(
   profileName: string,
 ): Promise<{ reply: string; contextSummary: string }> {
   const client = getClient();
-
   const contextSummary = buildContextSummary(position, profileName);
 
   const response = await client.chat.completions.create({
@@ -214,14 +451,11 @@ export async function getCopilotReply(
         role: 'system',
         content: `${COPILOT_SYSTEM_PROMPT}\n\n--- FINANCIAL CONTEXT ---\n${contextSummary}`,
       },
-      {
-        role: 'user',
-        content: message,
-      },
+      { role: 'user', content: message },
     ],
   });
 
-  const reply = response.choices[0]?.message?.content ?? 'I was unable to generate a response.';
+  const reply = response.choices[0]?.message?.content ?? 'Unable to generate a response.';
   return { reply, contextSummary };
 }
 
@@ -229,33 +463,32 @@ function buildContextSummary(pos: FinancialPosition, profileName: string): strin
   const pl = pos.plBreakdown;
   const tax = pos.taxCalculation;
   const cash = pos.cashPosition;
-
   const arTotal = pos.arEntries.reduce((s, e) => s + e.amount, 0);
   const overdueAR = pos.arEntries.filter((e) => e.daysPastDue > 0);
 
   return `
-Business: ${profileName} (UK Sole Trader, 2024/25 tax year)
+Business: ${profileName} (UK Sole Trader, 2024/25)
 
-P&L Summary:
-- Revenue (confirmed): £${pl.revenues.toLocaleString()}
-- Expenses (confirmed, deductible): £${pl.confirmedExpenses.toLocaleString()}
+P&L:
+- Revenue: £${pl.revenues.toLocaleString()}
+- Allowable expenses: £${pl.confirmedExpenses.toLocaleString()}
+- Non-deductible recorded: £${pl.nonDeductibleExpenses.toLocaleString()}
 - YTD Profit: £${pl.profit.toLocaleString()}
-- Pending/unclassified expenses (Inbox): £${pl.pendingExpenses.toLocaleString()}
+- Pending (unclassified): £${pl.pendingExpenses.toLocaleString()}
 
-Tax Position:
+Tax:
 ${tax.lines.map((l) => `- ${l.label}: £${l.amount.toLocaleString()}`).join('\n')}
-- Total tax balance due: £${tax.balanceDue.toLocaleString()}
-- Tax reserve set aside: £${cash.taxReserve.toLocaleString()}
-- Tax gap (shortfall): £${Math.max(0, tax.reserveGap).toLocaleString()}
+- Total due: £${tax.balanceDue.toLocaleString()}
+- Reserve: £${cash.taxReserve.toLocaleString()} | Gap: £${Math.max(0, tax.reserveGap).toLocaleString()}
 
-Cash Position:
+Cash:
 - ${cash.accounts.map((a) => `${a.name}: £${a.balance.toLocaleString()}`).join(', ')}
 - Less tax reserve: −£${cash.taxReserve.toLocaleString()}
-- Less AP due within 30 days: −£${cash.apDueWithin30Days.toLocaleString()}
+- Less AP due 30d: −£${cash.apDueWithin30Days.toLocaleString()}
 - Net available: £${cash.netAvailable.toLocaleString()}
 
-Receivables: £${arTotal.toLocaleString()} owed${overdueAR.length > 0 ? ` (${overdueAR.length} overdue)` : ''}
-Inbox items pending review: ${pos.pendingInboxCount}
-SA Readiness: ${pos.saReadiness.completedCount}/${pos.saReadiness.totalCount} items complete
+AR: £${arTotal.toLocaleString()} (${overdueAR.length} overdue)
+Inbox pending: ${pos.pendingInboxCount}
+SA: ${pos.saReadiness.completedCount}/${pos.saReadiness.totalCount} complete
 `.trim();
 }

@@ -1,65 +1,48 @@
 ---
 name: SME Finance Copilot architecture
-description: Core design decisions for the SME Copilot — frontend + backend, auth, store shape, routing
+description: Architecture decisions for the full-stack SME Finance Copilot — what is real vs mocked, data flow, and key conventions.
 ---
 
-## What it is
-Full-stack React/Vite + Express/PostgreSQL Alpha-lite for UK sole traders.
-Frontend at `artifacts/sme-finance-copilot`, API server at `artifacts/api-server`.
-Replit OIDC auth (cookie sessions). Real OpenAI (gpt-4o-mini). Demo data auto-seeded on first login.
+## Stack
+- Frontend: React/Vite in artifacts/sme-finance-copilot (TypeScript, Tailwind, recharts, wouter)
+- API server: Express in artifacts/api-server (TypeScript, Drizzle ORM, Postgres, pnpm esbuild)
+- DB schema: lib/db/src/schema/app.ts
+- Auth: Replit OIDC (session cookie, requireAuth middleware)
 
-## Route map
-- `/` → Welcome (unauthenticated landing — "Sign in with Replit" button calls `login()` from store)
-- `/dashboard` → Dashboard
-- `/position` → Financial Position
-- `/business-ideas` → Business Ideas
-- `/tasks` → Tasks & Timeline (Inbox + Compliance)
-- `/copilot` → Copilot
-- `/settings` → Settings
-- `/ingest` → Evidence upload (real GCS + GPT-4o-mini OCR)
-- `/decisions`, `/tax`, `/year-end` → stub redirects
+## Data flow (live since the backend rewrite)
+1. User uploads evidence → POST /storage/uploads/direct (server-side GCS save)
+2. POST /evidence/:id/process → AI extraction (GPT-4o-mini) with ExtractionContext
+3. High-confidence (≥0.75) → auto-post transaction; low-confidence → Inbox item
+4. User resolves Inbox → PATCH /inbox/:id/resolve → write ledger transaction
+5. GET /position recomputes everything from transactions on demand (no stored P&L)
 
-## Auth gate (App.tsx)
-Uses wouter `<Redirect>` component (not `navigate()` calls during render — that causes setState-in-render).
-- Not authenticated + private route → `<Redirect to="/" />`
-- Authenticated + public route (/) → `<Redirect to="/dashboard" />`
-- While `isLoading` → render null
+## Key backend decisions
+- Finance arithmetic is server-side only (finance.ts); AI never calculates
+- Non-deductible items ARE recorded in ledger (taxTreatment: non_deductible) for transparency
+- Income items (high-confidence) auto-post as positive transactions
+- Mixed-use: allowableAmount = amount × allowablePercentage/100 (stored alongside full amount)
+- taxImpact on inbox resolution = computeTaxImpactDiff(profitBefore, profitAfter) — no flat %
+- Business Ideas = forecast layer only (decision_memory table, never touches transactions)
+- generateBusinessIdeasAI uses real GPT-4o-mini call via AI_INTEGRATIONS_OPENAI_BASE_URL
 
-## Store types (post-API migration)
-`store.tsx` internal implementation swapped from localStorage to API calls.
-Public interface unchanged: `useStore()` returns same shape as before.
-Added: `isAuthenticated`, `isLoading`, `authUser`, `login` to AppState.
+## Frontend store
+- store.tsx: StoreProvider fetches all data, exposes derived types
+- mapPLBreakdown: uses allowableAmount for deductible expenses (not raw amount)
+- nonDeductibleExpenses: separate PLBreakdown array, shown in UI but excluded from profit
+- monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal: all exposed from store
 
-### Present
-- `BusinessIdea`, `AssumptionField`, `DecisionMemoryEntry`, `SAChecklistItem`, `BenchmarkMetric`
-- All benchmark data flagged `isIllustrative: true`
+## API conventions
+- zod (not zod/v4) for route validation
+- Drizzle jsonb: pass JS objects directly, never JSON.stringify()
+- OpenAI: prefers AI_INTEGRATIONS_OPENAI_BASE_URL, falls back to OPENAI_API_KEY
 
-### Removed (do NOT use)
-- `DecisionCard`, `TaxIdea`, `decisionCards`, `taxIdeas`, `yearEndReadiness`
-- `updateDecisionCard`, `updateTaxIdeaStatus`
+## Demo seed
+- demo.ts: getDemoTransactions(), getDemoInboxItems(), getDemoSAChecklist()
+- DEMO_PROFILE_DEFAULTS: has industry:'technology', cashAccounts, arEntries, apEntries
+- demo route uses DEMO_PROFILE_DEFAULTS (renamed from DEMO_PROFILE_DATA)
+- All demo transactions now include accountingCategory, allowablePercentage, allowableAmount
 
-## API server build notes
-- esbuild bundles to `dist/index.mjs`. Workspace packages (`@workspace/db`, `@workspace/api-zod`) are bundled inline.
-- `zod` must be in api-server's direct `dependencies` (not just transitive). Import as `from "zod"` not `from "zod/v4"` — esbuild cannot resolve the `/v4` subpath export.
-- `pdf-parse` and other node_modules are handled by esbuild's external fallback (not in explicit external list but resolved at runtime).
-
-## Evidence upload flow (ingest.tsx)
-Server-side upload (avoids browser→GCS CORS entirely):
-1. `evidenceApi.uploadDirect(file)` → `POST /api/storage/uploads/direct` (octet-stream, 25MB limit) → `{ objectPath }`
-2. `evidenceApi.register(profileId, { filename, objectPath, mimeType, category })` → DB record
-3. `evidenceApi.process(profileId, evidenceId)` → GPT-4o-mini OCR + tax check → auto-tx or Inbox item
-
-Key: `ObjectStorageService.saveContent(buffer, contentType)` uses GCS client `.save()` directly (no signed URL needed server-side). objectPath normalised as `/objects/uploads/{uuid}`. `getObjectEntityFile(objectPath)` maps back to same GCS path for read-back during extraction.
-
-Verified end-to-end: PUT ✓, roundtrip ✓, AI extraction ✓, route 401-gated ✓ (not 404).
-
-## DB notes
-- `jsonb` columns in Drizzle: pass JavaScript objects/arrays directly — do NOT call `JSON.stringify()` before inserting. Drizzle serialises automatically; double-stringifying stores a JSON string literal not an object.
-
-## Key architecture decisions
-- Finance arithmetic is server-side only (`finance.ts`); AI interprets results, never calculates
-- `GET /profiles/:id/position` computes everything from DB on demand — nothing stored as computed
-- Confidence threshold 0.75: above + deductible → auto-create transaction; below → inbox item
-- Demo auto-seeds on first login via `POST /demo/seed` (idempotent)
-
-**Why:** TypeScript narrowing quirk — do not add `disabled={idea.status === 'actioned'}` inside a block already guarded by `idea.status !== 'actioned'`; the types have no overlap and TS2367 fires.
+## Incomplete / outstanding
+- Settings UI for industry + vatRegistered (backend PATCH endpoint exists, no frontend form)
+- End-to-end test for inbox resolution → tax recalculation loop
+- Mobile companion app (Expo) for on-the-go receipt capture

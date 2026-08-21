@@ -14,7 +14,7 @@ import {
 } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import {
-  DEMO_PROFILE_DATA,
+  DEMO_PROFILE_DEFAULTS,
   getDemoTransactions,
   getDemoInboxItems,
   getDemoSAChecklist,
@@ -48,13 +48,13 @@ router.post("/demo/reset", async (req, res) => {
     // Create fresh demo profile
     const [profile] = await db.insert(profilesTable).values({
       userId,
-      name: DEMO_PROFILE_DATA.name,
-      type: DEMO_PROFILE_DATA.type,
-      taxYear: DEMO_PROFILE_DATA.taxYear,
-      taxReserve: DEMO_PROFILE_DATA.taxReserve,
-      cashAccounts: DEMO_PROFILE_DATA.cashAccounts,
-      arEntries: DEMO_PROFILE_DATA.arEntries,
-      apEntries: DEMO_PROFILE_DATA.apEntries,
+      name: "Alex — Design & Consulting",
+      type: DEMO_PROFILE_DEFAULTS.type,
+      taxYear: "2024/25",
+      taxReserve: DEMO_PROFILE_DEFAULTS.taxReserve,
+      cashAccounts: DEMO_PROFILE_DEFAULTS.cashAccounts,
+      arEntries: DEMO_PROFILE_DEFAULTS.arEntries,
+      apEntries: DEMO_PROFILE_DEFAULTS.apEntries,
     }).returning();
 
     // Seed all demo data
@@ -92,13 +92,13 @@ router.post("/demo/seed", async (req, res) => {
     // First login — create demo profile
     const [profile] = await db.insert(profilesTable).values({
       userId,
-      name: DEMO_PROFILE_DATA.name,
-      type: DEMO_PROFILE_DATA.type,
-      taxYear: DEMO_PROFILE_DATA.taxYear,
-      taxReserve: DEMO_PROFILE_DATA.taxReserve,
-      cashAccounts: DEMO_PROFILE_DATA.cashAccounts,
-      arEntries: DEMO_PROFILE_DATA.arEntries,
-      apEntries: DEMO_PROFILE_DATA.apEntries,
+      name: "Alex — Design & Consulting",
+      type: DEMO_PROFILE_DEFAULTS.type,
+      taxYear: "2024/25",
+      taxReserve: DEMO_PROFILE_DEFAULTS.taxReserve,
+      cashAccounts: DEMO_PROFILE_DEFAULTS.cashAccounts,
+      arEntries: DEMO_PROFILE_DEFAULTS.arEntries,
+      apEntries: DEMO_PROFILE_DEFAULTS.apEntries,
     }).returning();
 
     await Promise.all([

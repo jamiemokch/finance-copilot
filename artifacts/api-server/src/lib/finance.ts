@@ -1,6 +1,11 @@
 /**
  * Deterministic UK Sole Trader tax and P&L calculations.
  * All arithmetic lives here; the AI never does maths — it only explains these results.
+ *
+ * Key principle: actual vs. allowable distinction.
+ * - `amount` on a transaction = what was actually paid
+ * - `allowableAmount` = the tax-deductible portion (amount × allowablePercentage/100)
+ * - Non-deductible items are RECORDED in the ledger but not deducted from profit
  */
 
 export interface TaxLine {
@@ -16,9 +21,10 @@ export interface TaxCalculation {
 
 export interface PLBreakdown {
   revenues: number;
-  confirmedExpenses: number;
+  confirmedExpenses: number;      // tax-allowable portion only (sum of allowableAmount)
+  nonDeductibleExpenses: number;  // recorded but not deductible (for transparency)
   pendingExpenses: number;
-  profit: number;
+  profit: number;                 // revenues − confirmedExpenses (actual taxable profit)
 }
 
 export interface AccountBalance {
@@ -62,6 +68,23 @@ export interface SAReadiness {
   totalCount: number;
 }
 
+export interface MonthlyDataPoint {
+  month: string;          // "2024-11"
+  revenue: number;
+  expenses: number;
+  profit: number;
+  cumulativeProfit: number;
+}
+
+export interface VATWarning {
+  currentRevenue: number;
+  threshold: number;       // £90,000
+  registrationThreshold: number;  // £90,000 (2024/25)
+  warning: boolean;
+  urgency: 'none' | 'watch' | 'urgent';
+  message: string;
+}
+
 export interface FinancialPosition {
   plBreakdown: PLBreakdown;
   taxCalculation: TaxCalculation;
@@ -71,6 +94,8 @@ export interface FinancialPosition {
   kpis: KPI[];
   saReadiness: SAReadiness;
   pendingInboxCount: number;
+  monthlyTrend: MonthlyDataPoint[];
+  vatWarning: VATWarning | null;
 }
 
 // ─── UK Sole Trader Tax 2024/25 ───────────────────────────────────────────────
@@ -84,16 +109,15 @@ const CLASS4_LOWER = 12_570;
 const CLASS4_UPPER = 50_270;
 const CLASS4_MAIN_RATE = 0.09;
 const CLASS4_ADDITIONAL_RATE = 0.02;
-const CLASS2_ANNUAL = 179.40; // £3.45/week × 52
+const CLASS2_ANNUAL = 179.40;
 const CLASS2_THRESHOLD = 12_570;
-// Simplified PoA: 50% of current year bill, due Jan 31
 const POA_RATE = 0.50;
+const VAT_THRESHOLD = 90_000;
 
 export function computeTaxForProfit(profit: number, taxReserve: number): TaxCalculation {
   const totalIncome = profit;
   const taxableIncome = Math.max(0, totalIncome - PERSONAL_ALLOWANCE);
 
-  // Income Tax
   let incomeTax = 0;
   if (taxableIncome > 0) {
     const basicBand = Math.min(taxableIncome, BASIC_RATE_LIMIT - PERSONAL_ALLOWANCE);
@@ -103,7 +127,6 @@ export function computeTaxForProfit(profit: number, taxReserve: number): TaxCalc
   }
   incomeTax = Math.round(incomeTax);
 
-  // Class 4 NI
   let class4Ni = 0;
   if (profit > CLASS4_LOWER) {
     const mainBand = Math.min(profit, CLASS4_UPPER) - CLASS4_LOWER;
@@ -113,57 +136,76 @@ export function computeTaxForProfit(profit: number, taxReserve: number): TaxCalc
   }
   class4Ni = Math.round(class4Ni);
 
-  // Class 2 NI
   const class2Ni = profit > CLASS2_THRESHOLD ? Math.round(CLASS2_ANNUAL) : 0;
 
   const totalTax = incomeTax + class4Ni + class2Ni;
   const poa = Math.round(totalTax * POA_RATE);
-  const balanceDue = totalTax; // Simplified: balance = total tax (Jan 31 filing)
+  const balanceDue = totalTax;
   const reserveGap = Math.max(0, balanceDue - taxReserve);
 
   const lines: TaxLine[] = [
-    {
-      label: `Income tax (${TAX_YEAR})`,
-      amount: incomeTax,
-    },
-    {
-      label: 'Class 4 NI (9% on profit above £12,570)',
-      amount: class4Ni,
-    },
+    { label: `Income tax (${TAX_YEAR})`, amount: incomeTax },
+    { label: 'Class 4 NI (9% on profit £12,570–£50,270)', amount: class4Ni },
   ];
   if (class2Ni > 0) {
     lines.push({ label: 'Class 2 NI (£3.45/week)', amount: class2Ni });
   }
-  lines.push({ label: 'Payments on Account (1st: Jan 31)', amount: poa });
+  lines.push({ label: 'Payments on Account due Jan 31', amount: poa });
 
-  return {
-    lines,
-    balanceDue,
-    reserveGap,
-  };
+  return { lines, balanceDue, reserveGap };
+}
+
+/**
+ * Compute the marginal tax saving from an additional deduction.
+ * Uses the difference between tax before and after deducting the expense.
+ */
+export function computeTaxImpactDiff(profitBefore: number, profitAfter: number): number {
+  const taxBefore = computeTaxForProfit(profitBefore, 0).balanceDue;
+  const taxAfter = computeTaxForProfit(profitAfter, 0).balanceDue;
+  return Math.round(taxBefore - taxAfter); // positive = tax saving
 }
 
 export function computePLBreakdown(
-  transactions: Array<{ amount: number; category: string; taxTreatment: string }>,
+  transactions: Array<{
+    amount: number;
+    category: string;
+    taxTreatment: string;
+    allowableAmount?: number | null;
+    allowablePercentage?: number | null;
+  }>,
   pendingInboxAmounts: number[],
 ): PLBreakdown {
   let revenues = 0;
   let confirmedExpenses = 0;
+  let nonDeductibleExpenses = 0;
 
   for (const tx of transactions) {
-    if (tx.category === 'income' || tx.taxTreatment === 'income') {
-      revenues += Math.abs(tx.amount);
-    } else if (
+    const isIncome = tx.category === 'income' || tx.taxTreatment === 'income';
+    const isDeductible =
       (tx.category === 'expense' || tx.category === 'expense_deductible') &&
       tx.taxTreatment === 'deductible' &&
-      tx.amount < 0
-    ) {
-      confirmedExpenses += Math.abs(tx.amount);
+      tx.amount < 0;
+    const isNonDeductible =
+      tx.taxTreatment === 'non_deductible' && tx.amount < 0;
+
+    if (isIncome) {
+      revenues += Math.abs(tx.amount);
+    } else if (isDeductible) {
+      // Use allowableAmount if set (handles mixed-use); otherwise full amount
+      const allowable =
+        tx.allowableAmount != null
+          ? Math.abs(tx.allowableAmount)
+          : Math.abs(tx.amount);
+      confirmedExpenses += allowable;
+    } else if (isNonDeductible) {
+      // Recorded but not deducted from profit
+      nonDeductibleExpenses += Math.abs(tx.amount);
     }
   }
 
   revenues = Math.round(revenues);
   confirmedExpenses = Math.round(confirmedExpenses);
+  nonDeductibleExpenses = Math.round(nonDeductibleExpenses);
 
   const pendingExpenses = Math.round(
     pendingInboxAmounts.reduce((sum, a) => sum + (a || 0), 0),
@@ -171,7 +213,7 @@ export function computePLBreakdown(
 
   const profit = revenues - confirmedExpenses;
 
-  return { revenues, confirmedExpenses, pendingExpenses, profit };
+  return { revenues, confirmedExpenses, nonDeductibleExpenses, pendingExpenses, profit };
 }
 
 export function computeCashPosition(
@@ -188,12 +230,7 @@ export function computeCashPosition(
   const grossCash = cashAccounts.reduce((sum, a) => sum + a.balance, 0);
   const netAvailable = Math.round(grossCash - taxReserve - apDueWithin30Days);
 
-  return {
-    accounts: cashAccounts,
-    taxReserve,
-    apDueWithin30Days,
-    netAvailable,
-  };
+  return { accounts: cashAccounts, taxReserve, apDueWithin30Days, netAvailable };
 }
 
 export function buildKPIs(
@@ -216,53 +253,130 @@ export function buildKPIs(
       label: 'YTD Profit',
       value: `£${pl.profit.toLocaleString()}`,
       trend: `${profitMargin}% margin`,
-      basis: `Revenue £${pl.revenues.toLocaleString()} less expenses £${pl.confirmedExpenses.toLocaleString()}`,
+      basis: `Revenue £${pl.revenues.toLocaleString()} less allowable expenses £${pl.confirmedExpenses.toLocaleString()}`,
       rawValue: pl.profit,
-      detail: pendingInboxCount > 0
-        ? `${pendingInboxCount} pending item${pendingInboxCount > 1 ? 's' : ''} in Inbox (£${pl.pendingExpenses.toLocaleString()} unclassified)`
-        : undefined,
+      detail:
+        pendingInboxCount > 0
+          ? `${pendingInboxCount} unclassified item${pendingInboxCount > 1 ? 's' : ''} (£${pl.pendingExpenses.toLocaleString()})`
+          : pl.nonDeductibleExpenses > 0
+          ? `£${pl.nonDeductibleExpenses.toLocaleString()} non-deductible recorded`
+          : undefined,
     },
     {
       id: 'kpi2',
       label: 'Est. Tax Due',
       value: `£${tax.balanceDue.toLocaleString()}`,
       trend: tax.reserveGap > 0 ? `↑ ${taxGapNote}` : `✓ ${taxGapNote}`,
-      basis: 'UK sole trader 2024/25 rates — income tax + Class 4 NI',
+      basis: 'UK sole trader 2024/25 — income tax + Class 4 NI',
       rawValue: tax.balanceDue,
-      detail: tax.reserveGap > 0 ? `£${tax.reserveGap.toLocaleString()} more to set aside` : undefined,
+      detail:
+        tax.reserveGap > 0
+          ? `£${tax.reserveGap.toLocaleString()} more to set aside`
+          : undefined,
     },
     {
       id: 'kpi3',
       label: 'Available Cash',
       value: `£${cash.netAvailable.toLocaleString()}`,
       trend: `After £${cash.taxReserve.toLocaleString()} tax reserve`,
-      basis: `Gross cash £${cash.accounts.reduce((s, a) => s + a.balance, 0).toLocaleString()} less tax reserve and AP`,
+      basis: `Gross £${cash.accounts.reduce((s, a) => s + a.balance, 0).toLocaleString()} less tax reserve and AP due`,
       rawValue: cash.netAvailable,
     },
     {
       id: 'kpi4',
       label: 'Invoices Owed',
       value: `£${totalAR.toLocaleString()}`,
-      trend: arEntries.some((e) => e.daysPastDue > 0) ? '⚠ Overdue invoices' : 'All current',
+      trend: arEntries.some((e) => e.daysPastDue > 0) ? '⚠ Overdue' : 'All current',
       basis: `${arEntries.length} outstanding invoice${arEntries.length !== 1 ? 's' : ''}`,
       rawValue: totalAR,
     },
     {
       id: 'kpi5',
       label: 'SA Readiness',
-      value: pendingInboxCount > 0
-        ? `${pendingInboxCount} item${pendingInboxCount > 1 ? 's' : ''} to review`
-        : 'On track',
+      value: pendingInboxCount > 0 ? `${pendingInboxCount} to review` : 'On track',
       trend: pendingInboxCount > 0 ? 'Action needed' : 'Filing Jan 31',
       basis:
         pendingInboxCount > 0
-          ? `Resolve inbox items to improve readiness`
+          ? 'Resolve inbox items to improve readiness'
           : 'Inbox clear — keep records updated',
     },
   ];
 }
 
-/** Format a number as GBP string */
+/** Monthly revenue/expense/profit breakdown for trend charts. */
+export function computeMonthlyTrend(
+  transactions: Array<{
+    date: string;
+    amount: number;
+    taxTreatment: string;
+    category: string;
+    allowableAmount?: number | null;
+  }>,
+): MonthlyDataPoint[] {
+  const byMonth = new Map<string, { revenue: number; expenses: number }>();
+
+  for (const tx of transactions) {
+    const month = tx.date.slice(0, 7); // "2024-11"
+    if (!byMonth.has(month)) byMonth.set(month, { revenue: 0, expenses: 0 });
+    const m = byMonth.get(month)!;
+
+    if (tx.taxTreatment === 'income' || tx.category === 'income') {
+      m.revenue += Math.abs(tx.amount);
+    } else if (tx.taxTreatment === 'deductible' && tx.amount < 0) {
+      const allowable =
+        tx.allowableAmount != null ? Math.abs(tx.allowableAmount) : Math.abs(tx.amount);
+      m.expenses += allowable;
+    }
+  }
+
+  const sorted = Array.from(byMonth.entries()).sort(([a], [b]) => a.localeCompare(b));
+  let cumulativeProfit = 0;
+
+  return sorted.map(([month, { revenue, expenses }]) => {
+    const profit = revenue - expenses;
+    cumulativeProfit += profit;
+    return {
+      month,
+      revenue: Math.round(revenue),
+      expenses: Math.round(expenses),
+      profit: Math.round(profit),
+      cumulativeProfit: Math.round(cumulativeProfit),
+    };
+  });
+}
+
+/** VAT threshold monitoring for 2024/25. */
+export function computeVATWarning(currentRevenue: number): VATWarning {
+  const pct = currentRevenue / VAT_THRESHOLD;
+  let urgency: VATWarning['urgency'] = 'none';
+  let warning = false;
+  let message = '';
+
+  if (currentRevenue >= VAT_THRESHOLD) {
+    urgency = 'urgent';
+    warning = true;
+    message = `Revenue £${currentRevenue.toLocaleString()} has crossed the VAT registration threshold (£${VAT_THRESHOLD.toLocaleString()}). You must register for VAT.`;
+  } else if (pct >= 0.85) {
+    urgency = 'urgent';
+    warning = true;
+    message = `Revenue is ${Math.round(pct * 100)}% of the VAT threshold. Register before reaching £${VAT_THRESHOLD.toLocaleString()} to avoid penalties.`;
+  } else if (pct >= 0.70) {
+    urgency = 'watch';
+    warning = true;
+    message = `Revenue is ${Math.round(pct * 100)}% of the £${VAT_THRESHOLD.toLocaleString()} VAT threshold. Monitor closely.`;
+  }
+
+  return {
+    currentRevenue: Math.round(currentRevenue),
+    threshold: VAT_THRESHOLD,
+    registrationThreshold: VAT_THRESHOLD,
+    warning,
+    urgency,
+    message,
+  };
+}
+
+/** Format a number as GBP string. */
 export function gbp(n: number): string {
   return `£${Math.round(n).toLocaleString()}`;
 }

@@ -393,8 +393,7 @@ export default function Evidence() {
       <div>
         <h1 className="text-3xl font-serif text-foreground">Evidence</h1>
         <p className="text-muted-foreground mt-1 text-lg max-w-2xl">
-          Upload your financial evidence. The AI extracts, verifies HMRC allowability,
-          and feeds confirmed items into your financial records.
+          Upload evidence to update your AI-verified financial records.
         </p>
       </div>
 
@@ -419,9 +418,8 @@ export default function Evidence() {
         <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <div>
-            <strong>{needsReview} file{needsReview !== 1 ? 's' : ''} in Inbox</strong> — AI flagged
-            {needsReview !== 1 ? ' these' : ' this'} for your decision before affecting tax.{' '}
-            <Link href="/tasks" className="underline font-medium">Resolve in Tasks → To Do</Link>.
+            <strong>{needsReview} file{needsReview !== 1 ? 's' : ''} in Inbox</strong> — AI requires your input.{' '}
+            <Link href="/tasks" className="underline font-medium">Resolve in Tasks</Link>.
           </div>
         </div>
       )}
@@ -430,7 +428,7 @@ export default function Evidence() {
       <div>
         <h2 className="text-xl font-serif font-medium mb-1">Upload evidence</h2>
         <p className="text-sm text-muted-foreground mb-5">
-          Choose the right category so the AI applies the correct tax rules. Files are uploaded securely and processed by GPT-4o.
+          Choose a category to extract and classify your documents.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {CATEGORIES.map(cat => (

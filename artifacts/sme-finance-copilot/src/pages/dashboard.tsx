@@ -15,7 +15,7 @@ export default function Dashboard() {
   const {
     positionItems, activeProfileId, profiles, inboxItems, businessIdeas,
     complianceItems, saChecklist, plBreakdown, taxCalculation, arEntries,
-    apEntries, cashBreakdown, updateSAChecklistItem,
+    apEntries, cashBreakdown, updateSAChecklistItem, vatWarning
   } = useStore();
 
   const [expanded, setExpanded] = useState<ExpandedPanel>(null);
@@ -43,7 +43,7 @@ export default function Dashboard() {
   // Dashboard shows only "Do now" tier ideas with impact numbers
   const previewIdeas = activeIdeas.filter(i => i.priorityTier === 'do_now').slice(0, 3);
   // Read tax gap from live store state — updates when inbox items are resolved
-  const taxBalanceDue = taxKpi?.rawValue ?? 6900;
+  const taxBalanceDue = taxKpi?.rawValue ?? 0;
   const taxReserve = cashBreakdown.taxReserve;
   const taxReserveGap = Math.max(0, taxBalanceDue - taxReserve);
 
@@ -103,6 +103,12 @@ export default function Dashboard() {
       </div>
 
       {/* ─── Financial Position ────────────────────────────────────────── */}
+      {vatWarning && vatWarning.warning && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2 text-sm mb-4">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-amber-800">{vatWarning.message}</p>
+        </div>
+      )}
       <section>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-serif font-medium">Financial position</h2>
@@ -110,7 +116,6 @@ export default function Dashboard() {
             Full detail <ChevronRight className="w-4 h-4" />
           </Link>
         </div>
-        <p className="text-xs text-muted-foreground mb-4">Click any figure for the breakdown.</p>
 
         {/* ── Cash (full width) ── */}
         {cashKpi && (
@@ -163,7 +168,11 @@ export default function Dashboard() {
                       <div className="flex justify-between items-center p-3 bg-background">
                         <div>
                           <p className="font-medium text-muted-foreground">− AP committed (due ≤30 days)</p>
-                          <p className="text-xs text-muted-foreground">Adobe £50 + WeWork £200 — not yet cleared</p>
+                          <p className="text-xs text-muted-foreground">
+                            {apEntries.length > 0
+                              ? apEntries.map(ap => `${ap.supplier} £${ap.amount.toLocaleString()}`).join(' + ') + ' — not yet cleared'
+                              : 'No AP due within 30 days'}
+                          </p>
                         </div>
                         <span className="font-semibold font-mono text-muted-foreground">−£{cashBreakdown.apDueWithin30Days}</span>
                       </div>
@@ -572,18 +581,19 @@ export default function Dashboard() {
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-sm text-amber-900 dark:text-amber-200">Tax reserve gap — £{taxReserveGap.toLocaleString()} shortfall</p>
                 <p className="text-xs text-amber-800 dark:text-amber-300 mt-1 leading-relaxed">
-                  Your January balance due is <strong>£{taxBalanceDue.toLocaleString()}</strong> but
-                  your reserve is only <strong>£{taxReserve.toLocaleString()}</strong>.
-                  You're <strong>£{taxReserveGap.toLocaleString()}</strong> short.
-                  Once Axiom pays their overdue invoice (£2,400), move it straight into your tax pot — that covers the gap.
+                  Balance due is <strong>£{taxBalanceDue.toLocaleString()}</strong> but
+                  your reserve is only <strong>£{taxReserve.toLocaleString()}</strong> —
+                  a <strong>£{taxReserveGap.toLocaleString()}</strong> shortfall.
                 </p>
                 <div className="flex gap-3 mt-2.5 flex-wrap">
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
                     Available cash: £{availableCash.toLocaleString()}
                   </span>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
-                    AR overdue: £{arEntries.filter(e => e.isOverdue).reduce((s, e) => s + e.amount, 0).toLocaleString()} (Axiom)
-                  </span>
+                  {arEntries.filter(e => e.isOverdue).length > 0 && (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
+                      Overdue AR: £{arEntries.filter(e => e.isOverdue).reduce((s, e) => s + e.amount, 0).toLocaleString()}
+                    </span>
+                  )}
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300 font-medium">
                     Deadline: 31 Jan 2025
                   </span>
@@ -600,7 +610,7 @@ export default function Dashboard() {
               All ideas <ChevronRight className="w-4 h-4" />
             </Link>
           </div>
-          <p className="text-xs text-muted-foreground -mt-2">Top-priority ideas grounded in your numbers</p>
+  
           {previewIdeas.length > 0 ? (
             <div className="space-y-3">
               {previewIdeas.map(idea => (

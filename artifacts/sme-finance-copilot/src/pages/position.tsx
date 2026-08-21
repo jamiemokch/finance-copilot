@@ -1,11 +1,12 @@
 import { Card, Badge, Button } from '@/components/ui';
 import { useStore, PositionItem, PLRevenue, PLExpense, TaxLine, AREntry, APEntry, CashAccount, CashFlow } from '@/lib/store';
 import { useState } from 'react';
-import { ShieldCheck, HelpCircle, AlertCircle, ChevronDown, ChevronUp, Upload, FileText, ArrowRight, BookMarked, TrendingUp } from 'lucide-react';
+import { ShieldCheck, HelpCircle, AlertCircle, ChevronDown, ChevronUp, Upload, FileText, ArrowRight, BookMarked, TrendingUp, AlertTriangle } from 'lucide-react';
 import { Link } from 'wouter';
+import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Legend } from 'recharts';
 
 export default function Position() {
-  const { positionItems, activeProfileId, profiles, plBreakdown, taxCalculation, arEntries, apEntries, cashBreakdown, decisionMemory } = useStore();
+  const { positionItems, activeProfileId, profiles, plBreakdown, taxCalculation, arEntries, apEntries, cashBreakdown, decisionMemory, monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
   const activeItems = positionItems.filter(i => i.profileId === activeProfileId);
   const activeDecisionMemory = decisionMemory.filter(d => d.profileId === activeProfileId && d.status === 'committed');
@@ -421,6 +422,129 @@ export default function Position() {
           <div className="space-y-3">{facts.map(renderItem)}</div>
         </div>
       )}
+
+      {/* Visualisations */}
+      <div className="space-y-4 pt-4">
+        {vatWarning?.warning && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3 text-sm">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <p className="text-amber-800 font-medium">{vatWarning.message}</p>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {monthlyTrend && monthlyTrend.length >= 2 && (
+            <div className="md:col-span-2">
+              <Card className="p-4 shadow-sm border-border">
+                <h4 className="text-sm font-semibold mb-1">Monthly trend</h4>
+                <div className="h-[200px] w-full mt-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={monthlyTrend} margin={{ top: 5, right: 0, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="colorRev" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                        </linearGradient>
+                        <linearGradient id="colorExp" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                      <XAxis dataKey="month" tickFormatter={(val) => new Date(val).toLocaleDateString('en-GB', { month: 'short' })} style={{ fontSize: 10 }} />
+                      <YAxis style={{ fontSize: 10 }} tickFormatter={(val) => `£${val}`} />
+                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Area type="monotone" dataKey="revenue" name="Revenue" stroke="#10b981" fillOpacity={1} fill="url(#colorRev)" />
+                      <Area type="monotone" dataKey="expenses" name="Expenses" stroke="#f59e0b" fillOpacity={1} fill="url(#colorExp)" />
+                      <Area type="monotone" dataKey="profit" name="Profit" stroke="#3b82f6" fill="none" strokeWidth={2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">Revenue, expenses and profit trends over time.</p>
+              </Card>
+            </div>
+          )}
+
+          {cashBreakdown && cashBreakdown.accounts && cashBreakdown.accounts.length > 0 && (
+            <Card className="p-4 shadow-sm border-border">
+              <h4 className="text-sm font-semibold mb-1">Cash breakdown</h4>
+              <div className="h-[160px] w-full mt-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart 
+                    data={[
+                      { name: 'Gross cash', val: cashBreakdown.accounts.reduce((sum, a) => sum + a.balance, 0) },
+                      { name: 'Tax reserve', val: cashBreakdown.taxReserve },
+                      { name: 'AP due', val: cashBreakdown.apDueWithin30Days },
+                      { name: 'Available', val: cashBreakdown.accounts.reduce((sum, a) => sum + a.balance, 0) - cashBreakdown.taxReserve - cashBreakdown.apDueWithin30Days }
+                    ]} 
+                    layout="vertical" 
+                    margin={{ top: 5, right: 20, left: 20, bottom: 5 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                    <XAxis type="number" style={{ fontSize: 10 }} tickFormatter={(val) => `£${val}`} />
+                    <YAxis dataKey="name" type="category" style={{ fontSize: 10 }} width={80} />
+                    <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} cursor={{fill: 'transparent'}} />
+                    <Bar dataKey="val" radius={[0, 4, 4, 0]}>
+                      {['#10b981', '#f59e0b', '#64748b', '#3b82f6'].map((color, index) => (
+                        <Cell key={`cell-${index}`} fill={color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Current cash position vs immediate obligations.</p>
+            </Card>
+          )}
+
+          {taxLinesRaw && taxLinesRaw.filter(t => t.amount !== 0).length > 0 && (
+            <Card className="p-4 shadow-sm border-border">
+              <h4 className="text-sm font-semibold mb-1">Tax estimate</h4>
+              <div className="h-[160px] w-full mt-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={taxLinesRaw.filter(t => t.amount !== 0)} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                    <XAxis type="number" style={{ fontSize: 10 }} tickFormatter={(val) => `£${val}`} />
+                    <YAxis dataKey="label" type="category" style={{ fontSize: 10 }} width={80} />
+                    <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} cursor={{fill: 'transparent'}} />
+                    <Bar dataKey="amount" fill="#64748b" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Breakdown of estimated tax obligations.</p>
+            </Card>
+          )}
+
+          {arEntries && arEntries.length > 0 && (
+            <Card className="p-4 shadow-sm border-border">
+              <h4 className="text-sm font-semibold mb-1">Receivables</h4>
+              <div className="h-[160px] w-full mt-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={arEntries} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                    <XAxis type="number" style={{ fontSize: 10 }} tickFormatter={(val) => `£${val}`} />
+                    <YAxis dataKey="customer" type="category" style={{ fontSize: 10 }} width={80} />
+                    <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} cursor={{fill: 'transparent'}} />
+                    <Bar dataKey="amount" radius={[0, 4, 4, 0]}>
+                      {arEntries.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.isOverdue ? '#f59e0b' : '#10b981'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Outstanding customer invoices.</p>
+            </Card>
+          )}
+          
+          {nonDeductibleTotal > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <p className="text-amber-800">£{nonDeductibleTotal.toLocaleString()} recorded as non-deductible — kept for your records, excluded from tax.</p>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Decision Impact — forecast if committed decisions are actioned */}
       {activeDecisionMemory.length > 0 && (

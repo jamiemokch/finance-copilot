@@ -5,6 +5,7 @@ import {
   type APITransaction, type APIFinancialPosition, type APIInboxItem,
   type APIEvidenceItem, type APIDecision, type APIBusinessIdea,
   type APISAChecklistItem, type AuthUser,
+  type APIMonthlyDataPoint, type APIVATWarning,
 } from './api';
 
 // ─── Core entity types ────────────────────────────────────────────────────────
@@ -251,6 +252,7 @@ export interface PLBreakdown {
   revenues: PLRevenue[];
   confirmedExpenses: PLExpense[];
   pendingExpenses: PLExpense[];
+  nonDeductibleExpenses: PLExpense[];
 }
 
 export interface TaxLine {
@@ -363,6 +365,10 @@ export interface AppState {
   arEntries: AREntry[];
   apEntries: APEntry[];
   cashBreakdown: CashBreakdown;
+  monthlyTrend: APIMonthlyDataPoint[];
+  vatWarning: APIVATWarning | null;
+  nonDeductibleTotal: number;
+  taxLinesRaw: Array<{ label: string; amount: number }>;
 
   copilotTrigger: string | null;
   setCopilotTrigger: (msg: string | null) => void;
@@ -379,9 +385,28 @@ function mapPLBreakdown(rawTxns: APITransaction[], inbox: InboxItem[]): PLBreakd
 
   const confirmedExpenses: PLExpense[] = rawTxns
     .filter(t => t.amount < 0 && t.taxTreatment === 'deductible')
+    .map(t => {
+      // Use allowableAmount if set (mixed-use items); otherwise full amount
+      const displayAmount = t.allowableAmount != null
+        ? Math.abs(t.allowableAmount)
+        : Math.abs(t.amount);
+      const mixedNote = (t.allowablePercentage != null && t.allowablePercentage < 100)
+        ? ` (${t.allowablePercentage}% business use)` : '';
+      return {
+        label: t.description + mixedNote,
+        amount: displayAmount,
+        category: t.accountingCategory ?? t.category,
+        basis: 'Confirmed deductible',
+      };
+    });
+
+  const nonDeductibleExpenses: PLExpense[] = rawTxns
+    .filter(t => t.amount < 0 && t.taxTreatment === 'non_deductible')
     .map(t => ({
-      label: t.description, amount: Math.abs(t.amount),
-      category: t.category, basis: 'Confirmed deductible',
+      label: t.description,
+      amount: Math.abs(t.amount),
+      category: t.accountingCategory ?? t.category,
+      basis: 'Recorded — not deductible (personal)',
     }));
 
   const pendingExpenses: PLExpense[] = inbox
@@ -391,7 +416,7 @@ function mapPLBreakdown(rawTxns: APITransaction[], inbox: InboxItem[]): PLBreakd
       basis: 'Inbox — awaiting classification', isPending: true, inboxItemId: i.id,
     }));
 
-  return { revenues, confirmedExpenses, pendingExpenses };
+  return { revenues, confirmedExpenses, pendingExpenses, nonDeductibleExpenses };
 }
 
 function mapTaxCalculation(pos: APIFinancialPosition): TaxCalculation {
@@ -577,7 +602,7 @@ function mapTransaction(t: APITransaction): TransactionItem {
 
 // ─── Static data (not from API) ───────────────────────────────────────────────
 
-const EMPTY_PL: PLBreakdown = { revenues: [], confirmedExpenses: [], pendingExpenses: [] };
+const EMPTY_PL: PLBreakdown = { revenues: [], confirmedExpenses: [], pendingExpenses: [], nonDeductibleExpenses: [] };
 const EMPTY_TAX: TaxCalculation = {
   lines: [], unresolvedItems: [], assumptions: [], taxBasis: 'Loading…',
 };
@@ -709,6 +734,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const positionItems: PositionItem[] = rawPosition
     ? mapPositionItems(rawPosition, activeProfileId)
     : [];
+
+  const monthlyTrend: APIMonthlyDataPoint[] = rawPosition?.monthlyTrend ?? [];
+  const vatWarning: APIVATWarning | null = rawPosition?.vatWarning ?? null;
+  const nonDeductibleTotal: number = rawPosition?.nonDeductibleTotal ?? 0;
+  const taxLinesRaw: Array<{ label: string; amount: number }> = rawPosition?.taxCalculation?.lines ?? [];
 
   // ── Mutations
 
@@ -922,6 +952,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     arEntries,
     apEntries,
     cashBreakdown,
+    monthlyTrend,
+    vatWarning,
+    nonDeductibleTotal,
+    taxLinesRaw,
 
     copilotTrigger,
     setCopilotTrigger,

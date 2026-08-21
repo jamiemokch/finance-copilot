@@ -28,6 +28,9 @@ export const profilesTable = pgTable('profiles', {
   apEntries: jsonb('ap_entries').notNull().default('[]'),
   // Tax reserve the user has set aside
   taxReserve: doublePrecision('tax_reserve').notNull().default(3500),
+  // Industry/business context for AI classification
+  industry: text('industry').notNull().default('other'),
+  vatRegistered: boolean('vat_registered').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .notNull()
@@ -88,6 +91,13 @@ export const transactionsTable = pgTable('transactions', {
   // manual | extracted | demo
   source: text('source').notNull().default('manual'),
   evidenceId: uuid('evidence_id'),
+  // Structured accounting fields
+  accountingCategory: text('accounting_category').notNull().default('other'),
+  allowablePercentage: doublePrecision('allowable_percentage').notNull().default(100),
+  allowableAmount: doublePrecision('allowable_amount'),   // null → use full |amount|
+  capitalAllowanceType: text('capital_allowance_type'),   // AIA | main_pool | nil | null
+  vatMetadata: jsonb('vat_metadata'),                     // {rate, vatAmount, isVatInclusive} | null
+  userOverride: boolean('user_override').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
