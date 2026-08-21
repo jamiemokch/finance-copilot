@@ -19,6 +19,7 @@ import Ingest from '@/pages/ingest';
 import Copilot from '@/pages/copilot';
 import Match from '@/pages/match';
 import Settings from '@/pages/settings';
+import FinancialMemory from '@/pages/financial-memory';
 
 const queryClient = new QueryClient();
 
@@ -76,7 +77,8 @@ function Router() {
           <Route path="/exceptions" component={Tasks} />
           <Route path="/copilot" component={Copilot} />
           <Route path="/settings" component={Settings} />
-          <Route path="/memory" component={Position} />
+          <Route path="/memory/:entryId" component={FinancialMemory} />
+          <Route path="/memory" component={FinancialMemory} />
           <Route path="/ingest" component={Ingest} />
           <Route path="/match" component={Match} />
           <Route component={NotFound} />

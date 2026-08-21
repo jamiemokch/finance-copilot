@@ -2,6 +2,7 @@ import { Button, Card, Input, Label, Select } from '@/components/ui';
 import { useStore, type TransactionItem } from '@/lib/store';
 import { CheckCircle2, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { Link } from 'wouter';
 
 type RecordType = 'income' | 'expense';
 type FormValues = {
@@ -139,7 +140,7 @@ export default function AddRecords() {
     </Card>
 
     <section>
-      <div className="flex items-end justify-between gap-4 mb-3"><div><h2 className="text-xl font-serif">Your records</h2><p className="text-sm text-muted-foreground">Saved to your business profile and available after you sign in again.</p></div><span className="text-sm text-muted-foreground">{records.length} record{records.length === 1 ? '' : 's'}</span></div>
+      <div className="flex items-end justify-between gap-4 mb-3"><div><h2 className="text-xl font-serif">Your records</h2><p className="text-sm text-muted-foreground">Saved to your business profile and available after you sign in again.</p></div><div className="flex items-center gap-3"><Link href="/memory" className="text-sm text-primary font-medium hover:underline">View Financial Memory</Link><span className="text-sm text-muted-foreground">{records.length} record{records.length === 1 ? '' : 's'}</span></div></div>
       <Card className="divide-y divide-border overflow-hidden">
         {records.length ? records.map(record => <div key={record.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="min-w-0"><div className="flex items-center gap-2"><span className={`text-xs font-medium px-2 py-0.5 rounded-full ${record.recordType === 'income' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{record.recordType === 'income' ? 'Income' : 'Expense'}</span><span className="text-xs text-muted-foreground">{new Date(record.date).toLocaleDateString('en-GB')}</span></div><p className="font-medium mt-1">{record.description}</p><p className="text-xs text-muted-foreground mt-1">{record.category.replaceAll('_', ' ')}{record.note ? ` · ${record.note}` : ''}</p></div>

@@ -186,27 +186,48 @@ export interface EvidenceInput {
   category?: string;
 }
 
+export type TransactionRecordType = typeof TransactionRecordType[keyof typeof TransactionRecordType];
+
+
+export const TransactionRecordType = {
+  income: 'income',
+  expense: 'expense',
+} as const;
+
 export interface Transaction {
   id: string;
   profileId: string;
   date: string;
   description: string;
   amount: number;
+  recordType: TransactionRecordType;
   category: string;
+  /** @nullable */
+  note?: string | null;
   taxTreatment: string;
   source: string;
   /** @nullable */
   evidenceId?: string | null;
   createdAt: string;
+  updatedAt: string;
 }
+
+export type TransactionInputRecordType = typeof TransactionInputRecordType[keyof typeof TransactionInputRecordType];
+
+
+export const TransactionInputRecordType = {
+  income: 'income',
+  expense: 'expense',
+} as const;
 
 export interface TransactionInput {
   date: string;
+  recordType: TransactionInputRecordType;
   description: string;
   amount: number;
   category: string;
-  taxTreatment?: string;
-  source?: string;
+  /** @nullable */
+  note?: string | null;
 }
 
 export interface InboxSubOption {

@@ -8,7 +8,8 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "push": "drizzle-kit push --config ./drizzle.config.ts && node ./scripts/backfill-record-types.mjs",
+    "push": "drizzle-kit push --config ./drizzle.config.ts",
+    "migrate-legacy-record-types-once": "node ./scripts/backfill-record-types.mjs",
     "push-force": "drizzle-kit push --force --config ./drizzle.config.ts"
   },
   "dependencies": {

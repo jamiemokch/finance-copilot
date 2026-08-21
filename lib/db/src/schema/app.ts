@@ -3,6 +3,7 @@ import {
   doublePrecision,
   integer,
   jsonb,
+  index,
   pgTable,
   text,
   timestamp,
@@ -98,7 +99,7 @@ export const transactionsTable = pgTable('transactions', {
   description: text('description').notNull(),
   // positive = income, negative = expense
   amount: doublePrecision('amount').notNull(),
-  recordType: text('record_type').notNull().default('expense'),
+  recordType: text('record_type').notNull(),
   note: text('note'),
   // income | expense | ar | ap
   category: text('category').notNull().default('expense'),
@@ -120,13 +121,19 @@ export const transactionsTable = pgTable('transactions', {
   vatMetadata: jsonb('vat_metadata'),                     // {rate, vatAmount, isVatInclusive} | null
   userOverride: boolean('user_override').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
 }, (table) => [
   uniqueIndex('transactions_evidence_row_unique').on(table.evidenceId, table.sourceRowIndex),
+  index('transactions_profile_date_idx').on(table.profileId, table.date, table.createdAt),
 ]);
 
 export const insertTransactionSchema = createInsertSchema(transactionsTable).omit({
   id: true,
   createdAt: true,
+  updatedAt: true,
 });
 export type Transaction = typeof transactionsTable.$inferSelect;
 export type InsertTransaction = z.infer<typeof insertTransactionSchema>;

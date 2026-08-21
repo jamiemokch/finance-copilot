@@ -76,6 +76,25 @@ router.get("/profiles/:profileId/transactions", async (req, res) => {
   }
 });
 
+router.get("/profiles/:profileId/transactions/:transactionId", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const transactionId = z.string().uuid().safeParse(req.params.transactionId);
+  if (!transactionId.success) { res.status(400).json({ error: "Invalid record ID" }); return; }
+  try {
+    const profile = await ownedProfile(req);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [txn] = await db.select().from(transactionsTable).where(and(
+      eq(transactionsTable.id, transactionId.data),
+      eq(transactionsTable.profileId, profile.id),
+    ));
+    if (!txn) { res.status(404).json({ error: "Record not found" }); return; }
+    res.json(txn);
+  } catch (err) {
+    req.log.error(err);
+    res.status(500).json({ error: "Failed to get transaction" });
+  }
+});
+
 router.post("/profiles/:profileId/transactions", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   const body = recordInput.safeParse(req.body);

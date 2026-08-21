@@ -346,11 +346,14 @@ export interface APITransaction {
   rawRowData?: unknown;
   classificationConfidence?: number | null;
   createdAt?: string;
+  updatedAt?: string;
 }
 
 export const transactionsApi = {
   list: (profileId: string) =>
     apiFetch<APITransaction[]>(`/profiles/${profileId}/transactions`),
+  get: (profileId: string, transactionId: string) =>
+    apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}`),
   create: (
     profileId: string,
     data: { date: string; recordType: 'income' | 'expense'; description: string; amount: number; category: string; note?: string | null },

@@ -5,6 +5,7 @@
  * SME Finance Copilot API
  * OpenAPI spec version: 0.1.0
  */
+import type { TransactionRecordType } from './transactionRecordType';
 
 export interface Transaction {
   id: string;
@@ -12,10 +13,14 @@ export interface Transaction {
   date: string;
   description: string;
   amount: number;
+  recordType: TransactionRecordType;
   category: string;
+  /** @nullable */
+  note?: string | null;
   taxTreatment: string;
   source: string;
   /** @nullable */
   evidenceId?: string | null;
   createdAt: string;
+  updatedAt: string;
 }

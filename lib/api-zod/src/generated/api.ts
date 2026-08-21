@@ -370,11 +370,14 @@ export const ListTransactionsResponseItem = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
+  "recordType": zod.enum(['income', 'expense']),
   "category": zod.string(),
+  "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
-  "createdAt": zod.string()
+  "createdAt": zod.string(),
+  "updatedAt": zod.string()
 })
 export const ListTransactionsResponse = zod.array(ListTransactionsResponseItem)
 
@@ -388,11 +391,11 @@ export const CreateTransactionParams = zod.object({
 
 export const CreateTransactionBody = zod.object({
   "date": zod.string(),
+  "recordType": zod.enum(['income', 'expense']),
   "description": zod.string(),
   "amount": zod.number(),
   "category": zod.string(),
-  "taxTreatment": zod.string().optional(),
-  "source": zod.string().optional()
+  "note": zod.string().nullish()
 })
 
 export const CreateTransactionResponse = zod.object({
@@ -401,11 +404,39 @@ export const CreateTransactionResponse = zod.object({
   "date": zod.string(),
   "description": zod.string(),
   "amount": zod.number(),
+  "recordType": zod.enum(['income', 'expense']),
   "category": zod.string(),
+  "note": zod.string().nullish(),
   "taxTreatment": zod.string(),
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
-  "createdAt": zod.string()
+  "createdAt": zod.string(),
+  "updatedAt": zod.string()
+})
+
+
+/**
+ * @summary Get one Financial Memory transaction for a profile
+ */
+export const GetTransactionParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "transactionId": zod.coerce.string()
+})
+
+export const GetTransactionResponse = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "date": zod.string(),
+  "description": zod.string(),
+  "amount": zod.number(),
+  "recordType": zod.enum(['income', 'expense']),
+  "category": zod.string(),
+  "note": zod.string().nullish(),
+  "taxTreatment": zod.string(),
+  "source": zod.string(),
+  "evidenceId": zod.string().nullish(),
+  "createdAt": zod.string(),
+  "updatedAt": zod.string()
 })
 
 

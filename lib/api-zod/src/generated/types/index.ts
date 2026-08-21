@@ -51,5 +51,7 @@ export * from './taxCalculation';
 export * from './taxLine';
 export * from './transaction';
 export * from './transactionInput';
+export * from './transactionInputRecordType';
+export * from './transactionRecordType';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';

@@ -1449,6 +1449,88 @@ export const useCreateTransaction = <TError = ErrorType<unknown>,
       return useMutation(getCreateTransactionMutationOptions(options));
     }
 
+export const getGetTransactionUrl = (profileId: string,
+    transactionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/transactions/${transactionId}`
+}
+
+/**
+ * @summary Get one Financial Memory transaction for a profile
+ */
+export const getTransaction = async (profileId: string,
+    transactionId: string, options?: Parameters<typeof customFetch>[1]): Promise<Transaction> => {
+
+  return customFetch<Transaction>(getGetTransactionUrl(profileId,transactionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTransactionQueryKey = (profileId: string,
+    transactionId: string,) => {
+    return [
+    `/api/profiles/${profileId}/transactions/${transactionId}`
+    ] as const;
+    }
+
+
+export const getGetTransactionQueryOptions = <TData = Awaited<ReturnType<typeof getTransaction>>, TError = ErrorType<ErrorEnvelope>>(profileId: string,
+    transactionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTransaction>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTransactionQueryKey(profileId,transactionId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTransaction>>> = ({ signal }) => getTransaction(profileId,transactionId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined && transactionId !== null && transactionId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTransaction>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetTransactionQueryResult = NonNullable<Awaited<ReturnType<typeof getTransaction>>>
+export type GetTransactionQueryError = ErrorType<ErrorEnvelope>
+
+
+/**
+ * @summary Get one Financial Memory transaction for a profile
+ */
+
+export function useGetTransaction<TData = Awaited<ReturnType<typeof getTransaction>>, TError = ErrorType<ErrorEnvelope>>(
+ profileId: string,
+    transactionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTransaction>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetTransactionQueryOptions(profileId,transactionId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getListInboxItemsUrl = (profileId: string,) => {
 
 

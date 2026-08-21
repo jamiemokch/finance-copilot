@@ -27,6 +27,13 @@ description: Architecture decisions for the full-stack SME Finance Copilot — w
 
 ## Frontend store
 - store.tsx: StoreProvider fetches all data, exposes derived types
+### Financial Memory invariants
+- Profile-scoped async data must remain bound to the selected profile.
+  **Why:** Late responses from a previously selected profile can expose another business’s financial data in the current UI.
+  **How to apply:** Any future profile-scoped operation must discard stale results after a profile switch.
+- Explicit ledger classification is canonical; conventions such as an amount’s sign are legacy fallback only.
+  **Why:** Bank or spreadsheet inputs can retain a positive cash value even when explicitly classified as an expense.
+  **How to apply:** New ledger writers must persist the semantic type, and readers must prefer it whenever it exists.
 - mapPLBreakdown: uses allowableAmount for deductible expenses (not raw amount)
 - nonDeductibleExpenses: separate PLBreakdown array, shown in UI but excluded from profit
 - monthlyTrend, vatWarning, taxLinesRaw, nonDeductibleTotal: all exposed from store

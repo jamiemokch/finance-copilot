@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   profilesApi, positionApi, inboxApi, evidenceApi, transactionsApi,
   decisionsApi, ideasApi, saChecklistApi, demoApi, getAuthUser,
@@ -85,6 +85,7 @@ export interface TransactionItem {
   category: string;
   note?: string;
   createdAt?: string;
+  updatedAt?: string;
   source: string;
   evidenceTier?: number;
   evidenceId?: string | null;
@@ -632,15 +633,16 @@ function mapTransaction(t: APITransaction): TransactionItem {
     date: t.date,
     description: t.description,
     amount: t.amount,
-    // Legacy rows predate the explicit record type. Positive entries were
-    // historically income, even though the newly-added DB default is expense.
-    recordType: t.amount > 0 ? 'income' : (t.recordType ?? 'expense'),
+    // Explicit stored classification is canonical. Signed amount is only a
+    // compatibility fallback for rows created before recordType existed.
+    recordType: t.recordType ?? (t.amount > 0 ? 'income' : 'expense'),
     category: t.category,
     note: t.note ?? undefined,
     source: src,
     evidenceTier: t.evidenceTier,
     evidenceId: t.evidenceId,
     createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
   };
 }
 
@@ -676,7 +678,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // ── Profiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState('');
+  const [activeProfileId, setActiveProfileIdState] = useState('');
+  const activeProfileIdRef = useRef('');
   const [profilesLoaded, setProfilesLoaded] = useState(false);
 
   // ── API data (raw, for computing derived types)
@@ -696,6 +699,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [sharedContext, setSharedContext] = useState<SharedContext>({ name: '', address: '', utr: '', niNumber: '' });
   const [copilotTrigger, setCopilotTrigger] = useState<string | null>(null);
   const [yearEndPackGenerated, setYearEndPackGenerated] = useState(false);
+
+  const clearProfileData = useCallback(() => {
+    setRawPosition(null);
+    setRawTransactions([]);
+    setInboxItems([]);
+    setEvidenceItems([]);
+    setDecisionMemory([]);
+    setBusinessIdeas([]);
+    setSAChecklist([]);
+  }, []);
+
+  const setActiveProfileId = useCallback((profileId: string) => {
+    activeProfileIdRef.current = profileId;
+    clearProfileData();
+    setActiveProfileIdState(profileId);
+  }, [clearProfileData]);
 
   // ── Auth check on mount
   useEffect(() => {
@@ -718,6 +737,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ideasApi.list(profileId),
         saChecklistApi.list(profileId),
       ]);
+
+    // A request for a profile that is no longer selected must never replace
+    // the newly selected profile's data when responses arrive out of order.
+    if (activeProfileIdRef.current !== profileId) return;
 
     if (posResult.status === 'fulfilled') setRawPosition(posResult.value);
     if (inboxResult.status === 'fulfilled') setInboxItems(inboxResult.value.map(mapInboxItem));
@@ -879,36 +902,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [activeProfileId, fetchAll]);
 
   const addEvidenceItem = useCallback((item: Omit<EvidenceItem, 'id'>): string => {
+    const profileId = activeProfileId;
     const tempId = `temp-${Math.random().toString(36).slice(2)}`;
     // Optimistic: show immediately in UI
     setEvidenceItems(prev => [{ id: tempId, ...item }, ...prev]);
     // Background: register in DB
-    evidenceApi.register(activeProfileId, {
+    evidenceApi.register(profileId, {
       filename: item.filename,
       objectPath: `uploads/${item.filename}`,
       mimeType: 'application/octet-stream',
       category: item.category,
     }).then(() => {
       // Replace temp with real item on next fetch
-      return evidenceApi.list(activeProfileId);
-    }).then(items => setEvidenceItems(items.map(mapEvidenceItem)))
-      .catch(console.error);
+      return evidenceApi.list(profileId);
+    }).then(items => {
+      if (activeProfileIdRef.current === profileId) {
+        setEvidenceItems(items.map(mapEvidenceItem));
+      }
+    }).catch(err => {
+      if (activeProfileIdRef.current === profileId) {
+        setEvidenceItems(prev => prev.filter(item => item.id !== tempId));
+      }
+      console.error(err);
+    });
     return tempId;
   }, [activeProfileId]);
 
   const resolveInboxItem = useCallback((id: string, resolution: string) => {
+    const profileId = activeProfileId;
     // Optimistic update
     setInboxItems(prev => prev.map(item =>
       item.id === id ? { ...item, status: 'resolved', customAnswer: resolution } : item
     ));
-    inboxApi.resolve(activeProfileId, id, resolution)
-      .then(() => fetchAll(activeProfileId))
+    inboxApi.resolve(profileId, id, resolution)
+      .then(() => fetchAll(profileId))
       .catch(err => {
         console.error('[store] resolveInboxItem failed', err);
         // Rollback optimistic update
-        setInboxItems(prev => prev.map(item =>
-          item.id === id ? { ...item, status: 'pending', customAnswer: undefined } : item
-        ));
+        if (activeProfileIdRef.current === profileId) {
+          setInboxItems(prev => prev.map(item =>
+            item.id === id ? { ...item, status: 'pending', customAnswer: undefined } : item
+          ));
+        }
       });
   }, [activeProfileId, fetchAll]);
 

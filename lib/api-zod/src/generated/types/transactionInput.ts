@@ -5,12 +5,14 @@
  * SME Finance Copilot API
  * OpenAPI spec version: 0.1.0
  */
+import type { TransactionInputRecordType } from './transactionInputRecordType';
 
 export interface TransactionInput {
   date: string;
+  recordType: TransactionInputRecordType;
   description: string;
   amount: number;
   category: string;
-  taxTreatment?: string;
-  source?: string;
+  /** @nullable */
+  note?: string | null;
 }

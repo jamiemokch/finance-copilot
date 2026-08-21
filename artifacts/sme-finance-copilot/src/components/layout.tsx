@@ -2,7 +2,7 @@ import { Link, useLocation } from 'wouter';
 import {
   LayoutDashboard, WalletCards, Lightbulb, Settings,
   Menu, X, Bot, CheckSquare, UploadCloud, User, MessageSquare,
-  RotateCcw,
+  RotateCcw, BookOpen,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -36,6 +36,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const navItems = [
     { href: '/ingest',         label: 'Add Records',      icon: UploadCloud, sublabel: 'start here' },
+    { href: '/memory',         label: 'Financial Memory', icon: BookOpen },
     { href: '/dashboard',      label: 'Home',             icon: LayoutDashboard },
     { href: '/position',       label: 'Finances',         icon: WalletCards },
     { href: '/business-ideas', label: 'Business Ideas',   icon: Lightbulb, count: newIdeas },
@@ -47,7 +48,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     if (href === '/ingest') return ['/ingest', '/evidence'].includes(location);
     if (href === '/business-ideas') return ['/business-ideas', '/decisions', '/tax', '/optimisation'].includes(location);
     if (href === '/tasks') return ['/tasks', '/compliance', '/inbox', '/year-end', '/exceptions'].includes(location);
-    if (href === '/position') return ['/position', '/memory'].includes(location);
+    if (href === '/memory') return location === '/memory' || location.startsWith('/memory/');
+    if (href === '/position') return location === '/position';
     return location === href;
   };
 
