@@ -7,3 +7,4 @@
 - [Income-tax estimate safeguards](income-tax-estimate-safeguards.md) — estimates use allowable ledger profit; tax-year-scoped personal income and unsupported accrual timing stay incomplete
 - [OpenAPI Zod generator compatibility](openapi-zod-number-compatibility.md) — avoid schema formats that emit unavailable Zod helpers in the installed generator/toolchain
 - [Bank CSV import safety model](bank-csv-import-safety.md) — imports stage first, require explicit duplicate choices, then atomically write unreviewed ledger movements
+- [Reconciliation observation lifecycle](reconciliation-observation-lifecycle.md) — resolved facts stay closed until they disappear; only a later return may reopen review

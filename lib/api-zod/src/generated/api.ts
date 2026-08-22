@@ -16,6 +16,7 @@ export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
 
+
 /**
  * @summary Get the currently authenticated user
  */
@@ -1117,7 +1118,6 @@ export const RegisterBankImportResponse = zod.object({
   "reused": zod.boolean()
 }))
 
-
 /**
  * @summary Read one profile-scoped bank import and saved preview rows
  */
@@ -1696,8 +1696,6 @@ export const CommitBankImportResponse = zod.object({
 }).and(zod.object({
   "replayed": zod.boolean()
 }))
-
-
 /**
  * @summary List inbox items for a profile
  */
@@ -2034,3 +2032,509 @@ export const ResetDemoDataResponse = zod.object({
   "profileId": zod.string(),
   "message": zod.string().optional()
 })
+
+
+/**
+ * @summary List current reconciliation exceptions, staged workflow references, and coverage checks
+ */
+export const ListReconciliationReviewParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const ListReconciliationReviewResponse = zod.object({
+  "exceptions": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+})),
+  "workflowTasks": zod.array(zod.object({
+  "id": zod.string(),
+  "kind": zod.literal("staged_bank_import"),
+  "title": zod.string(),
+  "status": zod.string(),
+  "source": zod.object({
+  "batchId": zod.string(),
+  "financialAccountId": zod.string()
+}),
+  "href": zod.string(),
+  "updatedAt": zod.coerce.date()
+})),
+  "coverageChecks": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Scan owned financial facts without changing financial records
+ */
+export const ScanReconciliationReviewParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const ScanReconciliationReviewResponse = zod.object({
+  "exceptions": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+})),
+  "workflowTasks": zod.array(zod.object({
+  "id": zod.string(),
+  "kind": zod.literal("staged_bank_import"),
+  "title": zod.string(),
+  "status": zod.string(),
+  "source": zod.object({
+  "batchId": zod.string(),
+  "financialAccountId": zod.string()
+}),
+  "href": zod.string(),
+  "updatedAt": zod.coerce.date()
+})),
+  "coverageChecks": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Re-run deterministic reconciliation detectors
+ */
+export const ScanReconciliationFactsParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const ScanReconciliationFactsResponse = zod.object({
+  "exceptions": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+})),
+  "workflowTasks": zod.array(zod.object({
+  "id": zod.string(),
+  "kind": zod.literal("staged_bank_import"),
+  "title": zod.string(),
+  "status": zod.string(),
+  "source": zod.object({
+  "batchId": zod.string(),
+  "financialAccountId": zod.string()
+}),
+  "href": zod.string(),
+  "updatedAt": zod.coerce.date()
+})),
+  "coverageChecks": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Get an exception and its append-only resolution history
+ */
+export const GetReconciliationExceptionParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "exceptionId": zod.coerce.string()
+})
+
+export const GetReconciliationExceptionResponse = zod.object({
+  "exception": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+}),
+  "events": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "exceptionId": zod.string(),
+  "actorUserId": zod.string().nullish(),
+  "action": zod.string(),
+  "idempotencyKey": zod.string().nullish(),
+  "reason": zod.string().nullish(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "beforeSnapshot": zod.record(zod.string(), zod.unknown()).nullish(),
+  "afterSnapshot": zod.record(zod.string(), zod.unknown()).nullish(),
+  "relationshipRefs": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Apply one explicit, source-verified reconciliation action
+ */
+export const ResolveReconciliationExceptionParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "exceptionId": zod.coerce.string()
+})
+
+
+export const resolveReconciliationExceptionBodyReasonMax = 2000;
+
+export const resolveReconciliationExceptionBodyExpectationSourceMax = 120;
+
+
+
+
+
+
+export const ResolveReconciliationExceptionBody = zod.object({
+  "action": zod.enum(['acknowledge', 'dismiss', 'classify_transaction', 'attach_evidence', 'detach_evidence', 'audit_void', 'retain_both', 'return_to_staging', 'confirm_coverage', 'set_support_expectation']),
+  "expectedRevision": zod.string().min(1),
+  "idempotencyKey": zod.string(),
+  "reason": zod.string().max(resolveReconciliationExceptionBodyReasonMax).nullish(),
+  "transactionId": zod.string().nullish(),
+  "evidenceId": zod.string().nullish(),
+  "coverageCheckId": zod.string().nullish(),
+  "expectationState": zod.enum(['required', 'not_required', 'unspecified']).nullish(),
+  "expectationSource": zod.string().max(resolveReconciliationExceptionBodyExpectationSourceMax).nullish(),
+  "fields": zod.object({
+  "date": zod.coerce.date().optional(),
+  "description": zod.string().min(1).optional(),
+  "amount": zod.number().optional(),
+  "category": zod.string().min(1).optional(),
+  "taxTreatment": zod.string().min(1).optional(),
+  "accountingClassification": zod.enum(['income', 'expense', 'transfer', 'owner_funds', 'drawings', 'loan', 'tax_payment', 'unknown']).optional()
+}).nullish()
+})
+
+export const ResolveReconciliationExceptionResponse = zod.object({
+  "exception": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+}),
+  "replayed": zod.boolean()
+})
+
+
+/**
+ * @summary List declared coverage checks
+ */
+export const ListReconciliationCoverageChecksParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const ListReconciliationCoverageChecksResponseItem = zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+export const ListReconciliationCoverageChecksResponse = zod.array(ListReconciliationCoverageChecksResponseItem)
+
+
+/**
+ * @summary Declare complete expected coverage for an account and period
+ */
+export const CreateReconciliationCoverageCheckParams = zod.object({
+  "profileId": zod.coerce.string()
+})
+
+export const CreateReconciliationCoverageCheckBody = zod.object({
+  "accountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish()
+})
+
+export const CreateReconciliationCoverageCheckResponse = zod.object({
+  "coverageCheck": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+}).and(zod.object({
+  "exceptions": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+})),
+  "workflowTasks": zod.array(zod.object({
+  "id": zod.string(),
+  "kind": zod.literal("staged_bank_import"),
+  "title": zod.string(),
+  "status": zod.string(),
+  "source": zod.object({
+  "batchId": zod.string(),
+  "financialAccountId": zod.string()
+}),
+  "href": zod.string(),
+  "updatedAt": zod.coerce.date()
+})),
+  "coverageChecks": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+}))
+
+/**
+ * @summary Amend a declared coverage check
+ */
+export const UpdateReconciliationCoverageCheckParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "checkId": zod.coerce.string()
+})
+
+export const UpdateReconciliationCoverageCheckBody = zod.object({
+  "accountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish()
+})
+
+export const UpdateReconciliationCoverageCheckResponse = zod.object({
+  "coverageCheck": zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+}).and(zod.object({
+  "exceptions": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "ruleKey": zod.string(),
+  "exceptionType": zod.string(),
+  "status": zod.enum(['open', 'resolving', 'resolved', 'dismissed', 'superseded']),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "sourceKind": zod.string(),
+  "sourceId": zod.string(),
+  "sourceRevision": zod.string(),
+  "observationFingerprint": zod.string(),
+  "observedFacts": zod.record(zod.string(), zod.unknown()),
+  "detectorVersion": zod.number(),
+  "isCurrent": zod.boolean(),
+  "currentResolutionSummary": zod.string().nullish(),
+  "dismissalRevision": zod.string().nullish(),
+  "resolvedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "source": zod.object({
+  "kind": zod.string(),
+  "id": zod.string()
+}).optional()
+})),
+  "workflowTasks": zod.array(zod.object({
+  "id": zod.string(),
+  "kind": zod.literal("staged_bank_import"),
+  "title": zod.string(),
+  "status": zod.string(),
+  "source": zod.object({
+  "batchId": zod.string(),
+  "financialAccountId": zod.string()
+}),
+  "href": zod.string(),
+  "updatedAt": zod.coerce.date()
+})),
+  "coverageChecks": zod.array(zod.object({
+  "id": zod.string(),
+  "profileId": zod.string(),
+  "financialAccountId": zod.string(),
+  "periodStart": zod.coerce.date(),
+  "periodEnd": zod.coerce.date(),
+  "completeExpectedCoverage": zod.boolean(),
+  "statementClosingBalance": zod.number().nullish(),
+  "statementSourceBatchId": zod.string().nullish(),
+  "statementEndpointRowId": zod.string().nullish(),
+  "state": zod.enum(['declared', 'confirmed', 'amended']),
+  "calculatedFacts": zod.record(zod.string(), zod.unknown()),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+}))
+
+

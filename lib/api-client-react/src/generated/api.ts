@@ -58,6 +58,13 @@ import type {
   Profile,
   ProfileInput,
   ProfileUpdate,
+  ReconciliationCoverageCheck,
+  ReconciliationCoverageCheckInput,
+  ReconciliationCoverageMutationResponse,
+  ReconciliationExceptionDetail,
+  ReconciliationResolutionInput,
+  ReconciliationResolutionResponse,
+  ReconciliationResponse,
   SAChecklistItem,
   SAChecklistUpdate,
   SelfAssessmentIdentity,
@@ -3867,4 +3874,602 @@ export const useResetDemoData = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getResetDemoDataMutationOptions(options));
+    }
+
+export const getListReconciliationReviewUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation`
+}
+
+/**
+ * @summary List current reconciliation exceptions, staged workflow references, and coverage checks
+ */
+export const listReconciliationReview = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationResponse> => {
+
+  return customFetch<ReconciliationResponse>(getListReconciliationReviewUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListReconciliationReviewQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/reconciliation`
+    ] as const;
+    }
+
+
+export const getListReconciliationReviewQueryOptions = <TData = Awaited<ReturnType<typeof listReconciliationReview>>, TError = ErrorType<unknown>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listReconciliationReview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListReconciliationReviewQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listReconciliationReview>>> = ({ signal }) => listReconciliationReview(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listReconciliationReview>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListReconciliationReviewQueryResult = NonNullable<Awaited<ReturnType<typeof listReconciliationReview>>>
+export type ListReconciliationReviewQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List current reconciliation exceptions, staged workflow references, and coverage checks
+ */
+
+export function useListReconciliationReview<TData = Awaited<ReturnType<typeof listReconciliationReview>>, TError = ErrorType<unknown>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listReconciliationReview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListReconciliationReviewQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getScanReconciliationReviewUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation`
+}
+
+/**
+ * @summary Scan owned financial facts without changing financial records
+ */
+export const scanReconciliationReview = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationResponse> => {
+
+  return customFetch<ReconciliationResponse>(getScanReconciliationReviewUrl(profileId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getScanReconciliationReviewMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationReview>>, TError,{profileId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationReview>>, TError,{profileId: string}, TContext> => {
+
+const mutationKey = ['scanReconciliationReview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof scanReconciliationReview>>, {profileId: string}> = (props) => {
+          const {profileId} = props ?? {};
+
+          return  scanReconciliationReview(profileId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ScanReconciliationReviewMutationResult = NonNullable<Awaited<ReturnType<typeof scanReconciliationReview>>>
+
+    export type ScanReconciliationReviewMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Scan owned financial facts without changing financial records
+ */
+export const useScanReconciliationReview = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationReview>>, TError,{profileId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof scanReconciliationReview>>,
+        TError,
+        {profileId: string},
+        TContext
+      > => {
+      return useMutation(getScanReconciliationReviewMutationOptions(options));
+    }
+
+export const getScanReconciliationFactsUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/scan`
+}
+
+/**
+ * @summary Re-run deterministic reconciliation detectors
+ */
+export const scanReconciliationFacts = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationResponse> => {
+
+  return customFetch<ReconciliationResponse>(getScanReconciliationFactsUrl(profileId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getScanReconciliationFactsMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationFacts>>, TError,{profileId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationFacts>>, TError,{profileId: string}, TContext> => {
+
+const mutationKey = ['scanReconciliationFacts'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof scanReconciliationFacts>>, {profileId: string}> = (props) => {
+          const {profileId} = props ?? {};
+
+          return  scanReconciliationFacts(profileId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ScanReconciliationFactsMutationResult = NonNullable<Awaited<ReturnType<typeof scanReconciliationFacts>>>
+
+    export type ScanReconciliationFactsMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Re-run deterministic reconciliation detectors
+ */
+export const useScanReconciliationFacts = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof scanReconciliationFacts>>, TError,{profileId: string}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof scanReconciliationFacts>>,
+        TError,
+        {profileId: string},
+        TContext
+      > => {
+      return useMutation(getScanReconciliationFactsMutationOptions(options));
+    }
+
+export const getGetReconciliationExceptionUrl = (profileId: string,
+    exceptionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/exceptions/${exceptionId}`
+}
+
+/**
+ * @summary Get an exception and its append-only resolution history
+ */
+export const getReconciliationException = async (profileId: string,
+    exceptionId: string, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationExceptionDetail> => {
+
+  return customFetch<ReconciliationExceptionDetail>(getGetReconciliationExceptionUrl(profileId,exceptionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetReconciliationExceptionQueryKey = (profileId: string,
+    exceptionId: string,) => {
+    return [
+    `/api/profiles/${profileId}/reconciliation/exceptions/${exceptionId}`
+    ] as const;
+    }
+
+
+export const getGetReconciliationExceptionQueryOptions = <TData = Awaited<ReturnType<typeof getReconciliationException>>, TError = ErrorType<ErrorEnvelope>>(profileId: string,
+    exceptionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getReconciliationException>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetReconciliationExceptionQueryKey(profileId,exceptionId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getReconciliationException>>> = ({ signal }) => getReconciliationException(profileId,exceptionId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined && exceptionId !== null && exceptionId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getReconciliationException>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetReconciliationExceptionQueryResult = NonNullable<Awaited<ReturnType<typeof getReconciliationException>>>
+export type GetReconciliationExceptionQueryError = ErrorType<ErrorEnvelope>
+
+
+/**
+ * @summary Get an exception and its append-only resolution history
+ */
+
+export function useGetReconciliationException<TData = Awaited<ReturnType<typeof getReconciliationException>>, TError = ErrorType<ErrorEnvelope>>(
+ profileId: string,
+    exceptionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getReconciliationException>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetReconciliationExceptionQueryOptions(profileId,exceptionId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getResolveReconciliationExceptionUrl = (profileId: string,
+    exceptionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/exceptions/${exceptionId}/resolve`
+}
+
+/**
+ * @summary Apply one explicit, source-verified reconciliation action
+ */
+export const resolveReconciliationException = async (profileId: string,
+    exceptionId: string,
+    reconciliationResolutionInput: ReconciliationResolutionInput, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationResolutionResponse> => {
+
+  return customFetch<ReconciliationResolutionResponse>(getResolveReconciliationExceptionUrl(profileId,exceptionId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(reconciliationResolutionInput)
+  }
+);}
+
+
+
+
+
+export const getResolveReconciliationExceptionMutationOptions = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resolveReconciliationException>>, TError,{profileId: string;exceptionId: string;data: BodyType<ReconciliationResolutionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof resolveReconciliationException>>, TError,{profileId: string;exceptionId: string;data: BodyType<ReconciliationResolutionInput>}, TContext> => {
+
+const mutationKey = ['resolveReconciliationException'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof resolveReconciliationException>>, {profileId: string;exceptionId: string;data: BodyType<ReconciliationResolutionInput>}> = (props) => {
+          const {profileId,exceptionId,data} = props ?? {};
+
+          return  resolveReconciliationException(profileId,exceptionId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ResolveReconciliationExceptionMutationResult = NonNullable<Awaited<ReturnType<typeof resolveReconciliationException>>>
+    export type ResolveReconciliationExceptionMutationBody = BodyType<ReconciliationResolutionInput>
+    export type ResolveReconciliationExceptionMutationError = ErrorType<ErrorEnvelope>
+
+    /**
+ * @summary Apply one explicit, source-verified reconciliation action
+ */
+export const useResolveReconciliationException = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resolveReconciliationException>>, TError,{profileId: string;exceptionId: string;data: BodyType<ReconciliationResolutionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof resolveReconciliationException>>,
+        TError,
+        {profileId: string;exceptionId: string;data: BodyType<ReconciliationResolutionInput>},
+        TContext
+      > => {
+      return useMutation(getResolveReconciliationExceptionMutationOptions(options));
+    }
+
+export const getListReconciliationCoverageChecksUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/coverage-checks`
+}
+
+/**
+ * @summary List declared coverage checks
+ */
+export const listReconciliationCoverageChecks = async (profileId: string, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationCoverageCheck[]> => {
+
+  return customFetch<ReconciliationCoverageCheck[]>(getListReconciliationCoverageChecksUrl(profileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListReconciliationCoverageChecksQueryKey = (profileId: string,) => {
+    return [
+    `/api/profiles/${profileId}/reconciliation/coverage-checks`
+    ] as const;
+    }
+
+
+export const getListReconciliationCoverageChecksQueryOptions = <TData = Awaited<ReturnType<typeof listReconciliationCoverageChecks>>, TError = ErrorType<unknown>>(profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listReconciliationCoverageChecks>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListReconciliationCoverageChecksQueryKey(profileId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listReconciliationCoverageChecks>>> = ({ signal }) => listReconciliationCoverageChecks(profileId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listReconciliationCoverageChecks>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListReconciliationCoverageChecksQueryResult = NonNullable<Awaited<ReturnType<typeof listReconciliationCoverageChecks>>>
+export type ListReconciliationCoverageChecksQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List declared coverage checks
+ */
+
+export function useListReconciliationCoverageChecks<TData = Awaited<ReturnType<typeof listReconciliationCoverageChecks>>, TError = ErrorType<unknown>>(
+ profileId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listReconciliationCoverageChecks>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListReconciliationCoverageChecksQueryOptions(profileId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getCreateReconciliationCoverageCheckUrl = (profileId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/coverage-checks`
+}
+
+/**
+ * @summary Declare complete expected coverage for an account and period
+ */
+export const createReconciliationCoverageCheck = async (profileId: string,
+    reconciliationCoverageCheckInput: ReconciliationCoverageCheckInput, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationCoverageMutationResponse> => {
+
+  return customFetch<ReconciliationCoverageMutationResponse>(getCreateReconciliationCoverageCheckUrl(profileId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(reconciliationCoverageCheckInput)
+  }
+);}
+
+
+
+
+
+export const getCreateReconciliationCoverageCheckMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createReconciliationCoverageCheck>>, TError,{profileId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createReconciliationCoverageCheck>>, TError,{profileId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext> => {
+
+const mutationKey = ['createReconciliationCoverageCheck'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createReconciliationCoverageCheck>>, {profileId: string;data: BodyType<ReconciliationCoverageCheckInput>}> = (props) => {
+          const {profileId,data} = props ?? {};
+
+          return  createReconciliationCoverageCheck(profileId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateReconciliationCoverageCheckMutationResult = NonNullable<Awaited<ReturnType<typeof createReconciliationCoverageCheck>>>
+    export type CreateReconciliationCoverageCheckMutationBody = BodyType<ReconciliationCoverageCheckInput>
+    export type CreateReconciliationCoverageCheckMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Declare complete expected coverage for an account and period
+ */
+export const useCreateReconciliationCoverageCheck = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createReconciliationCoverageCheck>>, TError,{profileId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createReconciliationCoverageCheck>>,
+        TError,
+        {profileId: string;data: BodyType<ReconciliationCoverageCheckInput>},
+        TContext
+      > => {
+      return useMutation(getCreateReconciliationCoverageCheckMutationOptions(options));
+    }
+
+export const getUpdateReconciliationCoverageCheckUrl = (profileId: string,
+    checkId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/reconciliation/coverage-checks/${checkId}`
+}
+
+/**
+ * @summary Amend a declared coverage check
+ */
+export const updateReconciliationCoverageCheck = async (profileId: string,
+    checkId: string,
+    reconciliationCoverageCheckInput: ReconciliationCoverageCheckInput, options?: Parameters<typeof customFetch>[1]): Promise<ReconciliationCoverageMutationResponse> => {
+
+  return customFetch<ReconciliationCoverageMutationResponse>(getUpdateReconciliationCoverageCheckUrl(profileId,checkId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(reconciliationCoverageCheckInput)
+  }
+);}
+
+
+
+
+
+export const getUpdateReconciliationCoverageCheckMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>, TError,{profileId: string;checkId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>, TError,{profileId: string;checkId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext> => {
+
+const mutationKey = ['updateReconciliationCoverageCheck'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>, {profileId: string;checkId: string;data: BodyType<ReconciliationCoverageCheckInput>}> = (props) => {
+          const {profileId,checkId,data} = props ?? {};
+
+          return  updateReconciliationCoverageCheck(profileId,checkId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateReconciliationCoverageCheckMutationResult = NonNullable<Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>>
+    export type UpdateReconciliationCoverageCheckMutationBody = BodyType<ReconciliationCoverageCheckInput>
+    export type UpdateReconciliationCoverageCheckMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Amend a declared coverage check
+ */
+export const useUpdateReconciliationCoverageCheck = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>, TError,{profileId: string;checkId: string;data: BodyType<ReconciliationCoverageCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateReconciliationCoverageCheck>>,
+        TError,
+        {profileId: string;checkId: string;data: BodyType<ReconciliationCoverageCheckInput>},
+        TContext
+      > => {
+      return useMutation(getUpdateReconciliationCoverageCheckMutationOptions(options));
     }

@@ -5,6 +5,7 @@ import test from "node:test";
 import { and, eq } from "drizzle-orm";
 import {
   bankImportBatchesTable, bankImportRowsTable, db, evidenceItemsTable,
+  evidenceTransactionLinksTable,
   financialAccountsTable, pool, profilesTable, reconciliationCoverageChecksTable,
   reconciliationEventsTable, reconciliationExceptionsTable,
   reconciliationSupportExpectationsTable, transactionsTable, usersTable,
@@ -29,6 +30,32 @@ async function request(sid: string, path: string, init: RequestInit = {}) {
   const response = await fetch(`http://127.0.0.1:${port}/api${path}`, { ...init, headers });
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) : {} };
+}
+
+async function nonFinancialSnapshot(sid: string, profileId: string) {
+  const [position, readiness] = await Promise.all([
+    request(sid, `/profiles/${profileId}/position`),
+    request(sid, `/profiles/${profileId}/self-assessment/readiness`),
+  ]);
+  assert.equal(position.status, 200);
+  assert.equal(readiness.status, 200);
+  const transactions = await db.select({
+    id: transactionsTable.id,
+    amount: transactionsTable.amount,
+    recordType: transactionsTable.recordType,
+    category: transactionsTable.category,
+    taxTreatment: transactionsTable.taxTreatment,
+    accountingClassification: transactionsTable.accountingClassification,
+    allowableAmount: transactionsTable.allowableAmount,
+    allowablePercentage: transactionsTable.allowablePercentage,
+    ledgerStatus: transactionsTable.ledgerStatus,
+  }).from(transactionsTable).where(eq(transactionsTable.profileId, profileId));
+  const links = await db.select({
+    evidenceId: evidenceTransactionLinksTable.evidenceId,
+    transactionId: evidenceTransactionLinksTable.transactionId,
+    linkStatus: evidenceTransactionLinksTable.linkStatus,
+  }).from(evidenceTransactionLinksTable).where(eq(evidenceTransactionLinksTable.profileId, profileId));
+  return { position: position.body, readiness: readiness.body, transactions, links };
 }
 
 test("M10 exceptions are deterministic, profile-bound, revision-safe and financially inert", async () => {
@@ -114,6 +141,16 @@ test("M10 exceptions are deterministic, profile-bound, revision-safe and financi
     port = (server.address() as AddressInfo).port;
 
     const unclassifiedException = firstScan.find(item => item.ruleKey === "unclassified_bank_transaction")!;
+    const duplicateException = firstScan.find(item => item.ruleKey === "possible_duplicate_candidate")!;
+    const coverageException = firstScan.find(item => item.ruleKey === "no_activity_in_declared_period")!;
+    const beforeScan = await nonFinancialSnapshot(aliceSession, aliceProfileId);
+    await scanProfile(aliceProfileId);
+    assert.deepEqual(await nonFinancialSnapshot(aliceSession, aliceProfileId), beforeScan, "a scan must not change financial, tax, cash, SA, transaction, or evidence facts");
+    const acknowledged = await request(aliceSession, `/profiles/${aliceProfileId}/reconciliation/exceptions/${duplicateException.id}/resolve`, {
+      method: "POST", body: JSON.stringify({ action: "acknowledge", expectedRevision: duplicateException.sourceRevision, idempotencyKey: randomUUID(), reason: "Review only" }),
+    });
+    assert.equal(acknowledged.status, 200);
+    assert.deepEqual(await nonFinancialSnapshot(aliceSession, aliceProfileId), beforeScan, "acknowledgement must not mutate financial facts");
     const wrongTarget = await request(aliceSession, `/profiles/${aliceProfileId}/reconciliation/exceptions/${unclassifiedException.id}/resolve`, {
       method: "POST", body: JSON.stringify({
         action: "classify_transaction", expectedRevision: unclassifiedException.sourceRevision, idempotencyKey: randomUUID(),
@@ -123,7 +160,6 @@ test("M10 exceptions are deterministic, profile-bound, revision-safe and financi
     assert.equal(wrongTarget.status, 422, "a resolution must reject a different same-profile transaction");
     const [stillOpenAfterWrongTarget] = await db.select().from(reconciliationExceptionsTable).where(eq(reconciliationExceptionsTable.id, unclassifiedException.id));
     assert.equal(stillOpenAfterWrongTarget?.status, "open", "wrong-target rejection must leave the original exception open");
-    const coverageException = firstScan.find(item => item.ruleKey === "no_activity_in_declared_period")!;
     const [otherCoverage] = await db.select().from(reconciliationCoverageChecksTable).where(and(
       eq(reconciliationCoverageChecksTable.profileId, aliceProfileId),
       eq(reconciliationCoverageChecksTable.id, firstScan.find(item => item.ruleKey === "statement_balance_discrepancy")!.sourceId),
@@ -135,6 +171,15 @@ test("M10 exceptions are deterministic, profile-bound, revision-safe and financi
       }),
     });
     assert.equal(wrongCoverage.status, 422, "a resolution must reject a different same-profile coverage check");
+    const confirmedCoverage = await request(aliceSession, `/profiles/${aliceProfileId}/reconciliation/exceptions/${coverageException.id}/resolve`, {
+      method: "POST", body: JSON.stringify({
+        action: "confirm_coverage", expectedRevision: coverageException.sourceRevision, idempotencyKey: randomUUID(),
+      }),
+    });
+    assert.equal(confirmedCoverage.status, 200);
+    assert.deepEqual(await nonFinancialSnapshot(aliceSession, aliceProfileId), beforeScan, "coverage confirmation must not mutate financial facts");
+    const afterCoverageConfirmation = await scanProfile(aliceProfileId);
+    assert.ok(!afterCoverageConfirmation.some(item => item.id === coverageException.id && item.status === "open"), "a confirmed unchanged coverage observation must remain closed until its facts disappear and return");
     const financialRowsBefore = await db.select({
       amount: transactionsTable.amount,
       recordType: transactionsTable.recordType,
@@ -167,6 +212,7 @@ test("M10 exceptions are deterministic, profile-bound, revision-safe and financi
     }).from(transactionsTable).where(eq(transactionsTable.profileId, aliceProfileId));
     assert.deepEqual(computePLBreakdown(financialRowsAfterDismissal, []), pAndLBefore, "dismissal cannot change P&L");
     assert.deepEqual(financialRowsAfterDismissal.map(row => [row.amount, row.ledgerStatus]), ledgerBefore, "dismissal cannot change canonical cash movements");
+    assert.deepEqual(await nonFinancialSnapshot(aliceSession, aliceProfileId), beforeScan, "dismissal must not change financial, tax, cash, SA, transaction, or evidence facts");
     const events = await db.select().from(reconciliationEventsTable).where(eq(reconciliationEventsTable.exceptionId, unclassifiedException.id));
     assert.equal(events.length, 1, "finalize must write one immutable event");
     const forbidden = await request(bobSession, `/profiles/${aliceProfileId}/reconciliation/exceptions/${unclassifiedException.id}`);
@@ -209,7 +255,6 @@ test("M10 exceptions are deterministic, profile-bound, revision-safe and financi
     afterClear = await scanProfile(aliceProfileId);
     assert.ok(!afterClear.some(item => item.id === coverageException.id && item.status === "open"), "new in-period activity must retire a no-activity exception");
 
-    const duplicateException = firstScan.find(item => item.ruleKey === "possible_duplicate_candidate")!;
     await db.update(bankImportRowsTable).set({ duplicateStatus: "none" }).where(eq(bankImportRowsTable.id, duplicateRow.id));
     afterClear = await scanProfile(aliceProfileId);
     assert.ok(!afterClear.some(item => item.id === duplicateException.id && item.status === "open"), "cleared duplicate staging facts must retire their exception");

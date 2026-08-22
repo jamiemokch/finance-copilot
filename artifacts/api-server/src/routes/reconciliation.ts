@@ -160,10 +160,11 @@ async function materializeObservation(
   ));
 
   if (existing) {
-    if (!existing.isCurrent || ["resolved", "superseded"].includes(existing.status)) {
-      // Dismissals are deliberately revision-scoped: an identical reappearing
-      // observation remains dismissed, while resolved/superseded observations
-      // become a fresh open review item.
+    if (!existing.isCurrent) {
+      // A resolved observation is reopened only after the scanner has first
+      // retired it because its triggering condition disappeared. This keeps a
+      // user-confirmed review closed while the exact same fact remains true,
+      // while still reopening it if that fact later returns.
       const [current] = await tx.update(reconciliationExceptionsTable).set({
         isCurrent: true,
         ...(existing.status === "dismissed" ? {} : {

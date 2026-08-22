@@ -974,6 +974,252 @@ export interface DemoResetResponse {
   message?: string;
 }
 
+export type ReconciliationExceptionStatus = typeof ReconciliationExceptionStatus[keyof typeof ReconciliationExceptionStatus];
+
+
+export const ReconciliationExceptionStatus = {
+  open: 'open',
+  resolving: 'resolving',
+  resolved: 'resolved',
+  dismissed: 'dismissed',
+  superseded: 'superseded',
+} as const;
+
+export type ReconciliationExceptionSeverity = typeof ReconciliationExceptionSeverity[keyof typeof ReconciliationExceptionSeverity];
+
+
+export const ReconciliationExceptionSeverity = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  critical: 'critical',
+} as const;
+
+export type ReconciliationExceptionObservedFacts = { [key: string]: unknown };
+
+export type ReconciliationExceptionSource = {
+  kind: string;
+  id: string;
+};
+
+export interface ReconciliationException {
+  id: string;
+  profileId: string;
+  ruleKey: string;
+  exceptionType: string;
+  status: ReconciliationExceptionStatus;
+  severity: ReconciliationExceptionSeverity;
+  sourceKind: string;
+  sourceId: string;
+  sourceRevision: string;
+  observationFingerprint: string;
+  observedFacts: ReconciliationExceptionObservedFacts;
+  detectorVersion: number;
+  isCurrent: boolean;
+  /** @nullable */
+  currentResolutionSummary?: string | null;
+  /** @nullable */
+  dismissalRevision?: string | null;
+  /** @nullable */
+  resolvedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  source?: ReconciliationExceptionSource;
+}
+
+export type ReconciliationEventObservedFacts = { [key: string]: unknown };
+
+/**
+ * @nullable
+ */
+export type ReconciliationEventBeforeSnapshot = { [key: string]: unknown } | null;
+
+/**
+ * @nullable
+ */
+export type ReconciliationEventAfterSnapshot = { [key: string]: unknown } | null;
+
+export type ReconciliationEventRelationshipRefs = { [key: string]: unknown };
+
+export interface ReconciliationEvent {
+  id: string;
+  profileId: string;
+  exceptionId: string;
+  /** @nullable */
+  actorUserId?: string | null;
+  action: string;
+  /** @nullable */
+  idempotencyKey?: string | null;
+  /** @nullable */
+  reason?: string | null;
+  observedFacts: ReconciliationEventObservedFacts;
+  /** @nullable */
+  beforeSnapshot?: ReconciliationEventBeforeSnapshot;
+  /** @nullable */
+  afterSnapshot?: ReconciliationEventAfterSnapshot;
+  relationshipRefs: ReconciliationEventRelationshipRefs;
+  createdAt: string;
+}
+
+export type ReconciliationCoverageCheckState = typeof ReconciliationCoverageCheckState[keyof typeof ReconciliationCoverageCheckState];
+
+
+export const ReconciliationCoverageCheckState = {
+  declared: 'declared',
+  confirmed: 'confirmed',
+  amended: 'amended',
+} as const;
+
+export type ReconciliationCoverageCheckCalculatedFacts = { [key: string]: unknown };
+
+export interface ReconciliationCoverageCheck {
+  id: string;
+  profileId: string;
+  financialAccountId: string;
+  periodStart: string;
+  periodEnd: string;
+  completeExpectedCoverage: boolean;
+  /** @nullable */
+  statementClosingBalance?: number | null;
+  /** @nullable */
+  statementSourceBatchId?: string | null;
+  /** @nullable */
+  statementEndpointRowId?: string | null;
+  state: ReconciliationCoverageCheckState;
+  calculatedFacts: ReconciliationCoverageCheckCalculatedFacts;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReconciliationWorkflowTaskSource = {
+  batchId: string;
+  financialAccountId: string;
+};
+
+export interface ReconciliationWorkflowTask {
+  id: string;
+  kind: 'staged_bank_import';
+  title: string;
+  status: string;
+  source: ReconciliationWorkflowTaskSource;
+  href: string;
+  updatedAt: string;
+}
+
+export interface ReconciliationResponse {
+  exceptions: ReconciliationException[];
+  workflowTasks: ReconciliationWorkflowTask[];
+  coverageChecks: ReconciliationCoverageCheck[];
+}
+
+export interface ReconciliationExceptionDetail {
+  exception: ReconciliationException;
+  events: ReconciliationEvent[];
+}
+
+export type ReconciliationClassificationFieldsAccountingClassification = typeof ReconciliationClassificationFieldsAccountingClassification[keyof typeof ReconciliationClassificationFieldsAccountingClassification];
+
+
+export const ReconciliationClassificationFieldsAccountingClassification = {
+  income: 'income',
+  expense: 'expense',
+  transfer: 'transfer',
+  owner_funds: 'owner_funds',
+  drawings: 'drawings',
+  loan: 'loan',
+  tax_payment: 'tax_payment',
+  unknown: 'unknown',
+} as const;
+
+export interface ReconciliationClassificationFields {
+  date?: string;
+  /** @minLength 1 */
+  description?: string;
+  amount?: number;
+  /** @minLength 1 */
+  category?: string;
+  /** @minLength 1 */
+  taxTreatment?: string;
+  accountingClassification?: ReconciliationClassificationFieldsAccountingClassification;
+}
+
+export type ReconciliationResolutionInputAction = typeof ReconciliationResolutionInputAction[keyof typeof ReconciliationResolutionInputAction];
+
+
+export const ReconciliationResolutionInputAction = {
+  acknowledge: 'acknowledge',
+  dismiss: 'dismiss',
+  classify_transaction: 'classify_transaction',
+  attach_evidence: 'attach_evidence',
+  detach_evidence: 'detach_evidence',
+  audit_void: 'audit_void',
+  retain_both: 'retain_both',
+  return_to_staging: 'return_to_staging',
+  confirm_coverage: 'confirm_coverage',
+  set_support_expectation: 'set_support_expectation',
+} as const;
+
+/**
+ * @nullable
+ */
+export type ReconciliationResolutionInputExpectationState = typeof ReconciliationResolutionInputExpectationState[keyof typeof ReconciliationResolutionInputExpectationState] | null;
+
+
+export const ReconciliationResolutionInputExpectationState = {
+  required: 'required',
+  not_required: 'not_required',
+  unspecified: 'unspecified',
+} as const;
+
+export interface ReconciliationResolutionInput {
+  action: ReconciliationResolutionInputAction;
+  /** @minLength 1 */
+  expectedRevision: string;
+  idempotencyKey: string;
+  /**
+     * @maxLength 2000
+     * @nullable
+     */
+  reason?: string | null;
+  /** @nullable */
+  transactionId?: string | null;
+  /** @nullable */
+  evidenceId?: string | null;
+  /** @nullable */
+  coverageCheckId?: string | null;
+  /** @nullable */
+  expectationState?: ReconciliationResolutionInputExpectationState;
+  /**
+     * @maxLength 120
+     * @nullable
+     */
+  expectationSource?: string | null;
+  /** @nullable */
+  fields?: ReconciliationClassificationFields | null;
+}
+
+export interface ReconciliationResolutionResponse {
+  exception: ReconciliationException;
+  replayed: boolean;
+}
+
+export interface ReconciliationCoverageCheckInput {
+  accountId: string;
+  periodStart: string;
+  periodEnd: string;
+  completeExpectedCoverage: boolean;
+  /** @nullable */
+  statementClosingBalance?: number | null;
+  /** @nullable */
+  statementSourceBatchId?: string | null;
+  /** @nullable */
+  statementEndpointRowId?: string | null;
+}
+
+export type ReconciliationCoverageMutationResponse = ReconciliationResponse & {
+  coverageCheck: ReconciliationCoverageCheck;
+};
+
 /**
  * Opaque session token — `Bearer <sid>`.
  */
