@@ -139,6 +139,22 @@ export const RequestUploadUrlResponse = zod.object({
 
 
 /**
+ * Uploads a private object without browser-to-storage CORS. Supplying X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
+ * @summary Upload private bytes through the API server
+ */
+export const UploadPrivateObjectDirectHeader = zod.object({
+  "Authorization": zod.string().optional().describe('Opaque session token — `Bearer <sid>`.'),
+  "X-Filename": zod.string().optional(),
+  "X-Content-Type": zod.string().optional(),
+  "X-Profile-Id": zod.string().optional().describe('An authenticated profile ID for a logical private-object binding.')
+})
+
+export const UploadPrivateObjectDirectResponse = zod.object({
+  "objectPath": zod.string()
+})
+
+
+/**
  * @summary Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
  */
 export const GetPublicObjectParams = zod.object({

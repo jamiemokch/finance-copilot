@@ -88,6 +88,26 @@ export const privateUploadObjectsTable = pgTable('private_upload_objects', {
     .where(sql`${table.contentHash} is not null`),
 ]);
 
+/**
+ * A private blob may be physically reused, but every profile that uses it gets
+ * an explicit logical binding. Profile-scoped evidence routes are the only
+ * supported way to read or mutate evidence once it is registered.
+ */
+export const privateUploadProfileBindingsTable = pgTable('private_upload_profile_bindings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  objectPath: text('object_path').notNull(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => usersTable.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('private_upload_profile_binding_unique').on(table.profileId, table.objectPath),
+  index('private_upload_profile_binding_object_idx').on(table.objectPath, table.userId),
+]);
+
 // ─── Evidence Items ───────────────────────────────────────────────────────────
 
 export const evidenceItemsTable = pgTable('evidence_items', {

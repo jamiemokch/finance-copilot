@@ -69,6 +69,7 @@ import type {
   Transaction,
   TransactionInput,
   TransactionUpdate,
+  UploadPrivateObjectDirect200,
   UploadUrlRequest,
   UploadUrlResponse
 } from './api.schemas';
@@ -718,6 +719,78 @@ export const useRequestUploadUrl = <TError = ErrorType<ErrorEnvelope>,
         TContext
       > => {
       return useMutation(getRequestUploadUrlMutationOptions(options));
+    }
+
+export const getUploadPrivateObjectDirectUrl = () => {
+
+
+
+
+  return `/api/storage/uploads/direct`
+}
+
+/**
+ * Uploads a private object without browser-to-storage CORS. Supplying X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
+ * @summary Upload private bytes through the API server
+ */
+export const uploadPrivateObjectDirect = async (uploadPrivateObjectDirectBody: Blob, options?: Parameters<typeof customFetch>[1]): Promise<UploadPrivateObjectDirect200> => {
+
+  return customFetch<UploadPrivateObjectDirect200>(getUploadPrivateObjectDirectUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...options?.headers },
+    body: uploadPrivateObjectDirectBody
+  }
+);}
+
+
+
+
+
+export const getUploadPrivateObjectDirectMutationOptions = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadPrivateObjectDirect>>, TError,{data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof uploadPrivateObjectDirect>>, TError,{data: BodyType<Blob>}, TContext> => {
+
+const mutationKey = ['uploadPrivateObjectDirect'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof uploadPrivateObjectDirect>>, {data: BodyType<Blob>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  uploadPrivateObjectDirect(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UploadPrivateObjectDirectMutationResult = NonNullable<Awaited<ReturnType<typeof uploadPrivateObjectDirect>>>
+    export type UploadPrivateObjectDirectMutationBody = BodyType<Blob>
+    export type UploadPrivateObjectDirectMutationError = ErrorType<ErrorEnvelope>
+
+    /**
+ * @summary Upload private bytes through the API server
+ */
+export const useUploadPrivateObjectDirect = <TError = ErrorType<ErrorEnvelope>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadPrivateObjectDirect>>, TError,{data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof uploadPrivateObjectDirect>>,
+        TError,
+        {data: BodyType<Blob>},
+        TContext
+      > => {
+      return useMutation(getUploadPrivateObjectDirectMutationOptions(options));
     }
 
 export const getGetPublicObjectUrl = (filePath: string,) => {

@@ -110,6 +110,7 @@ export * from './transactionLedgerStatus';
 export * from './transactionRecordType';
 export * from './transactionUpdate';
 export * from './transactionUpdateAccountingClassification';
+export * from './uploadPrivateObjectDirect200';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';
 export * from './ytdProfitLoss';

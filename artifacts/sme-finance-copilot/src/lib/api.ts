@@ -324,7 +324,7 @@ export const evidenceApi = {
       method: "DELETE",
     }),
   /** Upload file bytes directly through the API server (avoids GCS CORS) */
-  uploadDirect: async (file: File): Promise<{ objectPath: string }> => {
+  uploadDirect: async (file: File, profileId?: string): Promise<{ objectPath: string }> => {
     const buffer = await file.arrayBuffer();
     return apiFetch<{ objectPath: string }>("/storage/uploads/direct", {
       method: "POST",
@@ -332,6 +332,7 @@ export const evidenceApi = {
         "Content-Type": "application/octet-stream",
         "X-Filename": encodeURIComponent(file.name),
         "X-Content-Type": file.type || "application/octet-stream",
+        ...(profileId ? { "X-Profile-Id": profileId } : {}),
       },
       body: buffer,
     });

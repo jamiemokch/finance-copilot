@@ -5,5 +5,5 @@
 - [SME Finance Copilot idempotency](sme-copilot-idempotency.md) — retries need durable source identities and atomic outcome writes, not only client-side double-submit guards
 - [Resumable evidence processing](resumable-evidence-processing.md) — recovery leases must be fenced by a claim token before any financial outcome is persisted
 - [Income-tax estimate safeguards](income-tax-estimate-safeguards.md) — estimates use allowable ledger profit; tax-year-scoped personal income and unsupported accrual timing stay incomplete
-- [OpenAPI Zod number compatibility](openapi-zod-number-compatibility.md) — this generator emits unavailable zod.int() for integer schemas; use number for count-like fields
+- [OpenAPI Zod generator compatibility](openapi-zod-number-compatibility.md) — avoid schema formats that emit unavailable Zod helpers in the installed generator/toolchain
 - [Bank CSV import safety model](bank-csv-import-safety.md) — imports stage first, require explicit duplicate choices, then atomically write unreviewed ledger movements

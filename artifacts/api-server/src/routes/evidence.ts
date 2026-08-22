@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { Readable } from "stream";
-import { bankImportBatchesTable, db, privateUploadObjectsTable } from "@workspace/db";
+import {
+  bankImportBatchesTable, db, privateUploadObjectsTable, privateUploadProfileBindingsTable,
+} from "@workspace/db";
 import {
   evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
   inboxItemsTable, transactionsTable, profilesTable,
@@ -93,6 +95,9 @@ router.get("/profiles/:profileId/evidence/:evidenceId/download", async (req, res
     if (!evidence || evidence.documentLifecycle === "tombstoned") {
       res.status(404).json({ error: "Document not found" }); return;
     }
+    if (evidence.workflowVersion >= 2 && !(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
+      res.status(404).json({ error: "Document not found" }); return;
+    }
     const objectFile = await storageService.getObjectEntityFile(evidence.objectPath);
     const response = await storageService.downloadObject(objectFile, 0);
     res.status(response.status);
@@ -146,19 +151,26 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
     }
     let item: typeof evidenceItemsTable.$inferSelect;
     try {
-      [item] = await db.insert(evidenceItemsTable).values({
-        profileId: profile.id,
-        filename: body.data.filename,
-        objectPath: body.data.objectPath,
-        mimeType: body.data.mimeType,
-        category: body.data.category,
-        evidenceType: body.data.evidenceType,
-        status: "received",
-        workflowVersion: body.data.evidenceType === "document" ? 2 : 1,
-        reviewState: "pending",
-        contentHash: upload.contentHash,
-        objectSize: upload.objectSize,
-      }).returning();
+      [item] = await db.transaction(async (tx) => {
+        await tx.insert(privateUploadProfileBindingsTable).values({
+          profileId: profile.id,
+          objectPath: body.data.objectPath,
+          userId: req.user.id,
+        }).onConflictDoNothing();
+        return tx.insert(evidenceItemsTable).values({
+          profileId: profile.id,
+          filename: body.data.filename,
+          objectPath: body.data.objectPath,
+          mimeType: body.data.mimeType,
+          category: body.data.category,
+          evidenceType: body.data.evidenceType,
+          status: "received",
+          workflowVersion: body.data.evidenceType === "document" ? 2 : 1,
+          reviewState: "pending",
+          contentHash: upload.contentHash,
+          objectSize: upload.objectSize,
+        }).returning();
+      });
     } catch (err) {
       const dbError = err as { cause?: { code?: string } };
       if (dbError.cause?.code === "23505" && body.data.evidenceType === "document" && upload.contentHash) {
@@ -200,6 +212,14 @@ router.delete("/profiles/:profileId/evidence/:evidenceId", async (req, res) => {
       )).for("update");
       if (!evidenceItem) return { error: "Evidence item not found", status: 404 as const };
       if (evidenceItem.workflowVersion >= 2) {
+          const [binding] = await tx.select({ id: privateUploadProfileBindingsTable.id })
+            .from(privateUploadProfileBindingsTable)
+            .where(and(
+              eq(privateUploadProfileBindingsTable.profileId, profile.id),
+              eq(privateUploadProfileBindingsTable.objectPath, evidenceItem.objectPath),
+            ))
+            .limit(1);
+          if (!binding) return { error: "Evidence item not found", status: 404 as const };
         const [tombstoned] = await tx.update(evidenceItemsTable).set({
           documentLifecycle: "tombstoned",
         }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
@@ -277,6 +297,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 
     const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!existingEvidence) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (existingEvidence.workflowVersion >= 2 && !(await hasProfileObjectBinding(profile.id, existingEvidence.objectPath))) {
+      res.status(404).json({ error: "Evidence item not found" }); return;
+    }
     if (existingEvidence.workflowVersion >= 2 && existingEvidence.documentLifecycle !== "active") {
       res.status(409).json({ error: "This document is no longer active" }); return;
     }
@@ -890,6 +913,9 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/review", async (req, res
     if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
       res.status(404).json({ error: "Active reviewable document not found" }); return;
     }
+    if (!(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
+      res.status(404).json({ error: "Active reviewable document not found" }); return;
+    }
     const [updated] = await db.transaction(async (tx) => {
       const [item] = await tx.update(evidenceItemsTable).set({
         ...(body.data.extractedData ? { extractedData: body.data.extractedData } : {}),
@@ -937,6 +963,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
+      res.status(404).json({ error: "Active reviewable document not found" }); return;
+    }
+    if (!(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
       res.status(404).json({ error: "Active reviewable document not found" }); return;
     }
     const [existing] = await db.select().from(transactionsTable).where(and(
@@ -1037,6 +1066,10 @@ router.post("/profiles/:profileId/evidence/:evidenceId/tombstone", async (req, r
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidence || evidence.workflowVersion < 2 || !(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
+      res.status(404).json({ error: "Active document not found" }); return;
+    }
     const [updated] = await db.update(evidenceItemsTable).set({
       documentLifecycle: "tombstoned",
     }).where(and(
@@ -1063,6 +1096,10 @@ router.post("/profiles/:profileId/evidence/:evidenceId/replace", async (req, res
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!existingEvidence || existingEvidence.workflowVersion < 2 || !(await hasProfileObjectBinding(profile.id, existingEvidence.objectPath))) {
+      res.status(404).json({ error: "Active document not found" }); return;
+    }
     const [upload] = await db.select().from(privateUploadObjectsTable).where(and(
       eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
       eq(privateUploadObjectsTable.userId, req.user.id),
@@ -1084,6 +1121,11 @@ router.post("/profiles/:profileId/evidence/:evidenceId/replace", async (req, res
         workflowVersion: 2, reviewState: "pending", status: "received",
         contentHash: upload.contentHash, objectSize: upload.objectSize, replacementOfEvidenceId: original.id,
       }).returning();
+      await tx.insert(privateUploadProfileBindingsTable).values({
+        profileId: profile.id,
+        objectPath: body.data.objectPath,
+        userId: req.user.id,
+      }).onConflictDoNothing();
       await tx.insert(evidenceAuditEventsTable).values([
         { profileId: profile.id, evidenceId: original.id, actorUserId: req.user.id, eventType: "document_replaced", details: { replacementEvidenceId: created.id } },
         { profileId: profile.id, evidenceId: created.id, actorUserId: req.user.id, eventType: "replacement_registered", details: { replacedEvidenceId: original.id } },
@@ -1112,6 +1154,9 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
     const evidenceItem = await getEvidenceItem(profile.id, body.data.evidenceId);
     if (!transaction || !evidenceItem) { res.status(404).json({ error: "Transaction or evidence item not found" }); return; }
     if (evidenceItem.workflowVersion >= 2 && evidenceItem.documentLifecycle === "active") {
+      if (!(await hasProfileObjectBinding(profile.id, evidenceItem.objectPath))) {
+        res.status(404).json({ error: "Transaction or evidence item not found" }); return;
+      }
       const attached = await db.transaction(async (tx) => {
         const [activeEvidence] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
           eq(evidenceItemsTable.id, evidenceItem.id),
@@ -1164,6 +1209,17 @@ async function getEvidenceItem(profileId: string, evidenceId: string) {
     eq(evidenceItemsTable.id, evidenceId), eq(evidenceItemsTable.profileId, profileId),
   ));
   return item;
+}
+
+async function hasProfileObjectBinding(profileId: string, objectPath: string): Promise<boolean> {
+  const [binding] = await db.select({ id: privateUploadProfileBindingsTable.id })
+    .from(privateUploadProfileBindingsTable)
+    .where(and(
+      eq(privateUploadProfileBindingsTable.profileId, profileId),
+      eq(privateUploadProfileBindingsTable.objectPath, objectPath),
+    ))
+    .limit(1);
+  return Boolean(binding);
 }
 
 async function addEvidenceAudit(

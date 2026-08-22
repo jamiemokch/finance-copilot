@@ -975,3 +975,7 @@ export type LogoutBrowserSessionParams = {
 returnTo?: string;
 };
 
+export type UploadPrivateObjectDirect200 = {
+  objectPath: string;
+};
+

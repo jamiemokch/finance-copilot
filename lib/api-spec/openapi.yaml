@@ -205,6 +205,71 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
 
+  /storage/uploads/direct:
+    post:
+      tags: [Storage]
+      operationId: uploadPrivateObjectDirect
+      summary: Upload private bytes through the API server
+      description: >
+        Uploads a private object without browser-to-storage CORS. Supplying
+        X-Profile-Id binds the object to an authenticated business profile and
+        enables safe same-user byte reuse without granting cross-profile access.
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationSessionHeader'
+        - $ref: '#/components/parameters/SessionCookie'
+        - name: X-Filename
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Content-Type
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Profile-Id
+          in: header
+          required: false
+          description: An authenticated profile ID for a logical private-object binding.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Object stored or safely reused.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [objectPath]
+                properties:
+                  objectPath:
+                    type: string
+        '400':
+          description: Empty upload body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Authentication required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Requested profile was not found for the authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
   /storage/public-objects/{filePath}:
     get:
       tags: [Storage]

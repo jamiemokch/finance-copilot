@@ -14,3 +14,9 @@ For original documents, keep extraction/review separate from the ledger: only an
 **Why:** AI confidence and file identity are not financial authority. A file can support several records (or none), and lifecycle races must not silently reintroduce a detached or tombstoned relationship.
 
 **How to apply:** Gate every workflow-2 document route that could create import outcomes, use active-lifecycle predicates under transaction locks, and use server-derived content hashes with database uniqueness for object/document reuse. Do not let hash reuse suppress a later, legitimate link.
+
+Private bytes may be physically deduplicated for one uploader, but each business profile needs its own explicit logical object binding before a workflow-2 document may be registered, downloaded, processed, reviewed, linked, replaced, or tombstoned.
+
+**Why:** User-level object ownership alone lets a person with multiple profiles accidentally use one profile’s private evidence through another profile context.
+
+**How to apply:** Treat a matching hash as a byte-level optimization only. Create and verify the profile/object binding at every profile-scoped document boundary, and reject path-only private evidence reads after registration.

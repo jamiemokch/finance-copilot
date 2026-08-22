@@ -101,7 +101,7 @@ function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileI
     setStatus('working'); setMessage('Reading your document and checking the transaction…');
     try {
       if (!registeredEvidenceId.current) {
-        const { objectPath } = await evidenceApi.uploadDirect(file);
+        const { objectPath } = await evidenceApi.uploadDirect(file, profileId);
         const item = await evidenceApi.register(profileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' });
         registeredEvidenceId.current = item.id;
       }
@@ -189,7 +189,7 @@ function BankImportFlow({ profileId, refresh, onBack }: { profileId: string; ref
     try {
       if (!file.name.toLowerCase().endsWith('.csv')) throw new Error('Bank imports accept CSV files only.');
       const selectedAccountId = await accountForUpload();
-      const { objectPath } = await evidenceApi.uploadDirect(file);
+      const { objectPath } = await evidenceApi.uploadDirect(file, profileId);
       const result = await bankImportsApi.register(profileId, { filename: file.name, objectPath, accountId: selectedAccountId });
       setBatch(result.batch); setRows(result.rows);
       setHeaders(result.proposal.headers); setExamples(result.proposal.examples);

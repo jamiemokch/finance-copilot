@@ -10,16 +10,17 @@ description: Architecture decisions for the full-stack SME Finance Copilot — w
 - Auth: Replit OIDC (session cookie, requireAuth middleware)
 
 ## Data flow (live since the backend rewrite)
-1. User uploads evidence → POST /storage/uploads/direct (server-side GCS save)
+1. User uploads evidence → POST /storage/uploads/direct (server-side GCS save) with a profile-scoped logical binding
 2. POST /evidence/:id/process → AI extraction (GPT-4o-mini) with ExtractionContext
-3. High-confidence (≥0.75) → auto-post transaction; low-confidence → Inbox item
-4. User resolves Inbox → PATCH /inbox/:id/resolve → write ledger transaction
-5. GET /position recomputes everything from transactions on demand (no stored P&L)
+3. M9 documents stop at review-required; only explicit confirmation creates a canonical transaction
+4. Legacy workflow-1 evidence retains the compatibility path where high-confidence extraction may auto-post; this is not available to M9 documents
+5. User resolves legacy Inbox items → PATCH /inbox/:id/resolve → write ledger transaction
+6. GET /position recomputes everything from transactions on demand (no stored P&L)
 
 ## Key backend decisions
 - Finance arithmetic is server-side only (finance.ts); AI never calculates
 - Non-deductible items ARE recorded in ledger (taxTreatment: non_deductible) for transparency
-- Income items (high-confidence) auto-post as positive transactions
+- High-confidence auto-posting is legacy workflow-1 compatibility behavior only; M9 documents require explicit confirmation
 - Mixed-use: allowableAmount = amount × allowablePercentage/100 (stored alongside full amount)
 - taxImpact on inbox resolution = computeTaxImpactDiff(profitBefore, profitAfter) — no flat %
 - Business Ideas = forecast layer only (decision_memory table, never touches transactions)
