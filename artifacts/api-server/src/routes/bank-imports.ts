@@ -22,6 +22,7 @@ import {
   validateBankMapping,
 } from "../lib/bank-csv.js";
 import { requireProfile } from "./profiles.js";
+import { scanProfile } from "./reconciliation.js";
 
 const router = Router();
 const storageService = new ObjectStorageService();
@@ -529,6 +530,7 @@ router.post("/profiles/:profileId/bank-imports/:batchId/commit", async (req, res
     });
     if (!committed) { res.status(409).json({ error: "This bank import was reclaimed by another request." }); return; }
     res.json({ batch: publicBatch(committed), rows: await batchRows(committed.id), replayed: false });
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-bank-import reconciliation scan failed"));
   } catch (err) {
     req.log.error(err, "Failed to commit bank import");
     const databaseCode = (err as { code?: string; cause?: { code?: string } }).code
@@ -583,6 +585,7 @@ router.delete("/profiles/:profileId/bank-imports/:batchId", async (req, res) => 
       eq(bankImportBatchesTable.profileId, profile.id),
     )).returning();
     res.json({ batch: publicBatch(discarded) });
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-bank-import reconciliation scan failed"));
   } catch (err) {
     req.log.error(err, "Failed to discard bank import");
     res.status(500).json({ error: "Could not discard this bank import" });

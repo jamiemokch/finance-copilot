@@ -434,6 +434,151 @@ export const evidenceAuditEventsTable = pgTable('evidence_audit_events', {
   index('evidence_audit_events_evidence_idx').on(table.evidenceId, table.createdAt),
 ]);
 
+// ─── M10 Reconciliation & Completeness Review ────────────────────────────────
+
+/**
+ * Reconciliation exceptions are observations about existing owned records. They
+ * deliberately do not contain ledger amounts, balances, tax treatment, or
+ * replacement transactions.
+ */
+export const reconciliationExceptionsTable = pgTable('reconciliation_exceptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  ruleKey: text('rule_key').notNull(),
+  exceptionType: text('exception_type').notNull(),
+  // open | resolving | resolved | dismissed | superseded
+  status: text('status').notNull().default('open'),
+  // Determined by rule and observed facts, never by AI or a heuristic score.
+  severity: text('severity').notNull(),
+  sourceKind: text('source_kind').notNull(),
+  sourceId: text('source_id').notNull(),
+  sourceRevision: text('source_revision').notNull(),
+  observationFingerprint: text('observation_fingerprint').notNull(),
+  observedFacts: jsonb('observed_facts').notNull().default({}),
+  detectorVersion: integer('detector_version').notNull().default(1),
+  isCurrent: boolean('is_current').notNull().default(true),
+  currentResolutionSummary: text('current_resolution_summary'),
+  dismissalRevision: text('dismissal_revision'),
+  claimToken: text('claim_token'),
+  claimedByUserId: text('claimed_by_user_id')
+    .references(() => usersTable.id, { onDelete: 'set null' }),
+  claimedAt: timestamp('claimed_at', { withTimezone: true }),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => [
+  uniqueIndex('reconciliation_exception_identity_unique').on(
+    table.profileId,
+    table.ruleKey,
+    table.sourceKind,
+    table.sourceId,
+    table.observationFingerprint,
+  ),
+  index('reconciliation_exception_profile_state_idx').on(table.profileId, table.isCurrent, table.status),
+  index('reconciliation_exception_source_idx').on(table.profileId, table.sourceKind, table.sourceId),
+]);
+
+export const reconciliationEventsTable = pgTable('reconciliation_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  exceptionId: uuid('exception_id')
+    .notNull()
+    .references(() => reconciliationExceptionsTable.id, { onDelete: 'cascade' }),
+  actorUserId: text('actor_user_id')
+    .references(() => usersTable.id, { onDelete: 'set null' }),
+  action: text('action').notNull(),
+  idempotencyKey: text('idempotency_key'),
+  reason: text('reason'),
+  observedFacts: jsonb('observed_facts').notNull().default({}),
+  beforeSnapshot: jsonb('before_snapshot'),
+  afterSnapshot: jsonb('after_snapshot'),
+  relationshipRefs: jsonb('relationship_refs').notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('reconciliation_event_idempotency_unique').on(table.exceptionId, table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} is not null`),
+  index('reconciliation_event_exception_idx').on(table.exceptionId, table.createdAt),
+]);
+
+/**
+ * A coverage check is only eligible for reconciliation after the user declares
+ * the account and period complete. Statement endpoint IDs point back to
+ * statement/import metadata; they are never reconstructed from transactions.
+ */
+export const reconciliationCoverageChecksTable = pgTable('reconciliation_coverage_checks', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  financialAccountId: uuid('financial_account_id')
+    .notNull()
+    .references(() => financialAccountsTable.id, { onDelete: 'cascade' }),
+  periodStart: text('period_start').notNull(),
+  periodEnd: text('period_end').notNull(),
+  completeExpectedCoverage: boolean('complete_expected_coverage').notNull().default(false),
+  statementClosingBalance: doublePrecision('statement_closing_balance'),
+  statementSourceBatchId: uuid('statement_source_batch_id'),
+  statementEndpointRowId: uuid('statement_endpoint_row_id'),
+  // declared | confirmed | amended
+  state: text('state').notNull().default('declared'),
+  calculatedFacts: jsonb('calculated_facts').notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => [
+  index('reconciliation_coverage_profile_period_idx').on(table.profileId, table.periodStart, table.periodEnd),
+  index('reconciliation_coverage_account_idx').on(table.financialAccountId, table.periodStart, table.periodEnd),
+]);
+
+/**
+ * Supporting-evidence expectation is review/compliance state with provenance,
+ * not a boolean financial fact. It is intentionally separate from transactions.
+ */
+export const reconciliationSupportExpectationsTable = pgTable('reconciliation_support_expectations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  transactionId: uuid('transaction_id')
+    .notNull()
+    .references(() => transactionsTable.id, { onDelete: 'cascade' }),
+  // required | not_required | unspecified
+  expectationState: text('expectation_state').notNull().default('unspecified'),
+  reason: text('reason'),
+  source: text('source').notNull().default('user'),
+  changedByUserId: text('changed_by_user_id')
+    .references(() => usersTable.id, { onDelete: 'set null' }),
+  changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => [
+  uniqueIndex('reconciliation_support_expectation_transaction_unique').on(table.profileId, table.transactionId),
+  index('reconciliation_support_expectation_profile_state_idx').on(table.profileId, table.expectationState),
+]);
+
+export const insertReconciliationExceptionSchema = createInsertSchema(reconciliationExceptionsTable).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type ReconciliationException = typeof reconciliationExceptionsTable.$inferSelect;
+export type InsertReconciliationException = z.infer<typeof insertReconciliationExceptionSchema>;
+export type ReconciliationEvent = typeof reconciliationEventsTable.$inferSelect;
+export type ReconciliationCoverageCheck = typeof reconciliationCoverageChecksTable.$inferSelect;
+export type ReconciliationSupportExpectation = typeof reconciliationSupportExpectationsTable.$inferSelect;
+
 // ─── Inbox Items ──────────────────────────────────────────────────────────────
 
 export const inboxItemsTable = pgTable('inbox_items', {

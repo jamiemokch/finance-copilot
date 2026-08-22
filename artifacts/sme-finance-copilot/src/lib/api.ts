@@ -568,6 +568,147 @@ export const bankImportsApi = {
     apiFetch<{ batch: BankImportBatch }>(`/profiles/${profileId}/bank-imports/${batchId}`, { method: 'DELETE' }),
 };
 
+// ── M10 Reconciliation ────────────────────────────────────────────────────────
+
+export type ReconciliationStatus = 'open' | 'resolving' | 'resolved' | 'dismissed' | 'superseded';
+export type ReconciliationSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface APIReconciliationException {
+  id: string;
+  profileId: string;
+  ruleKey: string;
+  exceptionType: string;
+  status: ReconciliationStatus;
+  severity: ReconciliationSeverity;
+  sourceKind: string;
+  sourceId: string;
+  sourceRevision: string;
+  observationFingerprint: string;
+  observedFacts: Record<string, unknown>;
+  detectorVersion: number;
+  isCurrent: boolean;
+  currentResolutionSummary?: string | null;
+  dismissalRevision?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string | null;
+  source: { kind: string; id: string };
+}
+
+export interface APIReconciliationEvent {
+  id: string;
+  profileId: string;
+  exceptionId: string;
+  action: string;
+  idempotencyKey?: string | null;
+  reason?: string | null;
+  observedFacts: Record<string, unknown>;
+  beforeSnapshot?: unknown;
+  afterSnapshot?: unknown;
+  relationshipRefs: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface APIReconciliationWorkflowTask {
+  id: string;
+  kind: 'staged_bank_import';
+  title: string;
+  status: string;
+  source: { batchId: string; financialAccountId: string };
+  href: string;
+  updatedAt: string;
+}
+
+export interface APIReconciliationCoverageCheck {
+  id: string;
+  profileId: string;
+  financialAccountId: string;
+  periodStart: string;
+  periodEnd: string;
+  completeExpectedCoverage: boolean;
+  statementClosingBalance?: number | null;
+  statementSourceBatchId?: string | null;
+  statementEndpointRowId?: string | null;
+  state: 'declared' | 'confirmed' | 'amended';
+  calculatedFacts: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface APIReconciliationResponse {
+  exceptions: APIReconciliationException[];
+  workflowTasks: APIReconciliationWorkflowTask[];
+  coverageChecks: APIReconciliationCoverageCheck[];
+}
+
+type ReconciliationResolution = {
+  action:
+    | 'acknowledge'
+    | 'dismiss'
+    | 'classify_transaction'
+    | 'attach_evidence'
+    | 'detach_evidence'
+    | 'audit_void'
+    | 'retain_both'
+    | 'return_to_staging'
+    | 'confirm_coverage'
+    | 'set_support_expectation';
+  expectedRevision: string;
+  idempotencyKey: string;
+  reason?: string;
+  transactionId?: string;
+  evidenceId?: string;
+  coverageCheckId?: string;
+  expectationState?: 'required' | 'not_required' | 'unspecified';
+  expectationSource?: string;
+  fields?: {
+    date?: string;
+    description?: string;
+    amount?: number;
+    category?: string;
+    taxTreatment?: string;
+    accountingClassification?: 'income' | 'expense' | 'transfer' | 'owner_funds' | 'drawings' | 'loan' | 'tax_payment' | 'unknown';
+  };
+};
+
+type CoverageCheckInput = {
+  accountId: string;
+  periodStart: string;
+  periodEnd: string;
+  completeExpectedCoverage: boolean;
+  statementClosingBalance?: number | null;
+  statementSourceBatchId?: string | null;
+  statementEndpointRowId?: string | null;
+};
+
+export const reconciliationApi = {
+  list: (profileId: string) =>
+    apiFetch<APIReconciliationResponse>(`/profiles/${profileId}/reconciliation`),
+  scan: (profileId: string) =>
+    apiFetch<APIReconciliationResponse>(`/profiles/${profileId}/reconciliation/scan`, { method: 'POST' }),
+  detail: (profileId: string, exceptionId: string) =>
+    apiFetch<{ exception: APIReconciliationException; events: APIReconciliationEvent[] }>(
+      `/profiles/${profileId}/reconciliation/exceptions/${exceptionId}`,
+    ),
+  resolve: (profileId: string, exceptionId: string, data: ReconciliationResolution) =>
+    apiFetch<{ exception: APIReconciliationException; replayed: boolean }>(
+      `/profiles/${profileId}/reconciliation/exceptions/${exceptionId}/resolve`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  coverageChecks: (profileId: string) =>
+    apiFetch<APIReconciliationCoverageCheck[]>(`/profiles/${profileId}/reconciliation/coverage-checks`),
+  createCoverageCheck: (profileId: string, data: CoverageCheckInput) =>
+    apiFetch<{ coverageCheck: APIReconciliationCoverageCheck } & APIReconciliationResponse>(
+      `/profiles/${profileId}/reconciliation/coverage-checks`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  updateCoverageCheck: (profileId: string, checkId: string, data: CoverageCheckInput) =>
+    apiFetch<{ coverageCheck: APIReconciliationCoverageCheck } & APIReconciliationResponse>(
+      `/profiles/${profileId}/reconciliation/coverage-checks/${checkId}`,
+      { method: 'PATCH', body: JSON.stringify(data) },
+    ),
+};
+
 // ── Income-tax estimate ───────────────────────────────────────────────────────
 
 export interface APIIncomeTaxBand {

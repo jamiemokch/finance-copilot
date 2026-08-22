@@ -1,14 +1,15 @@
 import { Card, Badge, Button } from '@/components/ui';
 import { useStore, ComplianceItem, InboxItem, SAChecklistItem } from '@/lib/store';
+import { bankImportsApi, reconciliationApi } from '@/lib/api';
 import {
   Clock, Calendar, CheckCircle2, AlertCircle, FileText, CheckSquare,
   User, Bot, Briefcase, Circle, CalendarClock, MessageSquare, Download,
-  Eye, ChevronDown, ChevronUp
+  Eye, ChevronDown, ChevronUp, RefreshCw, ShieldCheck, ArrowRight, ListChecks
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
 
-type TabId = 'todo' | 'timeline';
+type TabId = 'todo' | 'reconciliation' | 'timeline';
 
 // ─── Compliance Timeline Tab ──────────────────────────────────────────────────
 
@@ -404,6 +405,243 @@ function InboxTab() {
   );
 }
 
+// ─── M10 Reconciliation Tab ───────────────────────────────────────────────────
+
+function formatObservedFacts(facts: Record<string, unknown>) {
+  const entries = Object.entries(facts).filter(([, value]) =>
+    typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean',
+  ).slice(0, 6);
+  return entries.map(([key, value]) => `${key.replaceAll(/([A-Z])/g, ' $1')}: ${String(value)}`);
+}
+
+function ReconciliationTab() {
+  const {
+    activeProfileId, reconciliationExceptions, reconciliationWorkflowTasks,
+    reconciliationCoverageChecks, evidenceItems, refreshData, refreshReconciliation,
+  } = useStore();
+  const [workingId, setWorkingId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
+  const [accounts, setAccounts] = useState<Array<{ id: string; displayName: string }>>([]);
+  const [showCoverage, setShowCoverage] = useState(false);
+  const [coverageForm, setCoverageForm] = useState({ accountId: '', periodStart: '', periodEnd: '', closingBalance: '' });
+
+  useEffect(() => {
+    let cancelled = false;
+    setAccounts([]);
+    setCoverageForm({ accountId: '', periodStart: '', periodEnd: '', closingBalance: '' });
+    if (!activeProfileId) return () => { cancelled = true; };
+    bankImportsApi.accounts(activeProfileId)
+      .then(items => {
+        if (!cancelled) {
+          setAccounts(items.map(item => ({ id: item.id, displayName: item.displayName })));
+        }
+      })
+      .catch(() => { if (!cancelled) setError('We could not load Financial Accounts for a coverage declaration.'); });
+    return () => { cancelled = true; };
+  }, [activeProfileId]);
+
+  const openExceptions = reconciliationExceptions.filter(item => item.status === 'open' || item.status === 'resolving');
+  const resolvedExceptions = reconciliationExceptions.filter(item => !['open', 'resolving'].includes(item.status));
+
+  const refresh = async () => {
+    setRefreshing(true);
+    setError('');
+    try {
+      await refreshReconciliation();
+    } catch {
+      setError('We could not refresh the reconciliation review. Please try again.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const resolve = async (
+    exception: typeof reconciliationExceptions[number],
+    action: Parameters<typeof reconciliationApi.resolve>[2]['action'],
+    extra: Record<string, unknown> = {},
+  ) => {
+    if (!activeProfileId) return;
+    const profileId = activeProfileId;
+    setWorkingId(exception.id);
+    setError('');
+    try {
+      await reconciliationApi.resolve(profileId, exception.id, {
+        action,
+        expectedRevision: exception.sourceRevision,
+        idempotencyKey: crypto.randomUUID(),
+        ...extra,
+      } as Parameters<typeof reconciliationApi.resolve>[2]);
+      if (activeProfileId === profileId) await refreshData();
+    } catch (err) {
+      if (activeProfileId === profileId) {
+        setError(err instanceof Error ? err.message : 'We could not save that reconciliation action.');
+      }
+    } finally {
+      if (activeProfileId === profileId) setWorkingId(null);
+    }
+  };
+
+  const createCoverageCheck = async () => {
+    if (!activeProfileId || !coverageForm.accountId || !coverageForm.periodStart || !coverageForm.periodEnd) {
+      setError('Choose a Financial Account and a complete coverage period.');
+      return;
+    }
+    const profileId = activeProfileId;
+    setWorkingId('coverage');
+    setError('');
+    try {
+      await reconciliationApi.createCoverageCheck(profileId, {
+        accountId: coverageForm.accountId,
+        periodStart: coverageForm.periodStart,
+        periodEnd: coverageForm.periodEnd,
+        completeExpectedCoverage: true,
+        statementClosingBalance: coverageForm.closingBalance === '' ? null : Number(coverageForm.closingBalance),
+      });
+      if (activeProfileId === profileId) {
+        setShowCoverage(false);
+        await refreshData();
+      }
+    } catch (err) {
+      if (activeProfileId === profileId) setError(err instanceof Error ? err.message : 'We could not create the coverage check.');
+    } finally {
+      if (activeProfileId === profileId) setWorkingId(null);
+    }
+  };
+
+  const severityClass = (severity: string) => ({
+    high: 'bg-red-100 text-red-800 border-red-200',
+    critical: 'bg-red-100 text-red-800 border-red-200',
+    medium: 'bg-amber-100 text-amber-800 border-amber-200',
+    low: 'bg-slate-100 text-slate-700 border-slate-200',
+  }[severity] ?? 'bg-secondary text-muted-foreground');
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-5 border-primary/20 bg-primary/[0.03]">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+          <div className="flex gap-3">
+            <ShieldCheck className="w-5 h-5 text-primary mt-0.5 shrink-0" />
+            <div>
+              <h2 className="font-serif text-xl">Reconciliation review</h2>
+              <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+                These are fact-based review items. Refreshing, acknowledging, or dismissing them does not change Financial Memory, tax, cash, or P&amp;L.
+              </p>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" disabled={refreshing} onClick={() => void refresh()}>
+            <RefreshCw className={cn('w-4 h-4 mr-2', refreshing && 'animate-spin')} />
+            {refreshing ? 'Refreshing…' : 'Refresh facts'}
+          </Button>
+        </div>
+      </Card>
+
+      {error && <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg p-3">{error}</div>}
+
+      <Card className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-medium flex items-center gap-2"><ListChecks className="w-4 h-4 text-primary" />Declared coverage checks</h3>
+            <p className="text-sm text-muted-foreground mt-1">No-activity is checked only after you declare this account and period complete. A typed closing balance is never compared to transaction sums or dashboard cash.</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setShowCoverage(value => !value)}>
+            {showCoverage ? 'Cancel' : 'Declare coverage'}
+          </Button>
+        </div>
+        {showCoverage && (
+          <div className="mt-5 grid gap-3 md:grid-cols-4 border-t border-border pt-5">
+            <label className="text-sm font-medium">Financial Account
+              <select className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={coverageForm.accountId} onChange={event => setCoverageForm(value => ({ ...value, accountId: event.target.value }))}>
+                <option value="">Choose account</option>
+                {accounts.map(account => <option key={account.id} value={account.id}>{account.displayName}</option>)}
+              </select>
+            </label>
+            <label className="text-sm font-medium">Period start
+              <input type="date" className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={coverageForm.periodStart} onChange={event => setCoverageForm(value => ({ ...value, periodStart: event.target.value }))} />
+            </label>
+            <label className="text-sm font-medium">Period end
+              <input type="date" className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={coverageForm.periodEnd} onChange={event => setCoverageForm(value => ({ ...value, periodEnd: event.target.value }))} />
+            </label>
+            <label className="text-sm font-medium">Closing balance (optional)
+              <input type="number" step="0.01" className="mt-1 block h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={coverageForm.closingBalance} onChange={event => setCoverageForm(value => ({ ...value, closingBalance: event.target.value }))} />
+            </label>
+            <div className="md:col-span-4 flex justify-end">
+              <Button disabled={workingId === 'coverage'} onClick={() => void createCoverageCheck()}>{workingId === 'coverage' ? 'Saving…' : 'Declare complete coverage'}</Button>
+            </div>
+          </div>
+        )}
+        {reconciliationCoverageChecks.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-border text-sm text-muted-foreground">
+            {reconciliationCoverageChecks.map(check => <p key={check.id}>{check.periodStart} to {check.periodEnd} · {check.state} · {check.completeExpectedCoverage ? 'complete coverage declared' : 'not declared complete'}</p>)}
+          </div>
+        )}
+      </Card>
+
+      {reconciliationWorkflowTasks.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-5 border-b border-border">
+            <h3 className="font-medium">Saved bank-import work</h3>
+            <p className="text-sm text-muted-foreground mt-1">These remain bank CSV staging tasks in Add Records; they are not canonical reconciliation exceptions.</p>
+          </div>
+          <div className="divide-y divide-border">
+            {reconciliationWorkflowTasks.map(task => <div key={task.id} className="p-4 flex flex-wrap items-center justify-between gap-3">
+              <div><p className="font-medium text-sm">{task.title}</p><p className="text-xs text-muted-foreground mt-1">Staging status: {task.status.replaceAll('_', ' ')}</p></div>
+              <a href={task.href} className="inline-flex items-center text-sm text-primary hover:underline">Open Add Records <ArrowRight className="w-4 h-4 ml-1" /></a>
+            </div>)}
+          </div>
+        </Card>
+      )}
+
+      <div className="space-y-3">
+        <div className="flex items-center justify-between"><h3 className="font-serif text-xl">Needs review</h3><Badge variant="outline">{openExceptions.length}</Badge></div>
+        {openExceptions.length === 0 ? (
+          <Card className="p-8 text-center"><CheckCircle2 className="w-9 h-9 text-emerald-500 mx-auto mb-3" /><p className="font-medium">No open reconciliation exceptions</p><p className="text-sm text-muted-foreground mt-1">Any saved bank-import work is listed separately above.</p></Card>
+        ) : openExceptions.map(exception => {
+          const facts = formatObservedFacts(exception.observedFacts);
+          const sourceLink = exception.sourceKind === 'canonical_transaction' ? `/memory/${exception.sourceId}` : null;
+          const isMissingSupport = exception.ruleKey === 'missing_required_support';
+          const isClassification = exception.ruleKey === 'unclassified_bank_transaction';
+          const isCoverage = exception.sourceKind === 'coverage_check';
+          return <Card key={exception.id} className="p-5 space-y-4">
+            <div className="flex flex-wrap gap-2 items-start justify-between">
+              <div><h4 className="font-medium">{exception.exceptionType.replaceAll('_', ' ')}</h4><p className="text-sm text-muted-foreground mt-1">Rule: {exception.ruleKey.replaceAll('_', ' ')}</p></div>
+              <Badge className={cn('capitalize', severityClass(exception.severity))}>{exception.severity}</Badge>
+            </div>
+            <div className="rounded-lg bg-secondary/40 p-3 text-sm text-muted-foreground space-y-1">
+              {facts.length ? facts.map(fact => <p key={fact}>{fact}</p>) : <p>Observed facts are available for this item.</p>}
+            </div>
+            <p className="text-xs text-muted-foreground">No financial impact is applied until you explicitly confirm a specific source change.</p>
+            <div className="flex flex-wrap gap-2 justify-between items-center">
+              <div className="flex flex-wrap gap-2">
+                {sourceLink && <a href={sourceLink} className="inline-flex items-center text-sm text-primary hover:underline">View Financial Memory <ArrowRight className="w-4 h-4 ml-1" /></a>}
+                {isClassification && <Button size="sm" disabled={workingId === exception.id} onClick={() => {
+                  if (window.confirm('Classify this exact bank movement as an expense? This will update only this Financial Memory record.')) {
+                    void resolve(exception, 'classify_transaction', { fields: { accountingClassification: 'expense', category: 'expense', taxTreatment: 'deductible' } });
+                  }
+                }}>{workingId === exception.id ? 'Saving…' : 'Classify as expense'}</Button>}
+                {isMissingSupport && <Button size="sm" variant="outline" disabled={workingId === exception.id} onClick={() => void resolve(exception, 'set_support_expectation', { expectationState: 'not_required', reason: 'Confirmed by user during reconciliation review' })}>Mark support not required</Button>}
+                {isMissingSupport && evidenceItems.filter(item => item.documentLifecycle === 'active').length > 0 && <Button size="sm" variant="outline" disabled={workingId === exception.id} onClick={() => {
+                  const evidence = evidenceItems.find(item => item.documentLifecycle === 'active');
+                  if (evidence && window.confirm(`Attach "${evidence.filename}" as supporting evidence?`)) void resolve(exception, 'attach_evidence', { evidenceId: evidence.id });
+                }}>Attach an owned document</Button>}
+                {isCoverage && <Button size="sm" variant="outline" disabled={workingId === exception.id} onClick={() => void resolve(exception, 'confirm_coverage', { coverageCheckId: exception.sourceId, reason: 'Reviewed declared coverage check' })}>Confirm review</Button>}
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" disabled={workingId === exception.id} onClick={() => void resolve(exception, 'acknowledge', { reason: 'Reviewed without a financial change' })}>Acknowledge</Button>
+                <Button size="sm" variant="ghost" disabled={workingId === exception.id} onClick={() => {
+                  if (window.confirm('Dismiss this exact observed-facts revision? Changed source facts will create a new review item.')) void resolve(exception, 'dismiss', { reason: 'Dismissed for this observed-facts revision' });
+                }}>Dismiss</Button>
+              </div>
+            </div>
+          </Card>;
+        })}
+      </div>
+
+      {resolvedExceptions.length > 0 && <p className="text-xs text-muted-foreground text-center">{resolvedExceptions.length} resolved, dismissed, or superseded current revision{resolvedExceptions.length === 1 ? '' : 's'} retained in audit history.</p>}
+    </div>
+  );
+}
+
 // ─── Year-End Tab ─────────────────────────────────────────────────────────────
 
 function YearEndTab() {
@@ -610,14 +848,16 @@ function YearEndTab() {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Tasks() {
-  const { inboxItems, activeProfileId, complianceItems } = useStore();
+  const { inboxItems, activeProfileId, complianceItems, reconciliationExceptions } = useStore();
   const pendingInbox = inboxItems.filter(i => i.profileId === activeProfileId && i.status === 'pending').length;
   const urgentDeadlines = complianceItems.filter(c => c.profileId === activeProfileId && (c.status === 'due-soon' || c.status === 'overdue')).length;
+  const pendingReconciliation = reconciliationExceptions.filter(item => item.status === 'open' || item.status === 'resolving').length;
 
   const [activeTab, setActiveTab] = useState<TabId>('todo');
 
   const tabs: { id: TabId; label: string; count?: number }[] = [
     { id: 'todo',     label: 'To Do',     count: pendingInbox + urgentDeadlines },
+    { id: 'reconciliation', label: 'Reconciliation', count: pendingReconciliation },
     { id: 'timeline', label: 'Timeline' },
   ];
 
@@ -656,6 +896,7 @@ export default function Tasks() {
 
       {/* Tab content */}
       {activeTab === 'todo' && <InboxTab />}
+      {activeTab === 'reconciliation' && <ReconciliationTab />}
       {activeTab === 'timeline' && (
         <div className="space-y-10">
           <ComplianceTab />

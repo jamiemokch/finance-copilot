@@ -14,6 +14,7 @@ import {
 import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
 import { requireProfile } from "./profiles.js";
+import { scanProfile } from "./reconciliation.js";
 import {
   extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
   type ExtractionContext, type ExtractedData, type MappingSchema,
@@ -1047,6 +1048,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
     });
     if (!transaction) { res.status(409).json({ error: "This document is no longer available" }); return; }
     res.status(201).json(transaction);
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-evidence reconciliation scan failed"));
   } catch (err) {
     const dbError = err as { cause?: { code?: string } };
     if (dbError.cause?.code === "23505") {
@@ -1104,6 +1106,7 @@ router.delete("/profiles/:profileId/evidence/:evidenceId/links/:transactionId", 
     if (!link) { res.status(404).json({ error: "Active evidence link not found" }); return; }
     await addEvidenceAudit(profile.id, link.evidenceId, req.user.id, "transaction_link_detached", { transactionId: link.transactionId });
     res.status(204).end();
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-evidence reconciliation scan failed"));
   } catch (err) {
     req.log.error(err, "Failed to detach evidence");
     res.status(500).json({ error: "Failed to detach evidence" });
@@ -1266,6 +1269,7 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
       });
       if (!attached) { res.status(409).json({ error: "This document is no longer active" }); return; }
       res.json(transaction);
+      void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-evidence reconciliation scan failed"));
       return;
     }
     const tier = tierForEvidenceType(evidenceItem.evidenceType);
@@ -1278,6 +1282,7 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
     await db.update(evidenceItemsTable).set({ status: "processed" })
       .where(eq(evidenceItemsTable.id, evidenceItem.id));
     res.json(updated);
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-evidence reconciliation scan failed"));
   } catch (err) {
     req.log.error(err, "Failed to attach evidence");
     res.status(500).json({ error: "Failed to attach evidence" });

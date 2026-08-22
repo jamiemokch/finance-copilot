@@ -1,12 +1,14 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   profilesApi, positionApi, inboxApi, evidenceApi, transactionsApi,
-  decisionsApi, ideasApi, saChecklistApi, demoApi, getAuthUser,
+  decisionsApi, ideasApi, saChecklistApi, demoApi, getAuthUser, reconciliationApi,
   type APITransaction, type APIFinancialPosition, type APIInboxItem,
   type APIEvidenceItem, type APIDecision, type APIBusinessIdea,
   type APISAChecklistItem, type AuthUser,
   type APIMonthlyDataPoint, type APIVATWarning,
   type APIEvidenceCoverage,
+  type APIReconciliationException, type APIReconciliationWorkflowTask,
+  type APIReconciliationCoverageCheck,
 } from './api';
 
 const ACTIVE_PROFILE_STORAGE_KEY = 'sme-finance-copilot.active-profile-id';
@@ -68,6 +70,12 @@ export interface InboxItem {
   evidenceId?: string | null;
   sourceRowIndex?: number | null;
 }
+
+// ─── M10 reconciliation review ───────────────────────────────────────────────
+
+export type ReconciliationException = APIReconciliationException;
+export type ReconciliationWorkflowTask = APIReconciliationWorkflowTask;
+export type ReconciliationCoverageCheck = APIReconciliationCoverageCheck;
 
 export interface ChatMessage {
   id: string;
@@ -370,6 +378,10 @@ export interface AppState {
   inboxItems: InboxItem[];
   resolveInboxItem: (id: string, resolution: string) => Promise<boolean>;
   resolveInboxBatch: (ids: string[], resolution: string) => Promise<boolean>;
+  reconciliationExceptions: ReconciliationException[];
+  reconciliationWorkflowTasks: ReconciliationWorkflowTask[];
+  reconciliationCoverageChecks: ReconciliationCoverageCheck[];
+  refreshReconciliation: () => Promise<void>;
 
   chatHistory: ChatSession[];
   addChatMessage: (sessionId: string, message: Omit<ChatMessage, 'id'>) => void;
@@ -695,6 +707,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // ── Frontend-typed data
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+  const [reconciliationExceptions, setReconciliationExceptions] = useState<ReconciliationException[]>([]);
+  const [reconciliationWorkflowTasks, setReconciliationWorkflowTasks] = useState<ReconciliationWorkflowTask[]>([]);
+  const [reconciliationCoverageChecks, setReconciliationCoverageChecks] = useState<ReconciliationCoverageCheck[]>([]);
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
   const [decisionMemory, setDecisionMemory] = useState<DecisionMemoryEntry[]>([]);
   const [businessIdeas, setBusinessIdeas] = useState<BusinessIdea[]>([]);
@@ -716,6 +731,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setRawPosition(null);
     setRawTransactions([]);
     setInboxItems([]);
+    setReconciliationExceptions([]);
+    setReconciliationWorkflowTasks([]);
+    setReconciliationCoverageChecks([]);
     setEvidenceItems([]);
     setDecisionMemory([]);
     setBusinessIdeas([]);
@@ -740,7 +758,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const fetchAll = useCallback(async (profileId: string) => {
     if (!profileId) return;
     const fetchVersion = ++dataFetchVersion.current;
-    const [posResult, inboxResult, evidResult, txnResult, decResult, saResult] =
+    const [posResult, inboxResult, evidResult, txnResult, decResult, saResult, reconciliationResult] =
       await Promise.allSettled([
         positionApi.get(profileId),
         inboxApi.list(profileId),
@@ -748,6 +766,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         transactionsApi.list(profileId),
         decisionsApi.list(profileId),
         saChecklistApi.list(profileId),
+        reconciliationApi.scan(profileId),
       ]);
 
     // Ignore a response from an older load. In particular, a pre-mutation
@@ -761,6 +780,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setDecisionMemory(decResult.value.map(d => mapDecision(d, profileId)));
     if (saResult.status === 'fulfilled')
       setSAChecklist(saResult.value.map(i => mapSAItem(i, profileId)));
+    if (reconciliationResult.status === 'fulfilled') {
+      setReconciliationExceptions(reconciliationResult.value.exceptions);
+      setReconciliationWorkflowTasks(reconciliationResult.value.workflowTasks);
+      setReconciliationCoverageChecks(reconciliationResult.value.coverageChecks);
+    }
 
     // Business Ideas can involve a slower AI call. It should never hold the
     // records, Inbox, or Tasks screens blank after a confirmed mutation.
@@ -933,6 +957,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const refreshData = useCallback(async (): Promise<void> => {
     if (activeProfileId) await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);
+
+  const refreshReconciliation = useCallback(async (): Promise<void> => {
+    if (!activeProfileId) return;
+    const result = await reconciliationApi.scan(activeProfileId);
+    if (activeProfileId) {
+      setReconciliationExceptions(result.exceptions);
+      setReconciliationWorkflowTasks(result.workflowTasks);
+      setReconciliationCoverageChecks(result.coverageChecks);
+    }
+  }, [activeProfileId]);
 
   const loadSampleData = useCallback(async (): Promise<void> => {
     if (!activeProfileId) return;
@@ -1156,6 +1190,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     inboxItems,
     resolveInboxItem,
     resolveInboxBatch,
+    reconciliationExceptions,
+    reconciliationWorkflowTasks,
+    reconciliationCoverageChecks,
+    refreshReconciliation,
 
     chatHistory,
     addChatMessage,

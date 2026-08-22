@@ -4,6 +4,7 @@ import { transactionsTable } from "@workspace/db/schema";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { requireProfile } from "./profiles.js";
+import { scanProfile } from "./reconciliation.js";
 
 const router = Router();
 
@@ -58,6 +59,7 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
       evidenceTier: 4,
     }).returning();
     res.status(201).json(txn);
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-transaction reconciliation scan failed"));
   } catch (err) {
     // Two identical requests can both miss the initial lookup. The primary-key
     // conflict is the durable idempotency guard, so return the winning record
@@ -152,6 +154,7 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
       .where(and(eq(transactionsTable.id, existing.id), eq(transactionsTable.profileId, profile.id)))
       .returning();
     res.json(updated);
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-transaction reconciliation scan failed"));
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to update transaction" });
@@ -188,6 +191,7 @@ router.delete("/profiles/:profileId/transactions/:txId", async (req, res) => {
       return;
     }
     res.status(204).end();
+    void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-transaction reconciliation scan failed"));
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: "Failed to delete transaction" });
