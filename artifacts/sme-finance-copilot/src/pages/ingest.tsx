@@ -405,6 +405,7 @@ export default function AddRecords() {
   const { evidenceItems, inboxItems, activeProfileId, transactions, refreshData } = useStore();
   const [intake, setIntake] = useState<Intake>(null);
   const [resumeEvidence, setResumeEvidence] = useState<EvidenceItem | null>(null);
+  const [unmatchedEvidenceIds, setUnmatchedEvidenceIds] = useState<Set<string> | null>(null);
   const [discardingId, setDiscardingId] = useState<string | null>(null);
   const [resumeError, setResumeError] = useState('');
   const [showResumePanel, setShowResumePanel] = useState(true);
@@ -418,13 +419,29 @@ export default function AddRecords() {
   const [attachError, setAttachError] = useState('');
   const attachInFlight = useRef(false);
   const pending = inboxItems.filter(i => i.status === 'pending').length;
+  useEffect(() => {
+    let cancelled = false;
+    setUnmatchedEvidenceIds(null);
+    if (!activeProfileId) return () => { cancelled = true; };
+    evidenceApi.unmatched(activeProfileId)
+      .then(items => {
+        if (!cancelled) setUnmatchedEvidenceIds(new Set(items.map(item => item.id)));
+      })
+      .catch(() => {
+        // Never show a confirmed document as awaiting review if the
+        // server's authoritative active-link check is temporarily unavailable.
+        if (!cancelled) setUnmatchedEvidenceIds(new Set());
+      });
+    return () => { cancelled = true; };
+  }, [activeProfileId, evidenceItems]);
   const resumableEvidence = evidenceItems.filter(item =>
     (item.evidenceType === 'document' && (item.status === 'received' || item.status === 'processing' || item.status === 'error')) ||
     ((item.evidenceType === 'bank_csv' || item.evidenceType === 'ledger') && item.importStatus !== 'done'),
   );
   const reviewReadyEvidence = evidenceItems.filter(item =>
     item.evidenceType === 'document' && item.workflowVersion === 2 &&
-    item.documentLifecycle === 'active' && (item.reviewState === 'review_required' || item.reviewState === 'reviewed'),
+    item.documentLifecycle === 'active' && unmatchedEvidenceIds?.has(item.id) &&
+    (item.reviewState === 'review_required' || item.reviewState === 'reviewed'),
   );
   const startNewUpload = () => { setResumeEvidence(null); setIntake(null); setResumeError(''); setShowResumePanel(false); };
   const resumeUpload = (item: EvidenceItem) => {
