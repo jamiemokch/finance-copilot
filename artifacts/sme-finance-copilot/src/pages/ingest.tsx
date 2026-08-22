@@ -1,7 +1,7 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
 import {
-  bankImportsApi, evidenceApi, transactionsApi,
-  type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetReviewAnalysis,
+  ApiError, bankImportsApi, evidenceApi, transactionsApi,
+  type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
 } from '@/lib/api';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
@@ -323,12 +323,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const [outsideScopeMode, setOutsideScopeMode] = useState<'retain' | 'exclude'>('exclude');
   const [summary, setSummary] = useState<{ dispositionCounts: Record<string, number>; importedRows: number; taxYears: string[] } | null>(null);
   const [error, setError] = useState('');
+  const [importError, setImportError] = useState<SpreadsheetImportError | null>(null);
+  const [replacingWorkbook, setReplacingWorkbook] = useState(false);
   const resumed = useRef(false);
 
   const applyInspection = (detected: Awaited<ReturnType<typeof evidenceApi.detectSchema>>) => {
     const nextAnalysis = detected.analysis ?? null;
     setAnalysis(nextAnalysis);
     setAiStatus(detected.aiStatus ?? null);
+    setImportError(detected.lastImportError ?? null);
     const mappings = Object.fromEntries((nextAnalysis?.sheets ?? []).map((sheet) => [
       sheet.sheetId,
       { headerRow: sheet.mapping.headerRow ?? 0, columns: { ...sheet.mapping.columns }, dateFormat: null, currency: 'GBP' },
@@ -354,13 +357,18 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       void inspect(resumeEvidence.id);
     }
   }, [resumeEvidence?.id]);
-  const chooseFile = async (file: File) => {
-    setFilename(file.name); setStage('inspecting'); setError('');
+  const chooseFile = async (file: File, replacement = false) => {
+    setFilename(file.name); setStage('inspecting'); setError(''); setImportError(null);
     try {
       const { objectPath } = await evidenceApi.uploadDirect(profileId, file);
-      const evidence = await evidenceApi.register(profileId, {
-        filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'other', evidenceType: 'ledger',
-      });
+      const evidence = replacement && evidenceId
+        ? await evidenceApi.replaceSpreadsheet(profileId, evidenceId, {
+          filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream',
+        })
+        : await evidenceApi.register(profileId, {
+          filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'other', evidenceType: 'ledger',
+        });
+      setReplacingWorkbook(false);
       await inspect(evidence.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'We could not read that file. Please use a CSV or Excel file and try again.'); setStage('error');
@@ -389,7 +397,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     .flatMap((sheet) => sheet.rows.filter((row) => row.primaryDisposition === 'invalid').map((row) => ({ sheetId: sheet.sheetId, rowNumber: row.sourceRow })));
   const confirm = async () => {
     if (!evidenceId || !analysis) return;
-    setStage('confirming'); setError('');
+    setStage('confirming'); setError(''); setImportError(null);
     try {
       const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
         confirmation: true, selectedSheetIds, sheetMappings, filingScope,
@@ -398,7 +406,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       });
       setSummary(result); await refresh(); setStage('done');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'The spreadsheet could not be confirmed.'); setStage('review');
+      const message = err instanceof Error ? err.message : 'The spreadsheet could not be confirmed.';
+      const details = err instanceof ApiError ? err.details : undefined;
+      setImportError({
+        code: details?.code === 'source_row_conflict' ? 'source_row_conflict' : 'spreadsheet_import_failed',
+        message,
+        ...(details?.conflict ? { conflict: details.conflict } : {}),
+        ...(details?.rolledBack ? { rolledBack: true } : {}),
+      });
+      setError(message); setStage('review');
     }
   };
   const columnCount = activeSheet?.dimensions.columns ?? 0;
@@ -409,6 +425,28 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a CSV or Excel workbook</p><p className="text-xs text-muted-foreground">All worksheets will remain visible, including empty and summary sheets.</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Choose file" /></div>}
     {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…</div>}
     {stage === 'review' && analysis && <div className="space-y-5">
+      {importError && <div role="alert" className={cn(
+        "rounded-xl border p-4 space-y-3 text-sm",
+        importError.code === 'source_row_conflict'
+          ? "border-amber-300 bg-amber-50 text-amber-950"
+          : "border-red-200 bg-red-50 text-red-900",
+      )}>
+        <div className="flex gap-2"><AlertCircle className="w-5 h-5 shrink-0 mt-0.5" /><div className="space-y-1">
+          <p className="font-semibold">{importError.code === 'source_row_conflict' ? 'Import stopped to protect against a duplicate row' : 'Import could not be completed'}</p>
+          <p>{importError.message}</p>
+          {importError.conflict && <p className="font-medium">Affected source: worksheet “{importError.conflict.worksheet}”, row {importError.conflict.rowNumber}.</p>}
+          <p className="text-xs opacity-85">No movement from this confirmation was added. You can retry the current workbook or replace it with a corrected version.</p>
+        </div></div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" disabled={replacingWorkbook} onClick={() => void confirm()}>Retry current workbook</Button>
+          <Button size="sm" variant="outline" disabled={replacingWorkbook} onClick={() => setReplacingWorkbook(true)}>Replace workbook</Button>
+        </div>
+        {replacingWorkbook && <div className="rounded-lg border border-current/20 bg-white/60 p-3 space-y-2">
+          <p className="font-medium">Choose a corrected CSV or Excel workbook</p>
+          <p className="text-xs">The failed import keeps its identity, so an existing source row cannot be imported twice.</p>
+          <FilePicker accept=".csv,.xlsx,.xls" onPick={(file) => void chooseFile(file, true)} label="Choose replacement workbook" />
+        </div>}
+      </div>}
       <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' || aiStatus?.status === 'partial' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
         <strong>{aiStatus?.status === 'success' ? 'AI suggestions are ready for review.' : 'Manual/rule-based mapping is active.'}</strong>{aiStatus?.reason ? ` ${aiStatus.reason}` : ' Check every mapped field before confirmation.'}
       </div>

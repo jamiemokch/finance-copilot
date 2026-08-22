@@ -562,8 +562,15 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/confirm-spreadsheet`,
       { method: 'POST', body: JSON.stringify(boundaryConfirmation) },
     );
-    assert.equal(conflictedConfirmation.status, 500);
-    assert.match(conflictedConfirmation.body.error, /Failed to confirm spreadsheet import/);
+    assert.equal(conflictedConfirmation.status, 409);
+    assert.equal(conflictedConfirmation.body.code, 'source_row_conflict');
+    assert.equal(conflictedConfirmation.body.rolledBack, true);
+    assert.deepEqual(conflictedConfirmation.body.conflict, {
+      sheetId: 'sheet_2',
+      worksheet: 'Adjacent sheet',
+      rowNumber: 2,
+    });
+    assert.match(conflictedConfirmation.body.error, /No rows from this confirmation were added/);
     const afterConflictRows = await db.select().from(transactionsTable).where(and(
       eq(transactionsTable.profileId, alicePrimary),
       eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
@@ -575,6 +582,31 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     );
     const [erroredSpreadsheet] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, spreadsheetEvidenceId));
     assert.equal(erroredSpreadsheet.importStatus, 'error');
+
+    assert.deepEqual(
+      (erroredSpreadsheet.mappingSchema as { lastImportError?: { conflict?: unknown } } | null)?.lastImportError?.conflict,
+      conflictedConfirmation.body.conflict,
+      'the saved review retains the affected worksheet and row after a reload',
+    );
+
+    const spreadsheetReplacementUpload = await upload(aliceSession, alicePrimary, 'replacement workbook bytes');
+    assert.equal(spreadsheetReplacementUpload.status, 200);
+    const spreadsheetReplacement = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/replace-spreadsheet`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          filename: 'corrected-boundary-workbook.xlsx',
+          objectPath: spreadsheetReplacementUpload.body.objectPath,
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+      },
+    );
+    assert.equal(spreadsheetReplacement.status, 200);
+    assert.equal(spreadsheetReplacement.body.id, spreadsheetEvidenceId,
+      'a replacement keeps the same source-row identity fence');
+    assert.equal(spreadsheetReplacement.body.importStatus, 'idle');
 
     await db.delete(transactionsTable).where(eq(transactionsTable.id, conflictingTransaction.id));
     const confirmedBoundary = await request(
@@ -603,6 +635,33 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
         { sourceRowIndex: 1_100_002, sheetId: 'sheet_2', sourceRow: 2 },
       ],
       'maximum-row and adjacent-sheet movements retain distinct source identities',
+    );
+
+    const blockedCompletedReplacement = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/replace-spreadsheet`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          filename: 'must-not-replace-completed.xlsx',
+          objectPath: spreadsheetReplacementUpload.body.objectPath,
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+      },
+    );
+    assert.equal(blockedCompletedReplacement.status, 409,
+      'only a failed spreadsheet import may be replaced');
+    const [completedSpreadsheet] = await db.select().from(evidenceItemsTable)
+      .where(eq(evidenceItemsTable.id, spreadsheetEvidenceId));
+    assert.equal(completedSpreadsheet.importStatus, 'done');
+    assert.equal(completedSpreadsheet.objectPath, spreadsheetReplacementUpload.body.objectPath);
+    assert.equal(
+      (await db.select().from(transactionsTable).where(and(
+        eq(transactionsTable.profileId, alicePrimary),
+        eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
+      ))).length,
+      2,
+      'a blocked replacement leaves completed movements untouched',
     );
 
     const replayedBoundary = await request(

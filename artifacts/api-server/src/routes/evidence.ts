@@ -25,6 +25,26 @@ import { analyseSpreadsheet, inspectSpreadsheet, parseSpreadsheet, normaliseCell
 const router = Router();
 const storageService = new ObjectStorageService();
 const PROCESSING_LEASE_MS = 10 * 60 * 1000;
+const SPREADSHEET_SOURCE_ROW_CONFLICT_CODE = "source_row_conflict";
+const SPREADSHEET_IMPORT_FAILURE_CODE = "spreadsheet_import_failed";
+
+type SpreadsheetSourceRowConflict = {
+  sheetId: string;
+  worksheet: string;
+  rowNumber: number;
+};
+
+class SpreadsheetSourceRowConflictError extends Error {
+  readonly code = SPREADSHEET_SOURCE_ROW_CONFLICT_CODE;
+
+  constructor(readonly conflict: SpreadsheetSourceRowConflict) {
+    super(
+      `This import was not completed because worksheet "${conflict.worksheet}", row ${conflict.rowNumber} already has a source record. No rows from this confirmation were added.`,
+    );
+    this.name = "SpreadsheetSourceRowConflictError";
+  }
+}
+
 const mappingSchemaInput = z.object({
   headerRow: z.number().int().nonnegative(),
   columns: z.object({
@@ -697,6 +717,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       aiProposal?: unknown;
       aiStatus?: unknown;
       userDecision?: unknown;
+      lastImportError?: unknown;
     } | null;
     // A user decision is durable and must never be overwritten by a later
     // analysis request. Return the persisted review state instead.
@@ -708,6 +729,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         aiProposal: savedState.aiProposal ?? null,
         aiStatus: savedState.aiStatus ?? { status: "not_requested" },
         userDecision: savedState.userDecision,
+        lastImportError: savedState.lastImportError ?? null,
       });
       return;
     }
@@ -734,6 +756,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       aiProposal: ai.proposal,
       aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits },
       userDecision: savedState?.userDecision ?? null,
+      lastImportError: savedState?.lastImportError ?? null,
     };
     const [reopened] = await db.update(evidenceItemsTable).set({
       mappingSchema: state as unknown as Record<string, unknown>,
@@ -757,7 +780,10 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       contentHash: workbook.contentHash, parserVersion: analysis.parserVersion, sheetCount: workbook.sheets.length,
       totalParserRows: workbook.totalParserRows, aiStatus: ai.status, fallbackReason: ai.reason ?? null,
     });
-    res.json({ mappingSchema, previewRows, analysis, aiProposal: ai.proposal, aiStatus: state.aiStatus, userDecision: state.userDecision });
+    res.json({
+      mappingSchema, previewRows, analysis, aiProposal: ai.proposal,
+      aiStatus: state.aiStatus, userDecision: state.userDecision, lastImportError: state.lastImportError,
+    });
   } catch (err) {
     req.log.error(err, "Failed to detect spreadsheet schema");
     res.status(500).json({ error: "Failed to detect spreadsheet schema" });
@@ -773,11 +799,14 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
   const body = confirmedSpreadsheetInput.safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "Confirm selected sheets, mappings, and filing scope before importing." }); return; }
   let processingToken = "";
+  let evidenceItem: typeof evidenceItemsTable.$inferSelect | undefined;
+  let userDecision: Record<string, unknown> | undefined;
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
-    const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
+    evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    const confirmedEvidence = evidenceItem;
     if (evidenceItem.workflowVersion >= 2) {
       res.status(422).json({ error: "Original documents use the review workflow, not spreadsheet import." }); return;
     }
@@ -876,14 +905,18 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     }).where(and(
       eq(evidenceItemsTable.id, evidenceItem.id),
       eq(evidenceItemsTable.profileId, profile.id),
+      // The workbook is parsed before this lease is acquired. Bind the claim
+      // to the object that was parsed so a concurrent replacement cannot let
+      // stale in-memory rows commit against the replacement evidence record.
+      eq(evidenceItemsTable.objectPath, evidenceItem.objectPath),
       or(
         inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "error"]),
         and(eq(evidenceItemsTable.importStatus, "processing"), or(isNull(evidenceItemsTable.processingLeaseExpiresAt), lt(evidenceItemsTable.processingLeaseExpiresAt, now))),
       ),
     )).returning();
-    if (!claimed) { res.status(409).json({ error: "This spreadsheet is already being processed" }); return; }
+    if (!claimed) { res.status(409).json({ error: "This spreadsheet was replaced or is already being processed. Reload the review before trying again." }); return; }
 
-    const userDecision = {
+    userDecision = {
       selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
       outsideScopeMode: body.data.outsideScopeMode, confirmedAt: now.toISOString(), actorUserId: req.user.id, mappingRevision,
@@ -891,35 +924,46 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
 
     const [updated] = await db.transaction(async (tx) => {
       const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
-        eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.id, confirmedEvidence.id), eq(evidenceItemsTable.profileId, profile.id),
         eq(evidenceItemsTable.importStatus, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
       )).for("update");
       if (!owned) return [];
       for (const item of rowsToWrite) {
         const [inserted] = await tx.insert(transactionsTable).values({
-          profileId: profile.id, evidenceId: evidenceItem.id,
+          profileId: profile.id, evidenceId: confirmedEvidence.id,
           sourceRowIndex: item.sourceRowIndex, rawRowData: {
             sheetId: item.sheetId, displayName: item.displayName, sourceRow: item.sourceRow, values: item.row,
             taxYear: item.taxYear, filingScope: item.filingScope, disposition: item.disposition,
           },
           date: item.date, description: item.description, amount: item.amount,
           recordType: "unknown", category: "expense", taxTreatment: "unclear", source: "extracted",
-          evidenceTier: evidenceItem.evidenceType === "bank_csv" ? 2 : 3,
+          evidenceTier: confirmedEvidence.evidenceType === "bank_csv" ? 2 : 3,
           accountingCategory: "other", allowablePercentage: 0, allowableAmount: 0,
           accountingClassification: "unknown", classificationConfidence: 0,
         }).onConflictDoNothing().returning({ id: transactionsTable.id });
-        if (!inserted) throw new Error(`A source-row identity collision was detected for ${item.sheetId} row ${item.sourceRow}. No records were imported.`);
+        if (!inserted) {
+          throw new SpreadsheetSourceRowConflictError({
+            sheetId: item.sheetId,
+            worksheet: item.displayName,
+            rowNumber: item.sourceRow,
+          });
+        }
       }
       const [saved] = await tx.update(evidenceItemsTable).set({
         evidenceType: "ledger", status: "needs_review", importStatus: "done",
-        mappingSchema: { ...state, userDecision, confirmedMappingRevision: mappingRevision, finalDispositions: counts } as Record<string, unknown>,
+        mappingSchema: (() => {
+          const { lastImportError: _lastImportError, ...stateWithoutLastError } = state;
+          return {
+            ...stateWithoutLastError, userDecision, confirmedMappingRevision: mappingRevision, finalDispositions: counts,
+          };
+        })() as Record<string, unknown>,
         totalRows: workbook.totalParserRows, processedRows: rowsToWrite.length, autoPostedRows: 0, inboxRows: 0,
         skippedRows: workbook.totalParserRows - rowsToWrite.length,
         processingLeaseExpiresAt: null, processingToken: null,
-      }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
+      }).where(and(eq(evidenceItemsTable.id, confirmedEvidence.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       if (!saved) return [];
       await tx.insert(evidenceAuditEventsTable).values({
-        profileId: profile.id, evidenceId: evidenceItem.id, actorUserId: req.user.id, eventType: "spreadsheet_import_confirmed",
+        profileId: profile.id, evidenceId: confirmedEvidence.id, actorUserId: req.user.id, eventType: "spreadsheet_import_confirmed",
         details: {
           contentHash: workbook.contentHash, parserVersion: "spreadsheet-parser.v2", mappingRevision,
           userDecision, dispositionCounts: counts, importableRows: rowsToWrite.length,
@@ -931,12 +975,35 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     res.json({ evidence: updated, dispositionCounts: counts, taxYears: [...new Set(rowsToWrite.map((row) => row.taxYear))], importedRows: rowsToWrite.length });
     void scanProfile(profile.id).catch((error) => req.log.warn({ error }, "Post-spreadsheet reconciliation scan failed"));
   } catch (err) {
-    req.log.error(err, "Failed to confirm spreadsheet import");
-    await db.update(evidenceItemsTable).set({ importStatus: "error", processingLeaseExpiresAt: null, processingToken: null }).where(and(
+    const conflict = err instanceof SpreadsheetSourceRowConflictError ? err.conflict : undefined;
+    const errorCode = conflict ? SPREADSHEET_SOURCE_ROW_CONFLICT_CODE : SPREADSHEET_IMPORT_FAILURE_CODE;
+    const safeMessage = conflict
+      ? err instanceof SpreadsheetSourceRowConflictError ? err.message : "This import was not completed."
+      : "The spreadsheet import could not be completed. No rows from this confirmation were added. You can retry safely.";
+    req.log.error(err, conflict ? "Spreadsheet source-row conflict rolled back" : "Failed to confirm spreadsheet import");
+    const currentState = (evidenceItem?.mappingSchema as Record<string, unknown> | null) ?? {};
+    await db.update(evidenceItemsTable).set({
+      importStatus: "error",
+      processingLeaseExpiresAt: null,
+      processingToken: null,
+      mappingSchema: {
+        ...currentState,
+        ...(userDecision ? { userDecision } : {}),
+        lastImportError: {
+          code: errorCode,
+          message: safeMessage,
+          ...(conflict ? { conflict } : {}),
+        },
+      } as Record<string, unknown>,
+    }).where(and(
       eq(evidenceItemsTable.id, req.params.evidenceId), eq(evidenceItemsTable.profileId, req.params.profileId),
       eq(evidenceItemsTable.importStatus, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
     )).catch(() => undefined);
-    res.status(500).json({ error: "Failed to confirm spreadsheet import" });
+    if (conflict) {
+      res.status(409).json({ error: safeMessage, code: errorCode, conflict, rolledBack: true });
+      return;
+    }
+    res.status(500).json({ error: safeMessage, code: errorCode, rolledBack: true });
   }
 });
 
@@ -1405,6 +1472,92 @@ router.post("/profiles/:profileId/evidence/:evidenceId/tombstone", async (req, r
   } catch (err) {
     req.log.error(err, "Failed to tombstone evidence");
     res.status(500).json({ error: "Failed to tombstone document" });
+  }
+});
+
+// POST /profiles/:profileId/evidence/:evidenceId/replace-spreadsheet
+// A failed spreadsheet keeps its identity during replacement. Existing source
+// rows therefore remain fenced, so a corrected file cannot silently duplicate
+// a row that was already associated with the failed upload.
+router.post("/profiles/:profileId/evidence/:evidenceId/replace-spreadsheet", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({
+    objectPath: z.string().min(1), filename: z.string().min(1), mimeType: z.string().min(1),
+  }).strict().safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Invalid replacement spreadsheet" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [upload] = await db.select().from(privateUploadObjectsTable).where(and(
+      eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
+      eq(privateUploadObjectsTable.userId, req.user.id),
+    )).limit(1);
+    const [anyBinding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(eq(privateUploadBindingsTable.objectId, upload.id)).limit(1) : [];
+    if (upload && !anyBinding) {
+      await db.insert(privateUploadBindingsTable).values({
+        profileId: profile.id, objectId: upload.id, userId: req.user.id,
+      }).onConflictDoNothing();
+    }
+    const [binding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(and(
+        eq(privateUploadBindingsTable.objectId, upload.id),
+        eq(privateUploadBindingsTable.profileId, profile.id),
+        eq(privateUploadBindingsTable.userId, req.user.id),
+      )).limit(1) : [];
+    if (!upload || !binding) { res.status(404).json({ error: "Uploaded replacement not found" }); return; }
+
+    const [replacement] = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.id, req.params.evidenceId),
+        eq(evidenceItemsTable.profileId, profile.id),
+      )).for("update");
+      if (!current) return [];
+      const now = new Date();
+      const activeLease = current.importStatus === "processing"
+        && (!current.processingLeaseExpiresAt || current.processingLeaseExpiresAt > now);
+      if (
+        activeLease
+        || current.workflowVersion >= 2
+        || current.evidenceType === "document"
+        || current.importStatus !== "error"
+      ) return [];
+      const [updated] = await tx.update(evidenceItemsTable).set({
+        filename: body.data.filename,
+        objectPath: body.data.objectPath,
+        mimeType: body.data.mimeType,
+        contentHash: upload.contentHash,
+        objectSize: upload.objectSize,
+        status: "received",
+        importStatus: "idle",
+        mappingSchema: null,
+        totalRows: 0,
+        processedRows: 0,
+        autoPostedRows: 0,
+        inboxRows: 0,
+        skippedRows: 0,
+        processingLeaseExpiresAt: null,
+        processingToken: null,
+      }).where(eq(evidenceItemsTable.id, current.id)).returning();
+      await tx.insert(evidenceAuditEventsTable).values({
+        profileId: profile.id,
+        evidenceId: current.id,
+        actorUserId: req.user.id,
+        eventType: "spreadsheet_replaced",
+        details: { previousFilename: current.filename, replacementFilename: body.data.filename },
+      });
+      return [updated];
+    });
+    if (!replacement) {
+      res.status(409).json({ error: "This spreadsheet cannot be replaced while it is processing or after it has been completed." });
+      return;
+    }
+    res.json(replacement);
+  } catch (err) {
+    req.log.error(err, "Failed to replace spreadsheet");
+    res.status(500).json({ error: "Failed to replace spreadsheet" });
   }
 });
 

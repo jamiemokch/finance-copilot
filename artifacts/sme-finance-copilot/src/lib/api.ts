@@ -14,10 +14,28 @@ import type {
 
 const API = "/api";
 
+export type SpreadsheetSourceRowConflict = {
+  sheetId: string;
+  worksheet: string;
+  rowNumber: number;
+};
+
+export type SpreadsheetImportError = {
+  code: 'source_row_conflict' | 'spreadsheet_import_failed';
+  message: string;
+  conflict?: SpreadsheetSourceRowConflict;
+  rolledBack?: boolean;
+};
+
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public details?: {
+      code?: string;
+      conflict?: SpreadsheetSourceRowConflict;
+      rolledBack?: boolean;
+    },
   ) {
     super(message);
     this.name = "ApiError";
@@ -35,13 +53,24 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
+    let details: ApiError['details'];
     try {
-      const body = await res.json();
-      msg = body.error ?? msg;
+      const body = await res.json() as {
+        error?: unknown;
+        code?: unknown;
+        conflict?: SpreadsheetSourceRowConflict;
+        rolledBack?: unknown;
+      };
+      msg = typeof body.error === 'string' ? body.error : msg;
+      details = {
+        ...(typeof body.code === 'string' ? { code: body.code } : {}),
+        ...(body.conflict ? { conflict: body.conflict } : {}),
+        ...(body.rolledBack === true ? { rolledBack: true } : {}),
+      };
     } catch {
       // ignore parse error
     }
-    throw new ApiError(res.status, msg);
+    throw new ApiError(res.status, msg, details);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -345,6 +374,7 @@ export type SpreadsheetInspectionResponse = {
   aiProposal?: unknown;
   aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[] };
   userDecision?: unknown;
+  lastImportError?: SpreadsheetImportError | null;
 };
 
 export interface APIUploadUrl {
@@ -401,6 +431,10 @@ export const evidenceApi = {
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/tombstone`, { method: "POST" }),
   replace: (profileId: string, evidenceId: string, data: { objectPath: string; filename: string; mimeType: string }) =>
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/replace`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  replaceSpreadsheet: (profileId: string, evidenceId: string, data: { objectPath: string; filename: string; mimeType: string }) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/replace-spreadsheet`, {
       method: "POST", body: JSON.stringify(data),
     }),
   detach: (profileId: string, evidenceId: string, transactionId: string) =>
