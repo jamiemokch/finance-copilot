@@ -1,10 +1,11 @@
+import { createHash } from 'crypto';
 import { Readable } from 'stream';
 import {
   RequestUploadUrlBody,
   RequestUploadUrlResponse,
 } from '@workspace/api-zod';
 import express, { Router, type IRouter, type Request, type Response } from 'express';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   db,
   bankImportBatchesTable,
@@ -56,6 +57,19 @@ router.post(
     const contentType =
       (req.headers['x-content-type'] as string) || 'application/octet-stream';
     try {
+      const contentHash = createHash('sha256').update(req.body).digest('hex');
+      // Hash matching is scoped to the authenticated uploader. Reusing the
+      // private object prevents file dedupe from becoming a cross-user oracle.
+      const [reusable] = await db.select({ objectPath: privateUploadObjectsTable.objectPath })
+        .from(privateUploadObjectsTable)
+        .where(and(
+          eq(privateUploadObjectsTable.userId, req.user.id),
+          eq(privateUploadObjectsTable.contentHash, contentHash),
+        ));
+      if (reusable) {
+        res.json({ objectPath: reusable.objectPath });
+        return;
+      }
       const objectPath = await objectStorageService.saveContent(
         req.body,
         contentType,
@@ -64,11 +78,26 @@ router.post(
         await db.insert(privateUploadObjectsTable).values({
           objectPath,
           userId: req.user.id,
+          contentHash,
+          objectSize: req.body.length,
         });
       } catch (err) {
         await objectStorageService.getObjectEntityFile(objectPath)
           .then((file) => file.delete())
           .catch(() => undefined);
+        const dbError = err as { cause?: { code?: string } };
+        if (dbError.cause?.code === '23505') {
+          const [winner] = await db.select({ objectPath: privateUploadObjectsTable.objectPath })
+            .from(privateUploadObjectsTable)
+            .where(and(
+              eq(privateUploadObjectsTable.userId, req.user.id),
+              eq(privateUploadObjectsTable.contentHash, contentHash),
+            ));
+          if (winner) {
+            res.json({ objectPath: winner.objectPath });
+            return;
+          }
+        }
         throw err;
       }
       res.json({ objectPath });

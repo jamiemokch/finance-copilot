@@ -301,6 +301,12 @@ export interface APIEvidenceItem {
   skippedRows?: number;
   importStatus?: string;
   uploadedAt?: string;
+  workflowVersion?: number;
+  documentLifecycle?: 'active' | 'replaced' | 'tombstoned';
+  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'failed';
+  contentHash?: string | null;
+  objectSize?: number | null;
+  replacementOfEvidenceId?: string | null;
 }
 
 export interface APIUploadUrl {
@@ -311,6 +317,8 @@ export interface APIUploadUrl {
 export const evidenceApi = {
   list: (profileId: string) =>
     apiFetch<APIEvidenceItem[]>(`/profiles/${profileId}/evidence`),
+  unmatched: (profileId: string) =>
+    apiFetch<APIEvidenceItem[]>(`/profiles/${profileId}/evidence/unmatched`),
   discard: (profileId: string, evidenceId: string) =>
     apiFetch<{ deleted: boolean }>(`/profiles/${profileId}/evidence/${evidenceId}`, {
       method: "DELETE",
@@ -340,6 +348,20 @@ export const evidenceApi = {
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/process`, {
       method: "POST",
     }),
+  review: (profileId: string, evidenceId: string, data: { extractedData?: Record<string, unknown>; category?: string }) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/review`, {
+      method: "PATCH", body: JSON.stringify(data),
+    }),
+  confirmTransaction: (profileId: string, evidenceId: string, data: {
+    idempotencyKey: string; date: string; description: string; amount: number;
+    category: string; taxTreatment: string; allowablePercentage: number;
+  }) => apiFetch<APITransaction>(`/profiles/${profileId}/evidence/${evidenceId}/confirm-transaction`, {
+    method: "POST", body: JSON.stringify(data),
+  }),
+  tombstone: (profileId: string, evidenceId: string) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/tombstone`, { method: "POST" }),
+  downloadUrl: (profileId: string, evidenceId: string) =>
+    `${API_BASE}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
   detectSchema: (profileId: string, evidenceId: string) =>
     apiFetch<{ mappingSchema: unknown; previewRows: string[][] }>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
   processBatch: (profileId: string, evidenceId: string, confirmedMapping: unknown, bankCsv?: boolean) =>

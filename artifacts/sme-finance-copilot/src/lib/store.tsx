@@ -121,6 +121,10 @@ export interface EvidenceItem {
   inboxRows?: number;
   skippedRows?: number;
   importStatus?: string;
+  workflowVersion?: number;
+  documentLifecycle?: 'active' | 'replaced' | 'tombstoned';
+  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'failed';
+  extractedData?: Record<string, unknown> | null;
 }
 
 // ─── Peer benchmarking ────────────────────────────────────────────────────────
@@ -561,6 +565,10 @@ function mapEvidenceItem(item: APIEvidenceItem): EvidenceItem {
     inboxRows: item.inboxRows,
     skippedRows: item.skippedRows,
     importStatus: item.importStatus,
+    workflowVersion: item.workflowVersion,
+    documentLifecycle: item.documentLifecycle,
+    reviewState: item.reviewState,
+    extractedData: (item.extractedData as Record<string, unknown> | null | undefined) ?? null,
   };
 }
 

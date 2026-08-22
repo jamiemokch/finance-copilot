@@ -1,7 +1,7 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
 import {
   bankImportsApi, evidenceApi, transactionsApi,
-  type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount,
+  type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount,
 } from '@/lib/api';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
@@ -41,17 +41,60 @@ function TierBadge({ tier }: { tier?: number }) {
   return <Badge variant="outline" className="text-[10px] py-0 gap-1"><Icon className="w-3 h-3" />Tier {tier} · {config.text}</Badge>;
 }
 
+type DocumentDraft = {
+  date: string;
+  description: string;
+  amount: string;
+  category: string;
+  taxTreatment: string;
+  allowablePercentage: string;
+};
+
+function draftFromCandidate(candidate: Record<string, unknown> | null | undefined, filename: string): DocumentDraft {
+  const read = (key: string) => typeof candidate?.[key] === 'string' || typeof candidate?.[key] === 'number'
+    ? String(candidate[key]) : '';
+  const amount = read('amount');
+  const treatment = read('taxTreatment');
+  return {
+    date: read('date') || new Date().toISOString().slice(0, 10),
+    description: read('description') || filename,
+    amount,
+    category: read('accountingCategory') || read('category') || 'other',
+    taxTreatment: treatment === 'income' ? 'income' : treatment === 'non_deductible' ? 'non_deductible' : 'deductible',
+    allowablePercentage: read('allowablePercentage') || (treatment === 'non_deductible' ? '0' : '100'),
+  };
+}
+
 function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
   const [status, setStatus] = useState<'idle' | 'working' | 'done' | 'error'>('idle');
   const [message, setMessage] = useState('');
   const registeredEvidenceId = useRef<string | null>(resumeEvidence?.id ?? null);
+  const [reviewEvidence, setReviewEvidence] = useState<APIEvidenceItem | null>(null);
+  const [draft, setDraft] = useState<DocumentDraft>(() => draftFromCandidate(resumeEvidence?.extractedData, resumeEvidence?.filename ?? 'document'));
+  const [confirming, setConfirming] = useState(false);
+  const financialIdempotencyKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (resumeEvidence?.workflowVersion === 2 && resumeEvidence.reviewState !== 'pending' && resumeEvidence.documentLifecycle === 'active') {
+      setReviewEvidence(resumeEvidence as APIEvidenceItem);
+      setDraft(draftFromCandidate(resumeEvidence.extractedData, resumeEvidence.filename));
+      setStatus('done');
+      setMessage('Review the extracted details. This document has not created a financial record.');
+    }
+  }, [resumeEvidence?.id]);
+  const readyForReview = (item: APIEvidenceItem) => {
+    setReviewEvidence(item);
+    setDraft(draftFromCandidate(item.extractedData as Record<string, unknown> | null | undefined, item.filename));
+    setStatus('done');
+    setMessage('Extraction is ready to review. Nothing has been added to Financial Memory.');
+  };
   const processExisting = async () => {
     if (!registeredEvidenceId.current) return;
     setStatus('working'); setMessage('Finishing your saved document upload…');
     try {
       const processed = await evidenceApi.process(profileId, registeredEvidenceId.current);
       await refresh();
-      setStatus('done'); setMessage(processed.status === 'needs_review' ? 'Sent to Inbox for a quick decision.' : 'Added to your records.');
+      if (processed.workflowVersion === 2) readyForReview(processed);
+      else { setStatus('done'); setMessage(processed.status === 'needs_review' ? 'Sent to Inbox for a quick decision.' : 'Added to your records.'); }
     } catch { setStatus('error'); setMessage('We could not finish that upload yet. You can retry it safely or start a new upload.'); }
   };
   const upload = async (file: File) => {
@@ -64,16 +107,44 @@ function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileI
       }
       const processed = await evidenceApi.process(profileId, registeredEvidenceId.current);
       await refresh();
-      setStatus('done'); setMessage(processed.status === 'needs_review' ? 'Sent to Inbox for a quick decision.' : 'Added to your records.');
+      if (processed.workflowVersion === 2) readyForReview(processed);
+      else { setStatus('done'); setMessage(processed.status === 'needs_review' ? 'Sent to Inbox for a quick decision.' : 'Added to your records.'); }
     } catch { setStatus('error'); setMessage('We could not process that document. Choose the file again to retry safely.'); }
   };
   return <Card className="p-6 shadow-sm space-y-5">
     <button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
-    <div><h2 className="text-xl font-serif">Add a receipt or invoice</h2><p className="text-sm text-muted-foreground mt-1">Upload an original document. We’ll extract the transaction and ask only if anything is unclear.</p></div>
+    <div><h2 className="text-xl font-serif">Add a receipt or invoice</h2><p className="text-sm text-muted-foreground mt-1">Upload an original document. We’ll suggest details for your review, but never add a financial record without your explicit confirmation.</p></div>
     {status === 'working' ? <div className="py-8 text-center text-primary"><Loader2 className="w-7 h-7 animate-spin mx-auto mb-3" />{message}</div> :
-       status === 'done' ? <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-emerald-800 flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" />{message}</div> :
+       status === 'done' && !reviewEvidence ? <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-emerald-800 flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" />{message}</div> :
        resumeEvidence ? <div className="rounded-xl border border-primary/20 bg-primary/5 p-7 text-center space-y-3"><Receipt className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Saved upload: {resumeEvidence.filename}</p><p className="text-sm text-muted-foreground">The file is still here, so you can finish it without choosing it again.</p><Button onClick={processExisting} className="cursor-pointer">Resume upload</Button></div> :
-       <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><Receipt className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Receipt, invoice, or statement</p><p className="text-xs text-muted-foreground">PDF, JPG, PNG, HEIC</p><FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={upload} /></div>}
+        !reviewEvidence && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><Receipt className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Receipt, invoice, or statement</p><p className="text-xs text-muted-foreground">PDF, JPG, PNG, HEIC</p><FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={upload} /></div>}
+     {reviewEvidence && <div className="space-y-4 rounded-xl border border-primary/20 bg-primary/[.03] p-5">
+       <div><h3 className="font-serif text-lg">Review document details</h3><p className="text-sm text-muted-foreground mt-1">{message} Editing or saving this review does not affect tax, profit, or Financial Memory.</p></div>
+       <div className="grid gap-3 sm:grid-cols-2">
+         <label className="space-y-1"><Label>Date</Label><Input type="date" value={draft.date} onChange={e => setDraft({ ...draft, date: e.target.value })} /></label>
+         <label className="space-y-1"><Label>Amount (£)</Label><Input type="number" value={draft.amount} placeholder="Enter amount if known" onChange={e => setDraft({ ...draft, amount: e.target.value })} /></label>
+         <label className="space-y-1 sm:col-span-2"><Label>Description</Label><Input value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} /></label>
+         <label className="space-y-1"><Label>Category</Label><Input value={draft.category} onChange={e => setDraft({ ...draft, category: e.target.value })} /></label>
+         <label className="space-y-1"><Label>Tax treatment</Label><Select value={draft.taxTreatment} onChange={e => setDraft({ ...draft, taxTreatment: e.target.value })}><option value="deductible">Deductible expense</option><option value="non_deductible">Non-deductible expense</option><option value="income">Business income</option></Select></label>
+         {draft.taxTreatment === 'deductible' && <label className="space-y-1"><Label>Business use (%)</Label><Input type="number" min="0" max="100" value={draft.allowablePercentage} onChange={e => setDraft({ ...draft, allowablePercentage: e.target.value })} /></label>}
+       </div>
+       <div className="flex flex-wrap gap-2">
+         <Button variant="outline" disabled={confirming} onClick={() => void evidenceApi.review(profileId, reviewEvidence.id, { category: draft.category, extractedData: { ...draft, amount: Number(draft.amount || 0), allowablePercentage: Number(draft.allowablePercentage || 0) } }).then(async item => { setReviewEvidence(item); await refresh(); setMessage('Review saved. This is still supporting evidence only.'); }).catch(() => setMessage('We could not save these review details yet.'))}>Save review only</Button>
+         <Button disabled={confirming || !draft.description.trim() || !Number(draft.amount)} onClick={() => void (async () => {
+           setConfirming(true);
+           try {
+             await evidenceApi.review(profileId, reviewEvidence.id, { category: draft.category, extractedData: { ...draft, amount: Number(draft.amount), allowablePercentage: Number(draft.allowablePercentage || 0) } });
+             await evidenceApi.confirmTransaction(profileId, reviewEvidence.id, {
+               idempotencyKey: financialIdempotencyKey.current ?? (financialIdempotencyKey.current = crypto.randomUUID()),
+               date: draft.date, description: draft.description.trim(), amount: Number(draft.amount), category: draft.category,
+               taxTreatment: draft.taxTreatment, allowablePercentage: Number(draft.allowablePercentage || 0),
+             });
+             financialIdempotencyKey.current = null; await refresh(); setReviewEvidence(null); setMessage('Financial record confirmed and added to Financial Memory.'); setStatus('done');
+           } catch { setMessage('We could not confirm the financial record. Your reviewed document is still saved.'); }
+           finally { setConfirming(false); }
+         })()}>{confirming ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}Confirm financial record</Button>
+       </div>
+     </div>}
     {status === 'error' && <p className="text-sm text-destructive">{message}</p>}
   </Card>;
 }
@@ -351,6 +422,10 @@ export default function AddRecords() {
     (item.evidenceType === 'document' && (item.status === 'received' || item.status === 'processing' || item.status === 'error')) ||
     ((item.evidenceType === 'bank_csv' || item.evidenceType === 'ledger') && item.importStatus !== 'done'),
   );
+  const reviewReadyEvidence = evidenceItems.filter(item =>
+    item.evidenceType === 'document' && item.workflowVersion === 2 &&
+    item.documentLifecycle === 'active' && (item.reviewState === 'review_required' || item.reviewState === 'reviewed'),
+  );
   const startNewUpload = () => { setResumeEvidence(null); setIntake(null); setResumeError(''); setShowResumePanel(false); };
   const resumeUpload = (item: EvidenceItem) => {
     setResumeError('');
@@ -409,6 +484,13 @@ export default function AddRecords() {
       </div>)}</div>
       {resumeError && <p className="text-sm text-destructive">{resumeError}</p>}
       <Button variant="ghost" size="sm" onClick={startNewUpload} className="cursor-pointer">Start a new upload</Button>
+    </Card>}
+    {reviewReadyEvidence.length > 0 && !intake && <Card className="border-amber-200 bg-amber-50/50 p-5 space-y-3">
+      <div><h2 className="font-serif text-xl">Documents ready for your review</h2><p className="text-sm text-muted-foreground mt-1">These are supporting documents only. Confirm a financial record only when the details are correct.</p></div>
+      {reviewReadyEvidence.map(item => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-card p-3">
+        <div><p className="font-medium text-sm">{item.filename}</p><p className="text-xs text-muted-foreground">{item.reviewState === 'reviewed' ? 'Review saved — financial record not yet confirmed' : 'Extraction ready for review'}</p></div>
+        <Button size="sm" onClick={() => resumeUpload(item)}>Review document</Button>
+      </div>)}
     </Card>}
     {!intake ? <><div className="grid sm:grid-cols-2 gap-4">{INTAKES.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setIntake(option.id)} className="text-left border border-border rounded-xl p-5 bg-card hover:border-primary/40 hover:bg-primary/[.02] transition-all cursor-pointer"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-4"><Icon className="w-5 h-5" /></div><h2 className="font-serif text-lg">{option.title}</h2><p className="text-sm text-muted-foreground mt-1">{option.text}</p><p className="text-xs text-primary mt-3">{option.note} →</p></button>; })}</div>
       <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{t.source === 'bank_csv' && <Badge variant="outline" className="text-[10px] py-0">Needs classification</Badge>}{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}{(t.source === 'manual' || t.source === 'bank_csv') && <><button onClick={() => setEditing({ id: t.id, date: t.date, amount: String(t.amount), description: t.description, category: t.category, source: t.source, accountingClassification: t.accountingClassification ?? 'unknown' })} className="text-xs text-primary hover:underline">{t.source === 'bank_csv' ? 'Review' : 'Edit'}</button><button onClick={() => void deleteRecord(t.id)} className="text-xs text-destructive hover:underline">{t.source === 'bank_csv' ? 'Remove' : 'Delete'}</button></>}</div></div><div className="flex items-center gap-3"><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span>{(t.source === 'manual' || t.source === 'bank_csv') && <Pencil className="w-4 h-4 text-muted-foreground" />}</div></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :

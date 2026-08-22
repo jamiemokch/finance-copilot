@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { randomUUID } from "crypto";
-import { db, privateUploadObjectsTable } from "@workspace/db";
+import { Readable } from "stream";
+import { bankImportBatchesTable, db, privateUploadObjectsTable } from "@workspace/db";
 import {
-  evidenceItemsTable, inboxItemsTable, transactionsTable, profilesTable,
+  evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
+  inboxItemsTable, transactionsTable, profilesTable,
 } from "@workspace/db/schema";
 import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
@@ -56,6 +58,54 @@ router.get("/profiles/:profileId/evidence", async (req, res) => {
   }
 });
 
+// Documents without an active financial relationship are supporting records
+// only. They intentionally do not appear in Financial Memory totals.
+router.get("/profiles/:profileId/evidence/unmatched", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [documents, links] = await Promise.all([
+      db.select().from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.workflowVersion, 2),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+      )).orderBy(desc(evidenceItemsTable.createdAt)),
+      db.select({ evidenceId: evidenceTransactionLinksTable.evidenceId }).from(evidenceTransactionLinksTable).where(and(
+        eq(evidenceTransactionLinksTable.profileId, profile.id),
+        eq(evidenceTransactionLinksTable.linkStatus, "active"),
+      )),
+    ]);
+    const linkedIds = new Set(links.map((link) => link.evidenceId));
+    res.json(documents.filter((document) => !linkedIds.has(document.id)));
+  } catch (err) {
+    req.log.error(err, "Failed to list unmatched evidence");
+    res.status(500).json({ error: "Failed to list unmatched evidence" });
+  }
+});
+
+router.get("/profiles/:profileId/evidence/:evidenceId/download", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidence || evidence.documentLifecycle === "tombstoned") {
+      res.status(404).json({ error: "Document not found" }); return;
+    }
+    const objectFile = await storageService.getObjectEntityFile(evidence.objectPath);
+    const response = await storageService.downloadObject(objectFile, 0);
+    res.status(response.status);
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    res.setHeader("Content-Disposition", `attachment; filename="${evidence.filename.replace(/["\r\n]/g, "_")}"`);
+    if (response.body) Readable.fromWeb(response.body as ReadableStream<Uint8Array>).pipe(res);
+    else res.end();
+  } catch (err) {
+    req.log.error(err, "Failed to download evidence");
+    res.status(500).json({ error: "Failed to download document" });
+  }
+});
+
 // POST /profiles/:profileId/evidence — register item after upload
 router.post("/profiles/:profileId/evidence", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -79,15 +129,54 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
       res.status(404).json({ error: "Uploaded file not found" });
       return;
     }
-    const [item] = await db.insert(evidenceItemsTable).values({
-      profileId: profile.id,
-      filename: body.data.filename,
-      objectPath: body.data.objectPath,
-      mimeType: body.data.mimeType,
-      category: body.data.category,
-      evidenceType: body.data.evidenceType,
-      status: "received",
-    }).returning();
+    // New original documents never use the legacy auto-post workflow. Exact
+    // same-profile files share their document identity, but later links remain
+    // independent through evidence_transaction_links.
+    if (body.data.evidenceType === "document" && upload.contentHash) {
+      const [existing] = await db.select().from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.workflowVersion, 2),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+        eq(evidenceItemsTable.contentHash, upload.contentHash),
+      )).limit(1);
+      if (existing) {
+        res.status(200).json(existing);
+        return;
+      }
+    }
+    let item: typeof evidenceItemsTable.$inferSelect;
+    try {
+      [item] = await db.insert(evidenceItemsTable).values({
+        profileId: profile.id,
+        filename: body.data.filename,
+        objectPath: body.data.objectPath,
+        mimeType: body.data.mimeType,
+        category: body.data.category,
+        evidenceType: body.data.evidenceType,
+        status: "received",
+        workflowVersion: body.data.evidenceType === "document" ? 2 : 1,
+        reviewState: "pending",
+        contentHash: upload.contentHash,
+        objectSize: upload.objectSize,
+      }).returning();
+    } catch (err) {
+      const dbError = err as { cause?: { code?: string } };
+      if (dbError.cause?.code === "23505" && body.data.evidenceType === "document" && upload.contentHash) {
+        const [winner] = await db.select().from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.workflowVersion, 2),
+          eq(evidenceItemsTable.documentLifecycle, "active"),
+          eq(evidenceItemsTable.contentHash, upload.contentHash),
+        )).limit(1);
+        if (winner) { res.status(200).json(winner); return; }
+      }
+      throw err;
+    }
+    if (item.workflowVersion === 2) {
+      await addEvidenceAudit(profile.id, item.id, req.user.id, "document_registered", {
+        filename: item.filename, contentHash: item.contentHash,
+      });
+    }
     res.status(201).json(item);
   } catch (err) {
     req.log.error(err);
@@ -110,6 +199,12 @@ router.delete("/profiles/:profileId/evidence/:evidenceId", async (req, res) => {
         eq(evidenceItemsTable.profileId, profile.id),
       )).for("update");
       if (!evidenceItem) return { error: "Evidence item not found", status: 404 as const };
+      if (evidenceItem.workflowVersion >= 2) {
+        const [tombstoned] = await tx.update(evidenceItemsTable).set({
+          documentLifecycle: "tombstoned",
+        }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
+        return { evidenceItem: tombstoned, tombstoned: true };
+      }
       const now = new Date();
       const activeLease = (evidenceItem.status === "processing" || evidenceItem.importStatus === "processing")
         && (!evidenceItem.processingLeaseExpiresAt || evidenceItem.processingLeaseExpiresAt > now);
@@ -138,11 +233,33 @@ router.delete("/profiles/:profileId/evidence/:evidenceId", async (req, res) => {
       return { evidenceItem };
     });
     if ("error" in result) { res.status(result.status).json({ error: result.error }); return; }
-    // The database row is the source of truth for resuming. Clean up the
-    // corresponding object as best-effort after the row is safely removed.
-    await storageService.getObjectEntityFile(result.evidenceItem.objectPath)
-      .then(file => file.delete())
-      .catch(err => req.log.warn({ err }, "Could not remove discarded upload object"));
+    if ("tombstoned" in result) {
+      await addEvidenceAudit(profile.id, result.evidenceItem.id, req.user.id, "document_tombstoned", { via: "discard" });
+      res.json({ deleted: true, tombstoned: true });
+      return;
+    }
+    // A content-hashed object can be shared by later evidence registrations.
+    // Keep it after a discard: removing a shared physical object would make a
+    // different active evidence row (or a safe repeat upload) unreadable.
+    // Older pre-deduplication objects can still be removed once no evidence or
+    // bank-import row refers to their path.
+    const [[upload], [otherEvidence], [bankBatch]] = await Promise.all([
+      db.select().from(privateUploadObjectsTable)
+        .where(eq(privateUploadObjectsTable.objectPath, result.evidenceItem.objectPath)).limit(1),
+      db.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable)
+        .where(eq(evidenceItemsTable.objectPath, result.evidenceItem.objectPath)).limit(1),
+      db.select({ id: bankImportBatchesTable.id }).from(bankImportBatchesTable)
+        .where(eq(bankImportBatchesTable.objectPath, result.evidenceItem.objectPath)).limit(1),
+    ]);
+    if (!upload?.contentHash && !otherEvidence && !bankBatch) {
+      await storageService.getObjectEntityFile(result.evidenceItem.objectPath)
+        .then(async (file) => {
+          await file.delete();
+          await db.delete(privateUploadObjectsTable)
+            .where(eq(privateUploadObjectsTable.objectPath, result.evidenceItem.objectPath));
+        })
+        .catch(err => req.log.warn({ err }, "Could not remove discarded legacy upload object"));
+    }
     res.json({ deleted: true });
   } catch (err) {
     req.log.error(err, "Failed to discard evidence");
@@ -160,6 +277,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 
     const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!existingEvidence) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (existingEvidence.workflowVersion >= 2 && existingEvidence.documentLifecycle !== "active") {
+      res.status(409).json({ error: "This document is no longer active" }); return;
+    }
 
     // A retry after the server has already persisted an outcome must return that
     // outcome instead of extracting and posting the same document a second time.
@@ -181,6 +301,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       .where(and(
         eq(evidenceItemsTable.id, existingEvidence.id),
         eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
         or(
           inArray(evidenceItemsTable.status, ["received", "error"]),
           and(eq(evidenceItemsTable.status, "processing"), or(
@@ -200,7 +321,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       else res.status(409).json({ error: "This upload was reclaimed by another request" });
     };
 
-    if (!isConfigured()) {
+    if (!isConfigured() && evidenceItem.workflowVersion < 2) {
       const [updated] = await db.transaction(async (tx) => {
         const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
           eq(evidenceItemsTable.id, evidenceItem.id),
@@ -233,6 +354,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
         }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
       });
       if (!updated) { await respondWithLatestEvidence(); return; }
+      res.json(updated);
+      return;
+    }
+    if (!isConfigured() && evidenceItem.workflowVersion >= 2) {
+      const [updated] = await db.update(evidenceItemsTable).set({
+        status: "needs_review",
+        reviewState: "review_required",
+        processingLeaseExpiresAt: null,
+        processingToken: null,
+        aiReasoning: "Extraction is unavailable. Review and enter the financial details yourself.",
+        confidence: 0,
+      }).where(and(
+        eq(evidenceItemsTable.id, evidenceItem.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+        eq(evidenceItemsTable.processingToken, processingToken),
+      )).returning();
+      if (!updated) { await respondWithLatestEvidence(); return; }
+      await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "extraction_unavailable", {});
       res.json(updated);
       return;
     }
@@ -284,6 +424,44 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       const [updated] = await db.update(evidenceItemsTable).set({
         status: "error", processingLeaseExpiresAt: null, processingToken: null, aiReasoning: "Could not read or process the file.", confidence: 0,
       }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
+      if (!updated) { await respondWithLatestEvidence(); return; }
+      res.json(updated);
+      return;
+    }
+
+    // M9 documents always stop at a reviewable candidate. No confidence level,
+    // category, or extraction result is allowed to write the canonical ledger.
+    if (evidenceItem.workflowVersion >= 2) {
+      const [updated] = await db.transaction(async (tx) => {
+        const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.documentLifecycle, "active"),
+          eq(evidenceItemsTable.status, "processing"),
+          eq(evidenceItemsTable.processingToken, processingToken),
+        )).for("update");
+        if (!owned) return [];
+        await tx.insert(evidenceAuditEventsTable).values({
+          profileId: profile.id,
+          evidenceId: evidenceItem.id,
+          actorUserId: req.user.id,
+          eventType: "extraction_completed",
+          details: { confidence: extracted.confidence, suggestedTaxTreatment: extracted.taxTreatment },
+        });
+        return tx.update(evidenceItemsTable).set({
+          status: "needs_review",
+          reviewState: "review_required",
+          processingLeaseExpiresAt: null,
+          processingToken: null,
+          extractedData: extracted as unknown as Record<string, unknown>,
+          confidence: extracted.confidence,
+          aiReasoning: extracted.aiReasoning,
+        }).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.documentLifecycle, "active"),
+          eq(evidenceItemsTable.processingToken, processingToken),
+        )).returning();
+      });
       if (!updated) { await respondWithLatestEvidence(); return; }
       res.json(updated);
       return;
@@ -466,6 +644,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (evidenceItem.workflowVersion >= 2) {
+      res.status(422).json({ error: "Original documents use the review workflow, not spreadsheet import." }); return;
+    }
     const now = new Date();
     if (evidenceItem.importStatus === "processing"
       && (!evidenceItem.processingLeaseExpiresAt || evidenceItem.processingLeaseExpiresAt > now)) {
@@ -521,6 +702,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (evidenceItem.workflowVersion >= 2) {
+      res.status(422).json({ error: "Original documents use the review workflow, not spreadsheet import." }); return;
+    }
     const mapping = body.data.confirmedMapping as MappingSchema;
     const bankCsv = body.data.bankCsv ?? evidenceItem.evidenceType === "bank_csv";
     const evidenceTier = bankCsv ? 2 : 3;
@@ -690,6 +874,230 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
   }
 });
 
+// PATCH /profiles/:profileId/evidence/:evidenceId/review — retain corrections
+// to a document candidate without changing any financial record.
+router.patch("/profiles/:profileId/evidence/:evidenceId/review", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({
+    extractedData: z.record(z.string(), z.unknown()).optional(),
+    category: z.string().min(1).optional(),
+  }).strict().safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Invalid review" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
+      res.status(404).json({ error: "Active reviewable document not found" }); return;
+    }
+    const [updated] = await db.transaction(async (tx) => {
+      const [item] = await tx.update(evidenceItemsTable).set({
+        ...(body.data.extractedData ? { extractedData: body.data.extractedData } : {}),
+        ...(body.data.category ? { category: body.data.category } : {}),
+        status: "needs_review",
+        reviewState: "reviewed",
+      }).where(and(
+        eq(evidenceItemsTable.id, evidence.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.workflowVersion, 2),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+      )).returning();
+      if (!item) return [];
+      await tx.insert(evidenceAuditEventsTable).values({
+        profileId: profile.id, evidenceId: evidence.id, actorUserId: req.user.id,
+        eventType: "review_saved", details: { correctedCandidate: Boolean(body.data.extractedData) },
+      });
+      return [item];
+    });
+    if (!updated) { res.status(409).json({ error: "This document is no longer active" }); return; }
+    res.json(updated);
+  } catch (err) {
+    req.log.error(err, "Failed to save evidence review");
+    res.status(500).json({ error: "Failed to save evidence review" });
+  }
+});
+
+// POST /profiles/:profileId/evidence/:evidenceId/confirm-transaction
+// The only M9 path that writes Financial Memory. A request ID makes retries
+// idempotent while the evidence review itself remains purely supporting data.
+router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({
+    idempotencyKey: z.string().uuid(),
+    date: z.string().min(1),
+    description: z.string().trim().min(1),
+    amount: z.number().refine((value) => value !== 0, "Amount must be non-zero"),
+    category: z.string().trim().min(1).default("other"),
+    taxTreatment: z.string().trim().min(1),
+    allowablePercentage: z.number().min(0).max(100).default(100),
+  }).strict().safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Invalid financial confirmation" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
+      res.status(404).json({ error: "Active reviewable document not found" }); return;
+    }
+    const [existing] = await db.select().from(transactionsTable).where(and(
+      eq(transactionsTable.id, body.data.idempotencyKey),
+      eq(transactionsTable.profileId, profile.id),
+    )).limit(1);
+    if (existing) { res.json(existing); return; }
+
+    const [transaction] = await db.transaction(async (tx) => {
+      const [owned] = await tx.select().from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.id, evidence.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+      )).for("update");
+      if (!owned) return [];
+      // The explicit treatment determines direction for a document candidate.
+      // People naturally type “12.34” for a £12.34 receipt; keeping it positive
+      // must not turn a deductible expense into income.
+      const isIncome = body.data.taxTreatment === "income";
+      const canonicalAmount = isIncome ? Math.abs(body.data.amount) : -Math.abs(body.data.amount);
+      const deductible = body.data.taxTreatment !== "non_deductible" && !isIncome;
+      const allowableAmount = isIncome
+        ? canonicalAmount
+        : deductible
+          ? -Math.abs(canonicalAmount) * (body.data.allowablePercentage / 100)
+          : 0;
+      const [created] = await tx.insert(transactionsTable).values({
+        id: body.data.idempotencyKey,
+        profileId: profile.id,
+        date: body.data.date,
+        description: body.data.description,
+        amount: canonicalAmount,
+        recordType: isIncome ? "income" : "expense",
+        category: body.data.category,
+        taxTreatment: body.data.taxTreatment,
+        source: "manual",
+        // M9 uses the bridge table as its sole relationship. The singular
+        // legacy column stays reserved for workflow-1 compatibility rows.
+        evidenceId: null,
+        evidenceTier: 1,
+        userOverride: true,
+        accountingCategory: body.data.category,
+        allowablePercentage: isIncome ? 100 : body.data.allowablePercentage,
+        allowableAmount,
+      }).returning();
+      await tx.insert(evidenceTransactionLinksTable).values({
+        profileId: profile.id, evidenceId: evidence.id, transactionId: created.id,
+        linkReason: "explicit_financial_confirmation",
+      }).onConflictDoNothing();
+      await tx.update(evidenceItemsTable).set({ reviewState: "reviewed" }).where(eq(evidenceItemsTable.id, evidence.id));
+      await tx.insert(evidenceAuditEventsTable).values({
+        profileId: profile.id, evidenceId: evidence.id, actorUserId: req.user.id,
+        eventType: "financial_confirmation_created",
+        details: { transactionId: created.id, idempotencyKey: body.data.idempotencyKey },
+      });
+      return [created];
+    });
+    if (!transaction) { res.status(409).json({ error: "This document is no longer available" }); return; }
+    res.status(201).json(transaction);
+  } catch (err) {
+    const dbError = err as { cause?: { code?: string } };
+    if (dbError.cause?.code === "23505") {
+      const [existing] = await db.select().from(transactionsTable).where(and(
+        eq(transactionsTable.id, body.data.idempotencyKey),
+        eq(transactionsTable.profileId, req.params.profileId),
+      ));
+      if (existing) { res.json(existing); return; }
+    }
+    req.log.error(err, "Failed to confirm evidence transaction");
+    res.status(500).json({ error: "Failed to confirm financial record" });
+  }
+});
+
+router.delete("/profiles/:profileId/evidence/:evidenceId/links/:transactionId", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [link] = await db.update(evidenceTransactionLinksTable).set({
+      linkStatus: "detached", detachedAt: new Date(),
+    }).where(and(
+      eq(evidenceTransactionLinksTable.profileId, profile.id),
+      eq(evidenceTransactionLinksTable.evidenceId, req.params.evidenceId),
+      eq(evidenceTransactionLinksTable.transactionId, req.params.transactionId),
+      eq(evidenceTransactionLinksTable.linkStatus, "active"),
+    )).returning();
+    if (!link) { res.status(404).json({ error: "Active evidence link not found" }); return; }
+    await addEvidenceAudit(profile.id, link.evidenceId, req.user.id, "transaction_link_detached", { transactionId: link.transactionId });
+    res.status(204).end();
+  } catch (err) {
+    req.log.error(err, "Failed to detach evidence");
+    res.status(500).json({ error: "Failed to detach evidence" });
+  }
+});
+
+router.post("/profiles/:profileId/evidence/:evidenceId/tombstone", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [updated] = await db.update(evidenceItemsTable).set({
+      documentLifecycle: "tombstoned",
+    }).where(and(
+      eq(evidenceItemsTable.id, req.params.evidenceId),
+      eq(evidenceItemsTable.profileId, profile.id),
+      eq(evidenceItemsTable.workflowVersion, 2),
+      eq(evidenceItemsTable.documentLifecycle, "active"),
+    )).returning();
+    if (!updated) { res.status(404).json({ error: "Active document not found" }); return; }
+    await addEvidenceAudit(profile.id, updated.id, req.user.id, "document_tombstoned", {});
+    res.json(updated);
+  } catch (err) {
+    req.log.error(err, "Failed to tombstone evidence");
+    res.status(500).json({ error: "Failed to tombstone document" });
+  }
+});
+
+router.post("/profiles/:profileId/evidence/:evidenceId/replace", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = z.object({
+    objectPath: z.string().min(1), filename: z.string().min(1), mimeType: z.string().min(1),
+  }).strict().safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Invalid replacement document" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [upload] = await db.select().from(privateUploadObjectsTable).where(and(
+      eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
+      eq(privateUploadObjectsTable.userId, req.user.id),
+    )).limit(1);
+    if (!upload) { res.status(404).json({ error: "Uploaded replacement not found" }); return; }
+    const [replacement] = await db.transaction(async (tx) => {
+      const [original] = await tx.update(evidenceItemsTable).set({
+        documentLifecycle: "replaced",
+      }).where(and(
+        eq(evidenceItemsTable.id, req.params.evidenceId),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.workflowVersion, 2),
+        eq(evidenceItemsTable.documentLifecycle, "active"),
+      )).returning();
+      if (!original) return [];
+      const [created] = await tx.insert(evidenceItemsTable).values({
+        profileId: profile.id, filename: body.data.filename, objectPath: body.data.objectPath,
+        mimeType: body.data.mimeType, category: original.category, evidenceType: "document",
+        workflowVersion: 2, reviewState: "pending", status: "received",
+        contentHash: upload.contentHash, objectSize: upload.objectSize, replacementOfEvidenceId: original.id,
+      }).returning();
+      await tx.insert(evidenceAuditEventsTable).values([
+        { profileId: profile.id, evidenceId: original.id, actorUserId: req.user.id, eventType: "document_replaced", details: { replacementEvidenceId: created.id } },
+        { profileId: profile.id, evidenceId: created.id, actorUserId: req.user.id, eventType: "replacement_registered", details: { replacedEvidenceId: original.id } },
+      ]);
+      return [created];
+    });
+    if (!replacement) { res.status(404).json({ error: "Active document not found" }); return; }
+    res.status(201).json(replacement);
+  } catch (err) {
+    req.log.error(err, "Failed to replace evidence");
+    res.status(500).json({ error: "Failed to replace document" });
+  }
+});
+
 // PATCH /profiles/:profileId/transactions/:txId/attach-evidence
 router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -703,6 +1111,38 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
     ));
     const evidenceItem = await getEvidenceItem(profile.id, body.data.evidenceId);
     if (!transaction || !evidenceItem) { res.status(404).json({ error: "Transaction or evidence item not found" }); return; }
+    if (evidenceItem.workflowVersion >= 2 && evidenceItem.documentLifecycle === "active") {
+      const attached = await db.transaction(async (tx) => {
+        const [activeEvidence] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.workflowVersion, 2),
+          eq(evidenceItemsTable.documentLifecycle, "active"),
+        )).for("update");
+        if (!activeEvidence) return false;
+        const [existingLink] = await tx.select().from(evidenceTransactionLinksTable).where(and(
+          eq(evidenceTransactionLinksTable.profileId, profile.id),
+          eq(evidenceTransactionLinksTable.evidenceId, evidenceItem.id),
+          eq(evidenceTransactionLinksTable.transactionId, transaction.id),
+        )).limit(1);
+        if (existingLink) {
+          await tx.update(evidenceTransactionLinksTable).set({ linkStatus: "active", detachedAt: null })
+            .where(eq(evidenceTransactionLinksTable.id, existingLink.id));
+        } else {
+          await tx.insert(evidenceTransactionLinksTable).values({
+            profileId: profile.id, evidenceId: evidenceItem.id, transactionId: transaction.id,
+          });
+        }
+        await tx.insert(evidenceAuditEventsTable).values({
+          profileId: profile.id, evidenceId: evidenceItem.id, actorUserId: req.user.id,
+          eventType: "transaction_linked", details: { transactionId: transaction.id },
+        });
+        return true;
+      });
+      if (!attached) { res.status(409).json({ error: "This document is no longer active" }); return; }
+      res.json(transaction);
+      return;
+    }
     const tier = tierForEvidenceType(evidenceItem.evidenceType);
     if (transaction.evidenceTier !== 0 && transaction.evidenceTier <= tier) {
       res.status(409).json({ error: "The transaction already has equal or stronger evidence" }); return;
@@ -724,6 +1164,18 @@ async function getEvidenceItem(profileId: string, evidenceId: string) {
     eq(evidenceItemsTable.id, evidenceId), eq(evidenceItemsTable.profileId, profileId),
   ));
   return item;
+}
+
+async function addEvidenceAudit(
+  profileId: string,
+  evidenceId: string,
+  actorUserId: string,
+  eventType: string,
+  details: Record<string, unknown>,
+) {
+  await db.insert(evidenceAuditEventsTable).values({
+    profileId, evidenceId, actorUserId, eventType, details,
+  });
 }
 
 async function buildExtractionContext(profile: typeof profilesTable.$inferSelect, uploadCategory: string): Promise<ExtractionContext> {

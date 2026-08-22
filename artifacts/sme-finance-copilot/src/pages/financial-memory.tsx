@@ -1,7 +1,7 @@
 import { Badge, Button, Card } from '@/components/ui';
-import { transactionsApi, type APITransaction } from '@/lib/api';
+import { evidenceApi, transactionsApi, type APIEvidenceItem, type APITransaction } from '@/lib/api';
 import { useStore, type TransactionItem } from '@/lib/store';
-import { ArrowLeft, CalendarDays, ChevronRight, Clock3, RefreshCw } from 'lucide-react';
+import { ArrowLeft, CalendarDays, ChevronRight, Clock3, FileText, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 
@@ -59,6 +59,7 @@ export default function FinancialMemory() {
   const [loading, setLoading] = useState(Boolean(entryId));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [unmatchedEvidence, setUnmatchedEvidence] = useState<APIEvidenceItem[]>([]);
 
   useEffect(() => {
     if (entryId) return;
@@ -89,6 +90,15 @@ export default function FinancialMemory() {
     return () => { cancelled = true; };
   }, [activeProfileId, entryId]);
 
+  useEffect(() => {
+    if (!activeProfileId || entryId) { setUnmatchedEvidence([]); return; }
+    let cancelled = false;
+    evidenceApi.unmatched(activeProfileId)
+      .then(items => { if (!cancelled) setUnmatchedEvidence(items); })
+      .catch(() => { if (!cancelled) setUnmatchedEvidence([]); });
+    return () => { cancelled = true; };
+  }, [activeProfileId, entryId, refreshing]);
+
   // Bank CSV movements are durable Financial Memory records immediately, but
   // remain visibly unreviewed until a person assigns their accounting meaning.
   const records = transactions;
@@ -98,6 +108,8 @@ export default function FinancialMemory() {
     setError('');
     try {
       await refreshData();
+      const items = await evidenceApi.unmatched(activeProfileId);
+      setUnmatchedEvidence(items);
     } catch {
       setError('We could not refresh your financial records. Please try again.');
     } finally {
@@ -150,6 +162,10 @@ export default function FinancialMemory() {
           </div>
         </Link>;
       }) : <div className="p-10 text-center"><Clock3 className="w-6 h-6 text-muted-foreground mx-auto mb-3" /><h2 className="font-medium">No financial records yet</h2><p className="text-sm text-muted-foreground mt-1">Add your first income or expense to start your Financial Memory.</p><Button className="mt-4" onClick={() => navigate('/ingest')}>Add a record</Button></div>}
+    </Card>
+    <Card className="overflow-hidden">
+      <div className="border-b border-border p-4"><h2 className="font-serif text-xl">Supporting documents awaiting a financial link</h2><p className="mt-1 text-sm text-muted-foreground">These files are safely stored as evidence, but they do not change income, expenses, profit, tax, or Financial Memory until you explicitly confirm or link a transaction.</p></div>
+      {unmatchedEvidence.length ? <div className="divide-y divide-border">{unmatchedEvidence.map(document => <div key={document.id} className="flex flex-wrap items-center justify-between gap-3 p-4"><div className="flex min-w-0 gap-3"><FileText className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><div className="min-w-0"><p className="truncate font-medium">{document.filename}</p><p className="mt-1 text-xs text-muted-foreground">{document.reviewState === 'reviewed' ? 'Review saved — not posted' : document.reviewState === 'review_required' ? 'Ready to review — not posted' : 'Waiting for extraction'} · Uploaded {formatTimestamp(document.uploadedAt)}</p></div></div><Button size="sm" variant="outline" onClick={() => navigate('/ingest')}>Review document</Button></div>)}</div> : <div className="p-5 text-sm text-muted-foreground">No unmatched supporting documents for this profile.</div>}
     </Card>
     <p className="text-xs text-muted-foreground">{records.length} saved record{records.length === 1 ? '' : 's'} for this business profile.</p>
   </div>;

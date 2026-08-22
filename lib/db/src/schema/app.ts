@@ -72,6 +72,10 @@ export type InsertProfile = z.infer<typeof insertProfileSchema>;
 export const privateUploadObjectsTable = pgTable('private_upload_objects', {
   id: uuid('id').primaryKey().defaultRandom(),
   objectPath: text('object_path').notNull(),
+  // Derived server-side for durable same-user object reuse. It is never trusted
+  // from the browser as a claim about file contents.
+  contentHash: text('content_hash'),
+  objectSize: integer('object_size'),
   userId: text('user_id')
     .notNull()
     .references(() => usersTable.id, { onDelete: 'cascade' }),
@@ -79,6 +83,9 @@ export const privateUploadObjectsTable = pgTable('private_upload_objects', {
 }, (table) => [
   uniqueIndex('private_upload_objects_path_unique').on(table.objectPath),
   index('private_upload_objects_user_idx').on(table.userId, table.createdAt),
+  index('private_upload_objects_user_hash_idx').on(table.userId, table.contentHash),
+  uniqueIndex('private_upload_objects_user_hash_unique').on(table.userId, table.contentHash)
+    .where(sql`${table.contentHash} is not null`),
 ]);
 
 // ─── Evidence Items ───────────────────────────────────────────────────────────
@@ -114,8 +121,20 @@ export const evidenceItemsTable = pgTable('evidence_items', {
   // Changes with every lease claim. Final writes must present this token, which
   // fences an older worker after its interrupted lease has been reclaimed.
   processingToken: text('processing_token'),
+  // M9 document fields are deliberately additive. Legacy evidence remains on
+  // workflow 1 so its historical transaction/inbox semantics are preserved.
+  workflowVersion: integer('workflow_version').notNull().default(1),
+  documentLifecycle: text('document_lifecycle').notNull().default('active'),
+  reviewState: text('review_state').notNull().default('pending'),
+  contentHash: text('content_hash'),
+  objectSize: integer('object_size'),
+  replacementOfEvidenceId: uuid('replacement_of_evidence_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex('evidence_items_m9_active_hash_unique')
+    .on(table.profileId, table.workflowVersion, table.contentHash)
+    .where(sql`${table.workflowVersion} = 2 and ${table.documentLifecycle} = 'active' and ${table.contentHash} is not null`),
+]);
 
 export const insertEvidenceItemSchema = createInsertSchema(evidenceItemsTable).omit({
   id: true,
@@ -327,6 +346,50 @@ export const insertTransactionSchema = createInsertSchema(transactionsTable).omi
 });
 export type Transaction = typeof transactionsTable.$inferSelect;
 export type InsertTransaction = z.infer<typeof insertTransactionSchema>;
+
+// ─── Evidence links and audit history ─────────────────────────────────────────
+
+/**
+ * Supporting documents are independent from the financial ledger. This table
+ * makes their zero-to-many relationship explicit without rewriting legacy
+ * transactions.evidenceId values.
+ */
+export const evidenceTransactionLinksTable = pgTable('evidence_transaction_links', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  transactionId: uuid('transaction_id')
+    .notNull()
+    .references(() => transactionsTable.id, { onDelete: 'cascade' }),
+  linkStatus: text('link_status').notNull().default('active'),
+  linkReason: text('link_reason').notNull().default('supporting_document'),
+  detachedAt: timestamp('detached_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('evidence_transaction_link_unique').on(table.evidenceId, table.transactionId),
+  index('evidence_transaction_link_profile_idx').on(table.profileId, table.evidenceId, table.linkStatus),
+]);
+
+export const evidenceAuditEventsTable = pgTable('evidence_audit_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  actorUserId: text('actor_user_id')
+    .references(() => usersTable.id, { onDelete: 'set null' }),
+  eventType: text('event_type').notNull(),
+  details: jsonb('details').notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('evidence_audit_events_evidence_idx').on(table.evidenceId, table.createdAt),
+]);
 
 // ─── Inbox Items ──────────────────────────────────────────────────────────────
 
