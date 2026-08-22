@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { and, eq, inArray } from 'drizzle-orm';
+import * as XLSX from 'xlsx';
 import {
   db,
   evidenceItemsTable,
@@ -91,9 +92,11 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
   const originalGetFile = ObjectStorageService.prototype.getObjectEntityFile;
   const originalDownload = ObjectStorageService.prototype.downloadObject;
   const originalUploadUrl = ObjectStorageService.prototype.getObjectEntityUploadURL;
+  let spreadsheetBuffer: Buffer | undefined;
   ObjectStorageService.prototype.saveContent = async () => `/objects/uploads/m9-${randomUUID()}`;
   ObjectStorageService.prototype.getObjectEntityFile = async () => ({
     delete: async () => undefined,
+    download: async () => [spreadsheetBuffer ?? Buffer.from('test evidence bytes')],
   }) as never;
   ObjectStorageService.prototype.downloadObject = async () =>
     new Response('test evidence bytes', { headers: { 'content-type': 'text/plain' } });
@@ -478,6 +481,145 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     const primaryEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`);
     assert.equal(primaryEvidence.status, 200);
     assert.ok(primaryEvidence.body.some((item: { id: string }) => item.id === evidenceId));
+
+    const maximumExcelRow = 1_048_576;
+    const boundarySheet = {
+      A1: { v: 'Date', t: 's' },
+      B1: { v: 'Amount', t: 's' },
+      C1: { v: 'Description', t: 's' },
+      [`A${maximumExcelRow}`]: { v: '2025-06-03', t: 's' },
+      [`B${maximumExcelRow}`]: { v: '42.50', t: 's' },
+      [`C${maximumExcelRow}`]: { v: 'Maximum row movement', t: 's' },
+      '!ref': `A1:C${maximumExcelRow}`,
+    } as XLSX.WorkSheet;
+    const adjacentSheet = {
+      A1: { v: 'Date', t: 's' },
+      B1: { v: 'Amount', t: 's' },
+      C1: { v: 'Description', t: 's' },
+      A2: { v: '2025-06-04', t: 's' },
+      B2: { v: '17.25', t: 's' },
+      C2: { v: 'Adjacent sheet movement', t: 's' },
+      '!ref': 'A1:C2',
+    } as XLSX.WorkSheet;
+    const boundaryWorkbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(boundaryWorkbook, boundarySheet, 'Maximum rows');
+    XLSX.utils.book_append_sheet(boundaryWorkbook, adjacentSheet, 'Adjacent sheet');
+    spreadsheetBuffer = XLSX.write(boundaryWorkbook, { type: 'buffer', bookType: 'xlsx' });
+
+    const spreadsheetUpload = await upload(aliceSession, alicePrimary, 'boundary workbook bytes');
+    assert.equal(spreadsheetUpload.status, 200);
+    const spreadsheetRegistration = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'boundary-workbook.xlsx',
+        objectPath: spreadsheetUpload.body.objectPath,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        evidenceType: 'ledger',
+      }),
+    });
+    assert.equal(spreadsheetRegistration.status, 201);
+    const spreadsheetEvidenceId = spreadsheetRegistration.body.id as string;
+    const boundaryMapping = {
+      headerRow: 0,
+      columns: { date: 0, amount: 1, description: 2 },
+    };
+    const boundaryConfirmation = {
+      confirmation: true,
+      selectedSheetIds: ['sheet_1', 'sheet_2'],
+      sheetMappings: { sheet_1: boundaryMapping, sheet_2: boundaryMapping },
+      filingScope: ['2025-2026'],
+      excludedRowRefs: [],
+      preTradingStartMode: 'exclude',
+      outsideScopeMode: 'exclude',
+    };
+
+    // Seed the second sheet's identity so the first sheet can be inserted
+    // before the route encounters the deliberate conflict. The route must
+    // roll back that first insert rather than leave a partially imported file.
+    const conflictingSourceRowIndex = 1_100_000 + 2;
+    const [conflictingTransaction] = await db.insert(transactionsTable).values({
+      profileId: alicePrimary,
+      evidenceId: spreadsheetEvidenceId,
+      sourceRowIndex: conflictingSourceRowIndex,
+      rawRowData: { sheetId: 'sheet_2', sourceRow: 2 },
+      date: '2025-06-04',
+      description: 'Intentional source identity conflict',
+      amount: 17.25,
+      recordType: 'unknown',
+      category: 'expense',
+      taxTreatment: 'unclear',
+      source: 'extracted',
+      evidenceTier: 3,
+      accountingCategory: 'other',
+      allowablePercentage: 0,
+      allowableAmount: 0,
+      accountingClassification: 'unknown',
+      classificationConfidence: 0,
+    }).returning();
+
+    const conflictedConfirmation = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/confirm-spreadsheet`,
+      { method: 'POST', body: JSON.stringify(boundaryConfirmation) },
+    );
+    assert.equal(conflictedConfirmation.status, 500);
+    assert.match(conflictedConfirmation.body.error, /Failed to confirm spreadsheet import/);
+    const afterConflictRows = await db.select().from(transactionsTable).where(and(
+      eq(transactionsTable.profileId, alicePrimary),
+      eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
+    ));
+    assert.deepEqual(
+      afterConflictRows.map((transaction) => transaction.id),
+      [conflictingTransaction.id],
+      'a source identity conflict rolls back all earlier rows in the workbook',
+    );
+    const [erroredSpreadsheet] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, spreadsheetEvidenceId));
+    assert.equal(erroredSpreadsheet.importStatus, 'error');
+
+    await db.delete(transactionsTable).where(eq(transactionsTable.id, conflictingTransaction.id));
+    const confirmedBoundary = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/confirm-spreadsheet`,
+      { method: 'POST', body: JSON.stringify(boundaryConfirmation) },
+    );
+    assert.equal(confirmedBoundary.status, 200);
+    assert.equal(confirmedBoundary.body.importedRows, 2);
+    const persistedBoundaryRows = await db.select().from(transactionsTable)
+      .where(and(
+        eq(transactionsTable.profileId, alicePrimary),
+        eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
+      ));
+    assert.equal(persistedBoundaryRows.length, 2);
+    assert.deepEqual(
+      persistedBoundaryRows
+        .map((transaction) => ({
+          sourceRowIndex: transaction.sourceRowIndex,
+          sheetId: (transaction.rawRowData as { sheetId: string }).sheetId,
+          sourceRow: (transaction.rawRowData as { sourceRow: number }).sourceRow,
+        }))
+        .sort((left, right) => left.sourceRowIndex! - right.sourceRowIndex!),
+      [
+        { sourceRowIndex: maximumExcelRow, sheetId: 'sheet_1', sourceRow: maximumExcelRow },
+        { sourceRowIndex: 1_100_002, sheetId: 'sheet_2', sourceRow: 2 },
+      ],
+      'maximum-row and adjacent-sheet movements retain distinct source identities',
+    );
+
+    const replayedBoundary = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/confirm-spreadsheet`,
+      { method: 'POST', body: JSON.stringify(boundaryConfirmation) },
+    );
+    assert.equal(replayedBoundary.status, 200);
+    assert.equal(replayedBoundary.body.importedRows, 2);
+    assert.equal(
+      (await db.select().from(transactionsTable).where(and(
+        eq(transactionsTable.profileId, alicePrimary),
+        eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
+      ))).length,
+      2,
+      'repeating the confirmed mapping returns the prior outcome without duplicates',
+    );
   } finally {
     ObjectStorageService.prototype.saveContent = originalSaveContent;
     ObjectStorageService.prototype.getObjectEntityFile = originalGetFile;
