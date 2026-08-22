@@ -74,7 +74,11 @@ function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileI
   const [confirming, setConfirming] = useState(false);
   const financialIdempotencyKey = useRef<string | null>(null);
   useEffect(() => {
-    if (resumeEvidence?.workflowVersion === 2 && resumeEvidence.reviewState !== 'pending' && resumeEvidence.documentLifecycle === 'active') {
+    if (
+      resumeEvidence?.workflowVersion === 2
+      && (resumeEvidence.reviewState === 'review_required' || resumeEvidence.reviewState === 'reviewed')
+      && resumeEvidence.documentLifecycle === 'active'
+    ) {
       setReviewEvidence(resumeEvidence as APIEvidenceItem);
       setDraft(draftFromCandidate(resumeEvidence.extractedData, resumeEvidence.filename));
       setStatus('done');
@@ -438,7 +442,8 @@ export default function AddRecords() {
     return () => { cancelled = true; };
   }, [activeProfileId, evidenceItems]);
   const resumableEvidence = evidenceItems.filter(item =>
-    (item.evidenceType === 'document' && (item.status === 'received' || item.status === 'processing' || item.status === 'error')) ||
+    (item.evidenceType === 'document' && item.documentLifecycle === 'active' && item.reviewState !== 'confirmed' &&
+      (item.status === 'received' || item.status === 'processing' || item.status === 'error')) ||
     ((item.evidenceType === 'bank_csv' || item.evidenceType === 'ledger') && item.importStatus !== 'done'),
   );
   const reviewReadyEvidence = evidenceItems.filter(item =>

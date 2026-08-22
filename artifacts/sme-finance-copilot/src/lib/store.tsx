@@ -135,7 +135,7 @@ export interface EvidenceItem {
   importStatus?: string;
   workflowVersion?: number;
   documentLifecycle?: 'active' | 'replaced' | 'tombstoned';
-  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'failed';
+  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'confirmed' | 'failed';
   extractedData?: Record<string, unknown> | null;
 }
 

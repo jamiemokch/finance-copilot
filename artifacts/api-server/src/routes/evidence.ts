@@ -1038,7 +1038,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
         profileId: profile.id, evidenceId: evidence.id, transactionId: created.id,
         linkReason: "explicit_financial_confirmation",
       }).onConflictDoNothing();
-      await tx.update(evidenceItemsTable).set({ reviewState: "reviewed" }).where(eq(evidenceItemsTable.id, evidence.id));
+      // A confirmed document is no longer review work. Keep this terminal
+      // state alongside the active bridge link so a fresh client load cannot
+      // mistake a saved review for a document that still needs confirming.
+      await tx.update(evidenceItemsTable).set({
+        status: "processed",
+        reviewState: "confirmed",
+      }).where(eq(evidenceItemsTable.id, evidence.id));
       await tx.insert(evidenceAuditEventsTable).values({
         profileId: profile.id, evidenceId: evidence.id, actorUserId: req.user.id,
         eventType: "financial_confirmation_created",

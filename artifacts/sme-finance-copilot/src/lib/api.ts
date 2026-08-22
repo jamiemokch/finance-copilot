@@ -303,7 +303,7 @@ export interface APIEvidenceItem {
   uploadedAt?: string;
   workflowVersion?: number;
   documentLifecycle?: 'active' | 'replaced' | 'tombstoned';
-  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'failed';
+  reviewState?: 'pending' | 'review_required' | 'reviewed' | 'confirmed' | 'failed';
   contentHash?: string | null;
   objectSize?: number | null;
   replacementOfEvidenceId?: string | null;

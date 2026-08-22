@@ -15,6 +15,12 @@ For original documents, keep extraction/review separate from the ledger: only an
 
 **How to apply:** Gate every workflow-2 document route that could create import outcomes, use active-lifecycle predicates under transaction locks, and use server-derived content hashes with database uniqueness for object/document reuse. Do not let hash reuse suppress a later, legitimate link.
 
+An explicit financial confirmation must also set a terminal document review state and processed status; “reviewed” remains reserved for a saved candidate that still awaits financial confirmation.
+
+**Why:** A review saved before confirmation and a completed financial record have different user actions available. Sharing the same state lets a reload reintroduce a finished document into review or resume queues.
+
+**How to apply:** Whenever a confirmation creates or replays its transaction bridge, preserve the active link and return the terminal document state on evidence reloads. Queue and resume views must accept only pending or review-required states, not terminal ones.
+
 Private bytes may be physically deduplicated only within the same authenticated user, while every business profile needs its own logical upload binding before it can register, resume, replace, link, or download evidence.
 
 **Why:** An unguessable object path and same-user byte reuse are storage optimisations, not authorization. A path-only download or a user-only upload record can otherwise cross the selected business boundary.

@@ -332,6 +332,25 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       1,
       'confirmation creates one idempotent bridge link',
     );
+    const [reloadedEvidence, reloadedUnmatchedEvidence, reloadedFinancialMemory] = await Promise.all([
+      request(aliceSession, `/api/profiles/${alicePrimary}/evidence`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/evidence/unmatched`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/transactions`),
+    ]);
+    assert.equal(reloadedEvidence.status, 200);
+    const reloadedDocument = reloadedEvidence.body.find((item: { id: string }) => item.id === evidenceId);
+    assert.equal(reloadedDocument?.status, 'processed', 'a confirmed document reloads in its terminal state');
+    assert.equal(reloadedDocument?.reviewState, 'confirmed', 'a confirmed document cannot be mistaken for a saved review');
+    assert.equal(reloadedUnmatchedEvidence.status, 200);
+    assert.ok(
+      !reloadedUnmatchedEvidence.body.some((item: { id: string }) => item.id === evidenceId),
+      'a confirmed document is absent from the reloaded review queue',
+    );
+    assert.equal(
+      reloadedFinancialMemory.body.filter((item: { id: string }) => item.id === confirmationKey).length,
+      1,
+      'reload still shows exactly one confirmed Financial Memory record',
+    );
 
     const [manual] = await db.insert(transactionsTable).values({
       profileId: alicePrimary,
