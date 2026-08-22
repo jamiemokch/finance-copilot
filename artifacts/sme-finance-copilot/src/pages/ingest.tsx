@@ -1,7 +1,7 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
 import {
   bankImportsApi, evidenceApi, transactionsApi,
-  type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount,
+  type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetReviewAnalysis,
 } from '@/lib/api';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
@@ -306,7 +306,128 @@ function BankImportFlow({ profileId, refresh, onBack }: { profileId: string; ref
   </Card>;
 }
 
+type ReviewMapping = { headerRow: number; columns: Record<string, number | undefined>; dateFormat?: string | null; currency?: string };
+
 function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind: 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
+  const [stage, setStage] = useState<'pick' | 'inspecting' | 'review' | 'confirming' | 'done' | 'error'>(resumeEvidence ? 'inspecting' : 'pick');
+  const [evidenceId, setEvidenceId] = useState(resumeEvidence?.id ?? '');
+  const [filename, setFilename] = useState(resumeEvidence?.filename ?? '');
+  const [analysis, setAnalysis] = useState<SpreadsheetReviewAnalysis | null>(null);
+  const [aiStatus, setAiStatus] = useState<{ status: string; reason?: string | null } | null>(null);
+  const [sheetMappings, setSheetMappings] = useState<Record<string, ReviewMapping>>({});
+  const [selectedSheetIds, setSelectedSheetIds] = useState<string[]>([]);
+  const [activeSheetId, setActiveSheetId] = useState('');
+  const [filingScope, setFilingScope] = useState<string[]>([]);
+  const [acknowledgeUnresolved, setAcknowledgeUnresolved] = useState(false);
+  const [preTradingStartMode, setPreTradingStartMode] = useState<'retain' | 'exclude'>('exclude');
+  const [outsideScopeMode, setOutsideScopeMode] = useState<'retain' | 'exclude'>('exclude');
+  const [summary, setSummary] = useState<{ dispositionCounts: Record<string, number>; importedRows: number; taxYears: string[] } | null>(null);
+  const [error, setError] = useState('');
+  const resumed = useRef(false);
+
+  const applyInspection = (detected: Awaited<ReturnType<typeof evidenceApi.detectSchema>>) => {
+    const nextAnalysis = detected.analysis ?? null;
+    setAnalysis(nextAnalysis);
+    setAiStatus(detected.aiStatus ?? null);
+    const mappings = Object.fromEntries((nextAnalysis?.sheets ?? []).map((sheet) => [
+      sheet.sheetId,
+      { headerRow: sheet.mapping.headerRow ?? 0, columns: { ...sheet.mapping.columns }, dateFormat: null, currency: 'GBP' },
+    ])) as Record<string, ReviewMapping>;
+    setSheetMappings(mappings);
+    const selectable = (nextAnalysis?.sheets ?? []).filter((sheet) => sheet.role === 'transactional').map((sheet) => sheet.sheetId);
+    setSelectedSheetIds(selectable);
+    setActiveSheetId(selectable[0] ?? nextAnalysis?.sheets[0]?.sheetId ?? '');
+    setFilingScope(nextAnalysis?.taxYears ?? []);
+  };
+  const inspect = async (id: string) => {
+    setStage('inspecting'); setError('');
+    try {
+      const detected = await evidenceApi.detectSchema(profileId, id);
+      setEvidenceId(id); applyInspection(detected); setStage('review');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'We could not inspect this spreadsheet.'); setStage('error');
+    }
+  };
+  useEffect(() => {
+    if (resumeEvidence && !resumed.current) {
+      resumed.current = true;
+      void inspect(resumeEvidence.id);
+    }
+  }, [resumeEvidence?.id]);
+  const chooseFile = async (file: File) => {
+    setFilename(file.name); setStage('inspecting'); setError('');
+    try {
+      const { objectPath } = await evidenceApi.uploadDirect(profileId, file);
+      const evidence = await evidenceApi.register(profileId, {
+        filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'other', evidenceType: 'ledger',
+      });
+      await inspect(evidence.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'We could not read that file. Please use a CSV or Excel file and try again.'); setStage('error');
+    }
+  };
+  const activeSheet = analysis?.sheets.find((sheet) => sheet.sheetId === activeSheetId) ?? null;
+  const activeMapping = activeSheetId ? sheetMappings[activeSheetId] : undefined;
+  const setRole = (column: number, role: ColumnRole) => {
+    if (!activeSheetId || !activeMapping) return;
+    const columns = { ...activeMapping.columns };
+    Object.keys(columns).forEach((key) => { if (columns[key] === column) delete columns[key]; });
+    if (role !== 'none') columns[role] = column;
+    setSheetMappings((current) => ({ ...current, [activeSheetId]: { ...activeMapping, columns } }));
+  };
+  const roleFor = (column: number): ColumnRole => {
+    const role = Object.entries(activeMapping?.columns ?? {}).find(([, value]) => value === column)?.[0];
+    return ['date', 'amount', 'description', 'category', 'debit', 'credit', 'balance'].includes(role ?? '') ? role as ColumnRole : 'none';
+  };
+  const toggleSheet = (sheetId: string, checked: boolean) => {
+    setSelectedSheetIds((current) => checked ? [...new Set([...current, sheetId])] : current.filter((id) => id !== sheetId));
+  };
+  const toggleScope = (taxYear: string, checked: boolean) => {
+    setFilingScope((current) => checked ? [...new Set([...current, taxYear])].sort() : current.filter((year) => year !== taxYear));
+  };
+  const unresolvedRows = (analysis?.sheets ?? []).filter((sheet) => selectedSheetIds.includes(sheet.sheetId))
+    .flatMap((sheet) => sheet.rows.filter((row) => row.primaryDisposition === 'invalid').map((row) => ({ sheetId: sheet.sheetId, rowNumber: row.sourceRow })));
+  const confirm = async () => {
+    if (!evidenceId || !analysis) return;
+    setStage('confirming'); setError('');
+    try {
+      const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
+        confirmation: true, selectedSheetIds, sheetMappings, filingScope,
+        excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
+        preTradingStartMode, outsideScopeMode,
+      });
+      setSummary(result); await refresh(); setStage('done');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The spreadsheet could not be confirmed.'); setStage('review');
+    }
+  };
+  const columnCount = activeSheet?.dimensions.columns ?? 0;
+  const canConfirm = selectedSheetIds.length > 0 && filingScope.length > 0 && (unresolvedRows.length === 0 || acknowledgeUnresolved);
+  return <Card className="p-6 shadow-sm space-y-5">
+    <button onClick={onBack} className="text-sm text-primary flex gap-1 items-center cursor-pointer"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
+    <div><h2 className="text-xl font-serif">Review a spreadsheet or CSV</h2><p className="text-sm text-muted-foreground mt-1">We inspect every sheet first. AI suggestions are advisory only; nothing reaches Financial Memory until you confirm the selected sheets, mappings, and filing scope.</p></div>
+    {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a CSV or Excel workbook</p><p className="text-xs text-muted-foreground">All worksheets will remain visible, including empty and summary sheets.</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Choose file" /></div>}
+    {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…</div>}
+    {stage === 'review' && analysis && <div className="space-y-5">
+      <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' || aiStatus?.status === 'partial' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
+        <strong>{aiStatus?.status === 'success' ? 'AI suggestions are ready for review.' : 'Manual/rule-based mapping is active.'}</strong>{aiStatus?.reason ? ` ${aiStatus.reason}` : ' Check every mapped field before confirmation.'}
+      </div>
+      <div className="rounded-xl border p-4 space-y-3"><div><p className="font-medium">Workbook sheets</p><p className="text-xs text-muted-foreground">Unselected sheets stay in the audit trail as unselected; no source row is silently dropped.</p></div>
+        <div className="space-y-2">{analysis.sheets.map((sheet) => <div key={sheet.sheetId} className={cn("rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3", activeSheetId === sheet.sheetId && "border-primary bg-primary/[.03]")}><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selectedSheetIds.includes(sheet.sheetId)} disabled={sheet.role === 'non_transactional' || sheet.disposition === 'empty_sheet'} onChange={(event) => toggleSheet(sheet.sheetId, event.target.checked)} /><span><strong>{sheet.displayName}</strong> · {sheet.dimensions.rows} rows × {sheet.dimensions.columns} columns</span></label><div className="flex gap-2 items-center"><Badge variant="outline">{sheet.role.replace('_', ' ')}</Badge><Badge variant="outline">{sheet.disposition.replaceAll('_', ' ')}</Badge><Button size="sm" variant="outline" onClick={() => setActiveSheetId(sheet.sheetId)}>Review</Button></div></div>)}</div>
+      </div>
+      {activeSheet && activeMapping && <div className="space-y-3 rounded-xl border p-4"><div><p className="font-medium">Map {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Required: date, description, and either signed amount or debit plus credit. The displayed preview is source evidence, not a financial write.</p></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select value={roleFor(column)} onChange={(event) => setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Ignore</option><option value="date">Date</option><option value="amount">Signed amount</option><option value="debit">Debit</option><option value="credit">Credit</option><option value="description">Description</option><option value="category">Category</option><option value="balance">Balance / audit only</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div>{activeSheet.warnings.map((warning) => <p key={warning} className="text-sm text-amber-800">{warning}</p>)}</div>}
+      <div className="grid gap-4 md:grid-cols-2"><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Record coverage</p><p className="text-sm">{analysis.coverage.startDate && analysis.coverage.endDate ? `${analysis.coverage.startDate} to ${analysis.coverage.endDate}` : 'Dates are incomplete — review invalid rows.'}</p><p className="text-xs text-muted-foreground">Coverage describes what is in the source. It is separate from the filing scope below.</p></div><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Confirm filing scope</p>{analysis.taxYears.map((year) => <label key={year} className="flex gap-2 text-sm"><input type="checkbox" checked={filingScope.includes(year)} onChange={(event) => toggleScope(year, event.target.checked)} />{year}</label>)}<p className="text-xs text-muted-foreground">A workbook that crosses 5 April keeps each detected UK tax year visible.</p></div></div>
+      {(unresolvedRows.length > 0 || (analysis.dispositionCounts.pre_trading_start ?? 0) > 0) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950">{unresolvedRows.length > 0 && <label className="flex gap-2 items-start"><input type="checkbox" checked={acknowledgeUnresolved} onChange={(event) => setAcknowledgeUnresolved(event.target.checked)} /><span>I confirm that {unresolvedRows.length} unresolved row{unresolvedRows.length === 1 ? '' : 's'} will be explicitly excluded from this import.</span></label>}{(analysis.dispositionCounts.pre_trading_start ?? 0) > 0 && <label className="space-y-1 block">Pre-trading-start records<select className="ml-2 border rounded px-2 py-1" value={preTradingStartMode} onChange={(event) => setPreTradingStartMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude from this import</option><option value="retain">Retain as historical, outside filing scope</option></select></label>}</div>}
+      <div className="rounded-xl border p-4 space-y-2 text-sm"><p className="font-medium">Rows by current deterministic disposition</p><div className="flex flex-wrap gap-2">{Object.entries(analysis.dispositionCounts).filter(([, count]) => count > 0).map(([key, count]) => <Badge key={key} variant="outline">{count} {key.replaceAll('_', ' ')}</Badge>)}</div><label className="block">Rows outside selected filing scope<select className="ml-2 border rounded px-2 py-1" value={outsideScopeMode} onChange={(event) => setOutsideScopeMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude</option><option value="retain">Retain as outside filing scope</option></select></label></div>
+      <div className="flex justify-between gap-3"><Button variant="outline" onClick={() => void inspect(evidenceId)}>Re-analyse suggestions</Button><Button disabled={!canConfirm} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm mapping and import</Button></div>
+    </div>}
+    {stage === 'confirming' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Applying your confirmed mapping deterministically…</div>}
+    {stage === 'done' && summary && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-900"><div className="flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" /><div><p className="font-semibold">Spreadsheet import confirmed</p><p className="text-sm mt-1">{summary.importedRows} movement{summary.importedRows === 1 ? '' : 's'} added as unclassified records. They do not affect tax or profit until you classify them.</p><p className="text-xs mt-2">Tax years: {summary.taxYears.join(', ') || 'none'}</p></div></div></div>}
+    {stage === 'error' && <div className="text-sm text-destructive flex flex-wrap items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" />{error}<Button size="sm" variant="outline" onClick={() => evidenceId ? void inspect(evidenceId) : setStage('pick')}>Try again</Button></div>}
+  </Card>;
+}
+
+function LegacyBatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind: 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
   const [stage, setStage] = useState<'pick' | 'detecting' | 'mapping' | 'importing' | 'done' | 'error'>(resumeEvidence ? 'detecting' : 'pick');
   const [evidenceId, setEvidenceId] = useState(resumeEvidence?.id ?? '');
   const [filename, setFilename] = useState(resumeEvidence?.filename ?? '');

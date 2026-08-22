@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { Readable } from "stream";
 import {
   bankImportBatchesTable,
@@ -16,11 +16,11 @@ import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import { scanProfile } from "./reconciliation.js";
 import {
-  extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
+  analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
   type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { parseSpreadsheet, normaliseCell, mapSpreadsheetRow } from "../lib/spreadsheet.js";
+import { analyseSpreadsheet, inspectSpreadsheet, parseSpreadsheet, normaliseCell, mapSpreadsheetRow, ukTaxYear, looksLikeBalanceRow, type RowDisposition } from "../lib/spreadsheet.js";
 
 const router = Router();
 const storageService = new ObjectStorageService();
@@ -47,6 +47,19 @@ const mappingSchemaInput = z.object({
     context.addIssue({ code: "custom", message: "An amount, debit, or credit column is required" });
   }
 });
+
+const confirmedSpreadsheetInput = z.object({
+  confirmation: z.literal(true),
+  selectedSheetIds: z.array(z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/)).min(1).max(100),
+  sheetMappings: z.record(mappingSchemaInput),
+  filingScope: z.array(z.string().regex(/^\d{4}-\d{4}$/)).min(1).max(20),
+  excludedRowRefs: z.array(z.object({
+    sheetId: z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/),
+    rowNumber: z.number().int().positive(),
+  }).strict()).max(100_000).default([]),
+  preTradingStartMode: z.enum(["retain", "exclude"]).default("exclude"),
+  outsideScopeMode: z.enum(["retain", "exclude"]).default("exclude"),
+}).strict();
 
 // GET /profiles/:profileId/evidence
 router.get("/profiles/:profileId/evidence", async (req, res) => {
@@ -678,21 +691,56 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     }
     const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
     const [buffer] = await file.download();
-    const rows = parseSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
-    if (rows.length === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
-    // Keep a user-confirmed mapping when reopening a failed or interrupted
-    // import. Fresh uploads still get a new AI proposal.
-    const savedMapping = evidenceItem.mappingSchema as MappingSchema | null;
-    const mappingSchema = savedMapping && evidenceItem.importStatus !== "idle"
-      ? savedMapping
-      : await detectColumnSchema(rows.slice(0, 10), evidenceItem.filename, evidenceItem.mimeType);
-    const previewRows = rows.slice(mappingSchema.headerRow + 1, mappingSchema.headerRow + 6);
+    const savedState = evidenceItem.mappingSchema as {
+      mappingSchema?: MappingSchema;
+      deterministicFindings?: unknown;
+      aiProposal?: unknown;
+      aiStatus?: unknown;
+      userDecision?: unknown;
+    } | null;
+    // A user decision is durable and must never be overwritten by a later
+    // analysis request. Return the persisted review state instead.
+    if (savedState?.deterministicFindings && savedState.mappingSchema && savedState.userDecision) {
+      res.json({
+        mappingSchema: savedState.mappingSchema,
+        previewRows: [],
+        analysis: savedState.deterministicFindings,
+        aiProposal: savedState.aiProposal ?? null,
+        aiStatus: savedState.aiStatus ?? { status: "not_requested" },
+        userDecision: savedState.userDecision,
+      });
+      return;
+    }
+    const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+    const analysis = analyseSpreadsheet(workbook);
+    if (workbook.totalParserRows === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
+    const ai = await analyseSpreadsheetWithAI(workbook, analysis);
+    const primarySheet = analysis.sheets.find((sheet) => sheet.role === "transactional") ?? analysis.sheets[0];
+    const mappingSchema: MappingSchema = primarySheet ? {
+      headerRow: primarySheet.mapping.headerRow ?? 0,
+      columns: primarySheet.mapping.columns,
+      dateFormat: null,
+      currency: "GBP",
+      confidence: 0.35,
+      notes: ["Rule-based mapping; confirm the selected sheet and columns before import."],
+    } : {
+      headerRow: 0, columns: {}, dateFormat: null, currency: "GBP", confidence: 0, notes: ["No transaction sheet was inferred."],
+    };
+    const previewRows = primarySheet?.previewRows.map((row) => row.values) ?? [];
+    const state = {
+      schemaVersion: "spreadsheet-review.v1",
+      mappingSchema,
+      deterministicFindings: analysis,
+      aiProposal: ai.proposal,
+      aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits },
+      userDecision: savedState?.userDecision ?? null,
+    };
     const [reopened] = await db.update(evidenceItemsTable).set({
-      mappingSchema: mappingSchema as unknown as Record<string, unknown>,
+      mappingSchema: state as unknown as Record<string, unknown>,
       importStatus: "mapping",
       processingLeaseExpiresAt: null,
       processingToken: null,
-      totalRows: Math.max(0, rows.length - mappingSchema.headerRow - 1),
+      totalRows: workbook.totalParserRows,
     }).where(and(
       eq(evidenceItemsTable.id, evidenceItem.id),
       eq(evidenceItemsTable.profileId, profile.id),
@@ -705,16 +753,202 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       ),
     )).returning();
     if (!reopened) { res.status(409).json({ error: "This spreadsheet is still being processed" }); return; }
-    res.json({ mappingSchema, previewRows });
+    await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_inspected", {
+      contentHash: workbook.contentHash, parserVersion: analysis.parserVersion, sheetCount: workbook.sheets.length,
+      totalParserRows: workbook.totalParserRows, aiStatus: ai.status, fallbackReason: ai.reason ?? null,
+    });
+    res.json({ mappingSchema, previewRows, analysis, aiProposal: ai.proposal, aiStatus: state.aiStatus, userDecision: state.userDecision });
   } catch (err) {
     req.log.error(err, "Failed to detect spreadsheet schema");
     res.status(500).json({ error: "Failed to detect spreadsheet schema" });
   }
 });
 
-// POST /profiles/:profileId/evidence/:evidenceId/process-batch — confirmed CSV/XLSX import
+// POST /profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet
+// This is the only spreadsheet path permitted to create financial records. It
+// deliberately receives a human-confirmed mapping and scope, never an AI
+// proposal. Imported movements remain unclassified until the user reviews them.
+router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = confirmedSpreadsheetInput.safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Confirm selected sheets, mappings, and filing scope before importing." }); return; }
+  let processingToken = "";
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (evidenceItem.workflowVersion >= 2) {
+      res.status(422).json({ error: "Original documents use the review workflow, not spreadsheet import." }); return;
+    }
+    const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
+    const [buffer] = await file.download();
+    const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+    const selected = new Set(body.data.selectedSheetIds);
+    const knownSheetIds = new Set(workbook.sheets.map((sheet) => sheet.sheetId));
+    if ([...selected].some((sheetId) => !knownSheetIds.has(sheetId))) {
+      res.status(400).json({ error: "A selected sheet is not part of this workbook." }); return;
+    }
+    const excluded = new Set(body.data.excludedRowRefs.map((row) => `${row.sheetId}:${row.rowNumber}`));
+    const counts = Object.fromEntries([
+      "imported", "duplicate", "invalid", "header", "blank", "balance_total", "non_transactional",
+      "excluded_by_user", "excluded_by_rule", "unmapped", "outside_scope", "pre_trading_start", "unselected_sheet",
+    ].map((key) => [key, 0])) as Record<RowDisposition, number>;
+    const rowsToWrite: Array<{
+      sourceRowIndex: number; row: string[]; sheetId: string; displayName: string; sourceRow: number;
+      date: string; amount: number; description: string; taxYear: string; filingScope: boolean; disposition: RowDisposition;
+    }> = [];
+    const fingerprints = new Set<string>();
+    const mappingsForAudit: Record<string, MappingSchema> = {};
+
+    for (const sheet of workbook.sheets) {
+      if (!selected.has(sheet.sheetId)) {
+        for (const row of sheet.rows) counts.unselected_sheet += 1;
+        continue;
+      }
+      const mapping = body.data.sheetMappings[sheet.sheetId] as MappingSchema | undefined;
+      if (!mapping) { res.status(400).json({ error: `Choose a confirmed mapping for ${sheet.displayName}.` }); return; }
+      mappingsForAudit[sheet.sheetId] = mapping;
+      const maxColumn = sheet.columnCount;
+      const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
+      if (mapping.headerRow < 0 || mapping.headerRow >= sheet.rowCount || indices.some((index) => index < 0 || index >= maxColumn)) {
+        res.status(400).json({ error: `The confirmed mapping contains a column outside ${sheet.displayName}.` }); return;
+      }
+      for (const source of sheet.rows) {
+        if (source.rowNumber <= mapping.headerRow + 1) { counts.header += 1; continue; }
+        const rowKey = `${sheet.sheetId}:${source.rowNumber}`;
+        if (source.values.every((cell) => !normaliseCell(cell))) { counts.blank += 1; continue; }
+        if (excluded.has(rowKey)) { counts.excluded_by_user += 1; continue; }
+        const mapped = mapSpreadsheetRow(source.values, mapping);
+        if (looksLikeBalanceRow(source.values)) { counts.balance_total += 1; continue; }
+        if (!mapped.date || mapped.amount === null || !mapped.description) {
+          // Unresolved financial rows must be explicitly acknowledged, not
+          // silently dropped. The first confirmation tells the user exactly
+          // which source rows still require an exclusion decision.
+          res.status(400).json({ error: `Row ${source.rowNumber} in ${sheet.displayName} has an unresolved date, amount, or description. Exclude it explicitly or correct the mapping.` });
+          return;
+        }
+        const taxYear = ukTaxYear(mapped.date);
+        if (!taxYear) {
+          res.status(400).json({ error: `Row ${source.rowNumber} in ${sheet.displayName} has an unresolved date. Exclude it explicitly or correct the mapping.` });
+          return;
+        }
+        const businessStartDate = (profile as typeof profile & { businessStartDate?: string | null }).businessStartDate;
+        const isPreTrading = Boolean(businessStartDate && mapped.date < businessStartDate);
+        const inFilingScope = body.data.filingScope.includes(taxYear);
+        if (isPreTrading && body.data.preTradingStartMode === "exclude") { counts.excluded_by_user += 1; continue; }
+        if (!inFilingScope && body.data.outsideScopeMode === "exclude") { counts.excluded_by_user += 1; continue; }
+        const fingerprint = `${mapped.date}|${Math.round(mapped.amount * 100)}|${normaliseCell(mapped.description).toLowerCase()}`;
+        if (fingerprints.has(fingerprint)) { counts.duplicate += 1; continue; }
+        fingerprints.add(fingerprint);
+        const disposition: RowDisposition = isPreTrading ? "pre_trading_start" : !inFilingScope ? "outside_scope" : "imported";
+        counts[disposition] += 1;
+        rowsToWrite.push({
+          // Excel has up to 1,048,576 rows. Leave a larger fixed namespace
+          // per worksheet so a last-row reference can never collide with the
+          // first row of the following sheet.
+          sourceRowIndex: sheet.index * 1_100_000 + source.rowNumber,
+          row: source.values, sheetId: sheet.sheetId, displayName: sheet.displayName, sourceRow: source.rowNumber,
+          date: mapped.date, amount: mapped.amount, description: mapped.description, taxYear,
+          filingScope: inFilingScope, disposition,
+        });
+      }
+    }
+
+    const mappingRevision = createHash("sha256").update(JSON.stringify({
+      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
+      excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode, outsideScopeMode: body.data.outsideScopeMode,
+    })).digest("hex");
+    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    if (evidenceItem.importStatus === "done") {
+      if (state.confirmedMappingRevision === mappingRevision) {
+        res.json({ evidence: evidenceItem, dispositionCounts: state.finalDispositions ?? counts, taxYears: [...new Set(rowsToWrite.map((row) => row.taxYear))], importedRows: rowsToWrite.length });
+      } else {
+        res.status(409).json({ error: "This workbook is already imported. Upload a replacement to apply a different confirmed mapping." });
+      }
+      return;
+    }
+    const now = new Date();
+    processingToken = randomUUID();
+    const [claimed] = await db.update(evidenceItemsTable).set({
+      importStatus: "processing", processingToken,
+      processingLeaseExpiresAt: new Date(now.getTime() + PROCESSING_LEASE_MS),
+    }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      or(
+        inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "error"]),
+        and(eq(evidenceItemsTable.importStatus, "processing"), or(isNull(evidenceItemsTable.processingLeaseExpiresAt), lt(evidenceItemsTable.processingLeaseExpiresAt, now))),
+      ),
+    )).returning();
+    if (!claimed) { res.status(409).json({ error: "This spreadsheet is already being processed" }); return; }
+
+    const userDecision = {
+      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
+      excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
+      outsideScopeMode: body.data.outsideScopeMode, confirmedAt: now.toISOString(), actorUserId: req.user.id, mappingRevision,
+    };
+
+    const [updated] = await db.transaction(async (tx) => {
+      const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
+        eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.importStatus, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+      )).for("update");
+      if (!owned) return [];
+      for (const item of rowsToWrite) {
+        const [inserted] = await tx.insert(transactionsTable).values({
+          profileId: profile.id, evidenceId: evidenceItem.id,
+          sourceRowIndex: item.sourceRowIndex, rawRowData: {
+            sheetId: item.sheetId, displayName: item.displayName, sourceRow: item.sourceRow, values: item.row,
+            taxYear: item.taxYear, filingScope: item.filingScope, disposition: item.disposition,
+          },
+          date: item.date, description: item.description, amount: item.amount,
+          recordType: "unknown", category: "expense", taxTreatment: "unclear", source: "extracted",
+          evidenceTier: evidenceItem.evidenceType === "bank_csv" ? 2 : 3,
+          accountingCategory: "other", allowablePercentage: 0, allowableAmount: 0,
+          accountingClassification: "unknown", classificationConfidence: 0,
+        }).onConflictDoNothing().returning({ id: transactionsTable.id });
+        if (!inserted) throw new Error(`A source-row identity collision was detected for ${item.sheetId} row ${item.sourceRow}. No records were imported.`);
+      }
+      const [saved] = await tx.update(evidenceItemsTable).set({
+        evidenceType: "ledger", status: "needs_review", importStatus: "done",
+        mappingSchema: { ...state, userDecision, confirmedMappingRevision: mappingRevision, finalDispositions: counts } as Record<string, unknown>,
+        totalRows: workbook.totalParserRows, processedRows: rowsToWrite.length, autoPostedRows: 0, inboxRows: 0,
+        skippedRows: workbook.totalParserRows - rowsToWrite.length,
+        processingLeaseExpiresAt: null, processingToken: null,
+      }).where(and(eq(evidenceItemsTable.id, evidenceItem.id), eq(evidenceItemsTable.processingToken, processingToken))).returning();
+      if (!saved) return [];
+      await tx.insert(evidenceAuditEventsTable).values({
+        profileId: profile.id, evidenceId: evidenceItem.id, actorUserId: req.user.id, eventType: "spreadsheet_import_confirmed",
+        details: {
+          contentHash: workbook.contentHash, parserVersion: "spreadsheet-parser.v2", mappingRevision,
+          userDecision, dispositionCounts: counts, importableRows: rowsToWrite.length,
+        },
+      });
+      return [saved];
+    });
+    if (!updated) { res.status(409).json({ error: "This spreadsheet was reclaimed by another request" }); return; }
+    res.json({ evidence: updated, dispositionCounts: counts, taxYears: [...new Set(rowsToWrite.map((row) => row.taxYear))], importedRows: rowsToWrite.length });
+    void scanProfile(profile.id).catch((error) => req.log.warn({ error }, "Post-spreadsheet reconciliation scan failed"));
+  } catch (err) {
+    req.log.error(err, "Failed to confirm spreadsheet import");
+    await db.update(evidenceItemsTable).set({ importStatus: "error", processingLeaseExpiresAt: null, processingToken: null }).where(and(
+      eq(evidenceItemsTable.id, req.params.evidenceId), eq(evidenceItemsTable.profileId, req.params.profileId),
+      eq(evidenceItemsTable.importStatus, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
+    )).catch(() => undefined);
+    res.status(500).json({ error: "Failed to confirm spreadsheet import" });
+  }
+});
+
+// POST /profiles/:profileId/evidence/:evidenceId/process-batch — retired legacy importer
 router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  // Kept as an explicit failure rather than a compatibility alias: the old
+  // endpoint could not express sheet selection, filing scope, or unresolved
+  // row acknowledgements, so it must not bypass the confirmation gate.
+  res.status(410).json({ error: "Use the confirmed spreadsheet review flow before importing." });
+  return;
+  /*
   const body = z.object({ confirmedMapping: mappingSchemaInput, bankCsv: z.boolean().optional() }).safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: "A valid confirmedMapping is required" }); return;
@@ -895,6 +1129,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process-batch", async (re
       )).catch(() => undefined);
     res.status(500).json({ error: "Failed to process spreadsheet batch" });
   }
+  */
 });
 
 // PATCH /profiles/:profileId/evidence/:evidenceId/review — retain corrections

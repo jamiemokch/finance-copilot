@@ -85,6 +85,7 @@ export interface APIProfile {
   openingDetails?: string | null;
   coverageStartDate?: string | null;
   coverageEndDate?: string | null;
+  businessStartDate?: string | null;
   otherTaxableIncome?: number | null;
   otherTaxableIncomeTaxYear?: string | null;
   createdAt?: string;
@@ -121,6 +122,7 @@ export const profilesApi = {
       openingDetails?: string | null;
       coverageStartDate?: string | null;
       coverageEndDate?: string | null;
+      businessStartDate?: string | null;
       otherTaxableIncome?: number | null;
       otherTaxableIncomeTaxYear?: string | null;
     },
@@ -318,6 +320,33 @@ export interface APIEvidenceLink {
   documentLifecycle: 'active' | 'replaced' | 'tombstoned';
 }
 
+export type SpreadsheetReviewAnalysis = {
+  taxYears: string[];
+  coverage: { status: 'known' | 'partial' | 'unknown'; startDate: string | null; endDate: string | null };
+  dispositionCounts: Record<string, number>;
+  sheets: Array<{
+    sheetId: string;
+    displayName: string;
+    dimensions: { rows: number; columns: number };
+    disposition: string;
+    selected: boolean;
+    role: 'transactional' | 'non_transactional' | 'mixed' | 'unknown';
+    mapping: { headerRow?: number; columns: Record<string, number | undefined> };
+    previewRows: Array<{ rowNumber: number; values: string[] }>;
+    warnings: string[];
+    rows: Array<{ sourceRow: number; primaryDisposition: string; reason: string; normalizedValueReference: { date: string | null; amount: number | null; description: string | null } }>;
+  }>;
+};
+
+export type SpreadsheetInspectionResponse = {
+  mappingSchema: unknown;
+  previewRows: string[][];
+  analysis?: SpreadsheetReviewAnalysis;
+  aiProposal?: unknown;
+  aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[] };
+  userDecision?: unknown;
+};
+
 export interface APIUploadUrl {
   uploadURL: string;
   objectPath: string;
@@ -379,7 +408,23 @@ export const evidenceApi = {
   downloadUrl: (profileId: string, evidenceId: string) =>
     `${API}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
   detectSchema: (profileId: string, evidenceId: string) =>
-    apiFetch<{ mappingSchema: unknown; previewRows: string[][] }>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
+    apiFetch<SpreadsheetInspectionResponse>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
+  confirmSpreadsheet: (profileId: string, evidenceId: string, data: {
+    confirmation: true;
+    selectedSheetIds: string[];
+    sheetMappings: Record<string, unknown>;
+    filingScope: string[];
+    excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
+    preTradingStartMode: 'retain' | 'exclude';
+    outsideScopeMode: 'retain' | 'exclude';
+  }) => apiFetch<{
+    evidence: APIEvidenceItem;
+    dispositionCounts: Record<string, number>;
+    taxYears: string[];
+    importedRows: number;
+  }>(`/profiles/${profileId}/evidence/${evidenceId}/confirm-spreadsheet`, {
+    method: "POST", body: JSON.stringify(data),
+  }),
   processBatch: (profileId: string, evidenceId: string, confirmedMapping: unknown, bankCsv?: boolean) =>
     apiFetch<{ evidence: APIEvidenceItem; processedRows: number; autoPostedRows: number; inboxRows: number; skippedRows: number }>(
       `/profiles/${profileId}/evidence/${evidenceId}/process-batch`,

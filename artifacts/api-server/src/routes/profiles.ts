@@ -98,6 +98,7 @@ router.patch("/profiles/:profileId", async (req, res) => {
     openingDetails: z.string().trim().max(2000).optional().nullable(),
     coverageStartDate: ISODateSchema.optional().nullable(),
     coverageEndDate: ISODateSchema.optional().nullable(),
+    businessStartDate: ISODateSchema.optional().nullable(),
     otherTaxableIncome: z.number().min(0).finite().optional().nullable(),
     otherTaxableIncomeTaxYear: z.string().regex(/^\d{4}\/\d{2}$/).optional().nullable(),
   }).safeParse(req.body);
@@ -165,6 +166,7 @@ router.patch("/profiles/:profileId", async (req, res) => {
     if (body.data.openingDetails !== undefined) updates.openingDetails = body.data.openingDetails;
     if (body.data.coverageStartDate !== undefined) updates.coverageStartDate = body.data.coverageStartDate;
     if (body.data.coverageEndDate !== undefined) updates.coverageEndDate = body.data.coverageEndDate;
+    if (body.data.businessStartDate !== undefined) updates.businessStartDate = body.data.businessStartDate;
     const [updated] = await db.update(profilesTable)
       .set(updates as typeof profilesTable.$inferInsert)
       .where(and(eq(profilesTable.id, req.params.profileId), eq(profilesTable.userId, req.user.id)))

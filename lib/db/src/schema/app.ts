@@ -43,6 +43,9 @@ export const profilesTable = pgTable('profiles', {
   openingDetails: text('opening_details'),
   coverageStartDate: text('coverage_start_date'),
   coverageEndDate: text('coverage_end_date'),
+  // Durable onboarding fact. Imports may flag pre-trading records but must
+  // never overwrite this date from an inference or temporary filing choice.
+  businessStartDate: text('business_start_date'),
   // Optional non-business income used only for an income-tax estimate.
   // Null means the estimate must remain incomplete rather than assuming £0.
   otherTaxableIncome: doublePrecision('other_taxable_income'),

@@ -30,6 +30,7 @@ export interface Profile {
   openingDetails?: string | null;
   coverageStartDate?: string | null;
   coverageEndDate?: string | null;
+  businessStartDate?: string | null;
   otherTaxableIncome?: number | null;
   otherTaxableIncomeTaxYear?: string | null;
 }
