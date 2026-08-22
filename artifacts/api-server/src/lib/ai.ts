@@ -12,6 +12,8 @@
 import OpenAI from 'openai';
 import type { FinancialPosition } from './finance.js';
 
+const FINANCE_COPILOT_MODEL = 'gpt-5.4-mini';
+
 let _client: OpenAI | null = null;
 
 function getClient(): OpenAI {
@@ -106,8 +108,8 @@ export async function detectColumnSchema(
   if (!isConfigured()) return fallbackMapping(rows);
   const client = getClient();
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    max_tokens: 900,
+    model: FINANCE_COPILOT_MODEL,
+    max_completion_tokens: 900,
     messages: [
       {
         role: 'system',
@@ -272,8 +274,8 @@ export async function extractFromImageFile(
   const systemPrompt = buildExtractionPrompt(context);
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    max_tokens: 600,
+    model: FINANCE_COPILOT_MODEL,
+    max_completion_tokens: 600,
     messages: [
       { role: 'system', content: systemPrompt },
       {
@@ -314,8 +316,8 @@ export async function extractFromText(
   const systemPrompt = buildExtractionPrompt(context);
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    max_tokens: 600,
+    model: FINANCE_COPILOT_MODEL,
+    max_completion_tokens: 600,
     messages: [
       { role: 'system', content: systemPrompt },
       {
@@ -448,8 +450,8 @@ SA Readiness: ${position.saReadiness.completedCount}/${position.saReadiness.tota
 Already committed ideas (exclude from new generation): ${committedIdeaIds.join(', ') || 'none'}`;
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    max_tokens: 2000,
+    model: FINANCE_COPILOT_MODEL,
+    max_completion_tokens: 2000,
     messages: [
       { role: 'system', content: IDEAS_SYSTEM_PROMPT },
       { role: 'user', content: context },
@@ -539,8 +541,8 @@ export async function getCopilotReply(
   const contextSummary = buildContextSummary(position, profileName);
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    max_tokens: 600,
+    model: FINANCE_COPILOT_MODEL,
+    max_completion_tokens: 600,
     messages: [
       {
         role: 'system',

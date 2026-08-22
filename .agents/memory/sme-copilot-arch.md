@@ -23,7 +23,7 @@ description: Architecture decisions for the full-stack SME Finance Copilot — w
 - Mixed-use: allowableAmount = amount × allowablePercentage/100 (stored alongside full amount)
 - taxImpact on inbox resolution = computeTaxImpactDiff(profitBefore, profitAfter) — no flat %
 - Business Ideas = forecast layer only (decision_memory table, never touches transactions)
-- generateBusinessIdeasAI uses real GPT-4o-mini call via AI_INTEGRATIONS_OPENAI_BASE_URL
+- generateBusinessIdeasAI uses the shared gpt-5.4-mini call via AI_INTEGRATIONS_OPENAI_BASE_URL
 
 ## Frontend store
 - store.tsx: StoreProvider fetches all data, exposes derived types
