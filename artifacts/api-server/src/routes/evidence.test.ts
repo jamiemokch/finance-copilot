@@ -243,6 +243,28 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     });
     assert.equal(reviewed.status, 200);
 
+    const pendingUpload = await upload(aliceSession, alicePrimary, 'separate pending evidence bytes');
+    assert.equal(pendingUpload.status, 200);
+    const pendingRegistration = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'pending-receipt.txt',
+        objectPath: pendingUpload.body.objectPath,
+        mimeType: 'text/plain',
+        category: 'receipt',
+        evidenceType: 'document',
+      }),
+    });
+    assert.equal(pendingRegistration.status, 201);
+    const pendingEvidenceId = pendingRegistration.body.id as string;
+    const pendingProcessed = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${pendingEvidenceId}/process`,
+      { method: 'POST' },
+    );
+    assert.equal(pendingProcessed.status, 200);
+    assert.equal(pendingProcessed.body.status, 'needs_review');
+
     const [positionAfterReview, taxAfterReview, readinessAfterReview] = await Promise.all([
       request(aliceSession, `/api/profiles/${alicePrimary}/position`),
       request(aliceSession, `/api/profiles/${alicePrimary}/income-tax-estimate`),
@@ -342,14 +364,20 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     assert.equal(reloadedDocument?.status, 'processed', 'a confirmed document reloads in its terminal state');
     assert.equal(reloadedDocument?.reviewState, 'confirmed', 'a confirmed document cannot be mistaken for a saved review');
     assert.equal(reloadedUnmatchedEvidence.status, 200);
-    assert.ok(
-      !reloadedUnmatchedEvidence.body.some((item: { id: string }) => item.id === evidenceId),
-      'a confirmed document is absent from the reloaded review queue',
+    assert.deepEqual(
+      reloadedUnmatchedEvidence.body.map((item: { id: string }) => item.id),
+      [pendingEvidenceId],
+      'only the genuinely pending document remains in the reloaded review queue',
     );
     assert.equal(
-      reloadedFinancialMemory.body.filter((item: { id: string }) => item.id === confirmationKey).length,
+      reloadedFinancialMemory.body.length,
       1,
-      'reload still shows exactly one confirmed Financial Memory record',
+      'reload still shows exactly one Financial Memory record',
+    );
+    assert.equal(
+      reloadedFinancialMemory.body[0]?.id,
+      confirmationKey,
+      'the single reloaded Financial Memory record is the confirmed document transaction',
     );
 
     const [manual] = await db.insert(transactionsTable).values({
