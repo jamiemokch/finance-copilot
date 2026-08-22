@@ -2082,6 +2082,10 @@ components:
         accountingClassification:
           type: [string, 'null']
           enum: [income, expense, transfer, owner_funds, drawings, loan, tax_payment, unknown, null]
+        allowablePercentage:
+          type: number
+        allowableAmount:
+          type: [number, 'null']
         financialAccountId:
           type: [string, 'null']
         bankImportBatchId:
@@ -2128,6 +2132,10 @@ components:
           type: string
         taxTreatment:
           type: string
+        allowablePercentage:
+          type: number
+          minimum: 0
+          maximum: 100
         accountingClassification:
           type: string
           enum: [income, expense, transfer, owner_funds, drawings, loan, tax_payment, unknown]

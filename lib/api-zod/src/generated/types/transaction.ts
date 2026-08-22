@@ -25,6 +25,9 @@ export interface Transaction {
   evidenceId?: string | null;
   /** @nullable */
   accountingClassification?: TransactionAccountingClassification;
+  allowablePercentage?: number;
+  /** @nullable */
+  allowableAmount?: number | null;
   /** @nullable */
   financialAccountId?: string | null;
   /** @nullable */

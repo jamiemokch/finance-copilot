@@ -730,6 +730,8 @@ export const ListTransactionsResponseItem = zod.object({
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
   "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "allowablePercentage": zod.number().optional(),
+  "allowableAmount": zod.number().nullish(),
   "financialAccountId": zod.string().nullish(),
   "bankImportBatchId": zod.string().nullish(),
   "bankImportRowId": zod.string().nullish(),
@@ -770,6 +772,8 @@ export const CreateTransactionResponse = zod.object({
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
   "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "allowablePercentage": zod.number().optional(),
+  "allowableAmount": zod.number().nullish(),
   "financialAccountId": zod.string().nullish(),
   "bankImportBatchId": zod.string().nullish(),
   "bankImportRowId": zod.string().nullish(),
@@ -801,6 +805,8 @@ export const GetTransactionResponse = zod.object({
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
   "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "allowablePercentage": zod.number().optional(),
+  "allowableAmount": zod.number().nullish(),
   "financialAccountId": zod.string().nullish(),
   "bankImportBatchId": zod.string().nullish(),
   "bankImportRowId": zod.string().nullish(),
@@ -819,12 +825,18 @@ export const UpdateTransactionParams = zod.object({
   "transactionId": zod.coerce.string()
 })
 
+export const updateTransactionBodyAllowablePercentageMin = 0;
+export const updateTransactionBodyAllowablePercentageMax = 100;
+
+
+
 export const UpdateTransactionBody = zod.object({
   "date": zod.string().optional(),
   "description": zod.string().optional(),
   "amount": zod.number().optional(),
   "category": zod.string().optional(),
   "taxTreatment": zod.string().optional(),
+  "allowablePercentage": zod.number().min(updateTransactionBodyAllowablePercentageMin).max(updateTransactionBodyAllowablePercentageMax).optional(),
   "accountingClassification": zod.enum(['income', 'expense', 'transfer', 'owner_funds', 'drawings', 'loan', 'tax_payment', 'unknown']).optional()
 })
 
@@ -841,6 +853,8 @@ export const UpdateTransactionResponse = zod.object({
   "source": zod.string(),
   "evidenceId": zod.string().nullish(),
   "accountingClassification": zod.union([zod.literal('income'),zod.literal('expense'),zod.literal('transfer'),zod.literal('owner_funds'),zod.literal('drawings'),zod.literal('loan'),zod.literal('tax_payment'),zod.literal('unknown'),zod.literal(null)]).nullish(),
+  "allowablePercentage": zod.number().optional(),
+  "allowableAmount": zod.number().nullish(),
   "financialAccountId": zod.string().nullish(),
   "bankImportBatchId": zod.string().nullish(),
   "bankImportRowId": zod.string().nullish(),
@@ -1117,6 +1131,7 @@ export const RegisterBankImportResponse = zod.object({
 }).and(zod.object({
   "reused": zod.boolean()
 }))
+
 
 /**
  * @summary Read one profile-scoped bank import and saved preview rows
@@ -1696,6 +1711,8 @@ export const CommitBankImportResponse = zod.object({
 }).and(zod.object({
   "replayed": zod.boolean()
 }))
+
+
 /**
  * @summary List inbox items for a profile
  */
@@ -2448,6 +2465,7 @@ export const CreateReconciliationCoverageCheckResponse = zod.object({
   "updatedAt": zod.coerce.date()
 }))
 }))
+
 
 /**
  * @summary Amend a declared coverage check

@@ -35,6 +35,7 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
     amount: z.number(),
     category: z.string().default("expense"),
     taxTreatment: z.string().default("deductible"),
+    allowablePercentage: z.number().min(0).max(100).default(100),
     idempotencyKey: z.string().uuid(),
   }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "Invalid input" }); return; }
@@ -46,17 +47,27 @@ router.post("/profiles/:profileId/transactions", async (req, res) => {
       eq(transactionsTable.profileId, profile.id),
     ));
     if (existing) { res.json(existing); return; }
+    const isIncome = body.data.amount > 0;
+    const allowablePercentage = isIncome ? 100 : body.data.allowablePercentage;
+    const allowableAmount = isIncome
+      ? body.data.amount
+      : body.data.taxTreatment === "non_deductible"
+        ? 0
+        : -Math.abs(body.data.amount) * (allowablePercentage / 100);
     const [txn] = await db.insert(transactionsTable).values({
       profileId: profile.id,
       id: body.data.idempotencyKey,
       date: body.data.date,
       description: body.data.description,
       amount: body.data.amount,
-      recordType: body.data.amount > 0 ? "income" : "expense",
+      recordType: isIncome ? "income" : "expense",
       category: body.data.category,
       taxTreatment: body.data.taxTreatment,
       source: "manual",
       evidenceTier: 4,
+      accountingCategory: body.data.category,
+      allowablePercentage,
+      allowableAmount,
     }).returning();
     res.status(201).json(txn);
     void scanProfile(profile.id).catch(err => req.log.warn({ err }, "Post-transaction reconciliation scan failed"));
@@ -104,6 +115,7 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
     amount: z.number().refine((value) => value !== 0, "Amount must be non-zero").optional(),
     category: z.string().trim().min(1).optional(),
     taxTreatment: z.string().optional(),
+    allowablePercentage: z.number().min(0).max(100).optional(),
     accountingClassification: z.enum([
       "income", "expense", "transfer", "owner_funds", "drawings", "loan", "tax_payment", "unknown",
     ]).optional(),
@@ -128,6 +140,16 @@ router.patch("/profiles/:profileId/transactions/:txId", async (req, res) => {
     };
     if (existing.source === "manual") {
       updates.recordType = amount > 0 ? "income" : "expense";
+      const isIncome = amount > 0;
+      const taxTreatment = body.data.taxTreatment ?? existing.taxTreatment;
+      const allowablePercentage = isIncome ? 100 : body.data.allowablePercentage ?? existing.allowablePercentage;
+      updates.allowablePercentage = allowablePercentage;
+      updates.allowableAmount = isIncome
+        ? amount
+        : taxTreatment === "non_deductible"
+          ? 0
+          : -Math.abs(amount) * (allowablePercentage / 100);
+      if (body.data.category !== undefined) updates.accountingCategory = body.data.category;
     }
     if (existing.source === "manual" && body.data.amount !== undefined && body.data.taxTreatment === undefined) {
       updates.taxTreatment = amount > 0 ? "income" : "deductible";

@@ -372,6 +372,59 @@ test('bank CSV staging protects registrations, commits, retries, privacy, and do
     assert.equal(taxLedger?.taxableBusinessProfit, 0, 'unreviewed imports must not affect tax readiness');
     assert.equal(computeCashPosition([], 0, []).netAvailable, 0, 'bank balance metadata is not a cash-position input');
 
+    const classified = await request(
+      aliceSession,
+      `/api/profiles/${aliceProfileId}/transactions/${imported.id}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ accountingClassification: 'income', category: 'Sales' }),
+      },
+    );
+    assert.equal(classified.status, 200);
+    assert.equal(classified.body.accountingClassification, 'income');
+    assert.equal(classified.body.recordType, 'income');
+    assert.equal(classified.body.taxTreatment, 'income');
+    const [storedClassification] = await db.select().from(transactionsTable)
+      .where(eq(transactionsTable.id, imported.id));
+    assert.equal(storedClassification.accountingClassification, 'income', 'a reviewed bank classification must persist');
+
+    const mixedExpenseId = randomUUID();
+    const mixedExpense = await request(
+      aliceSession,
+      `/api/profiles/${aliceProfileId}/transactions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: mixedExpenseId,
+          date: '2025-06-03',
+          description: 'Mixed business and personal cost',
+          amount: -1000,
+          category: 'General',
+          taxTreatment: 'deductible',
+          allowablePercentage: 50,
+        }),
+      },
+    );
+    assert.equal(mixedExpense.status, 201);
+    assert.equal(mixedExpense.body.allowablePercentage, 50);
+    assert.equal(mixedExpense.body.allowableAmount, -500, 'only the business portion may be allowable');
+
+    const amendedMixedExpense = await request(
+      aliceSession,
+      `/api/profiles/${aliceProfileId}/transactions/${mixedExpenseId}`,
+      { method: 'PATCH', body: JSON.stringify({ allowablePercentage: 25 }) },
+    );
+    assert.equal(amendedMixedExpense.status, 200);
+    assert.equal(amendedMixedExpense.body.allowablePercentage, 25);
+    assert.equal(amendedMixedExpense.body.allowableAmount, -250, 'editing business use must refresh the allowable amount');
+    const correctedPAndL = computePLBreakdown(
+      [classified.body as any, amendedMixedExpense.body as any],
+      [],
+    );
+    assert.equal(correctedPAndL.revenues, 125);
+    assert.equal(correctedPAndL.confirmedExpenses, 250);
+    assert.equal(correctedPAndL.profit, -125);
+
     const voided = await request(
       aliceSession,
       `/api/profiles/${aliceProfileId}/transactions/${imported.id}`,

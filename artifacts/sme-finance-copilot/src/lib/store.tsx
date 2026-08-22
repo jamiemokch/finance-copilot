@@ -101,6 +101,8 @@ export interface TransactionItem {
   source: 'bank' | 'bank_csv' | 'manual' | 'receipt' | 'extracted' | 'demo';
   evidenceTier?: number;
   evidenceId?: string | null;
+  allowablePercentage?: number;
+  accountingClassification?: string | null;
 }
 
 // ─── Evidence items ───────────────────────────────────────────────────────────
@@ -978,7 +980,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const taxTreatment = tx.amount > 0 ? 'income' : 'deductible';
     await transactionsApi.create(activeProfileId, {
       date: tx.date, description: tx.description, amount: tx.amount,
-      category: tx.category, taxTreatment, idempotencyKey,
+      category: tx.category, taxTreatment, allowablePercentage: tx.allowablePercentage, idempotencyKey,
     });
     await fetchAll(activeProfileId);
   }, [activeProfileId, fetchAll]);

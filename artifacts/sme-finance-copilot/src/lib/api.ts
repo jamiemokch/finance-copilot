@@ -426,7 +426,7 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}`),
   create: (
     profileId: string,
-    data: { date: string; description: string; amount: number; category?: string; taxTreatment?: string; idempotencyKey: string },
+    data: { date: string; description: string; amount: number; category?: string; taxTreatment?: string; allowablePercentage?: number; idempotencyKey: string },
   ) =>
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions`, {
       method: "POST",
@@ -441,6 +441,7 @@ export const transactionsApi = {
       amount?: number;
       category?: string;
       taxTreatment?: string;
+      allowablePercentage?: number;
       accountingClassification?: 'income' | 'expense' | 'transfer' | 'owner_funds' | 'drawings' | 'loan' | 'tax_payment' | 'unknown';
     },
   ) =>

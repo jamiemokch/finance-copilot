@@ -13,5 +13,10 @@ export interface TransactionUpdate {
   amount?: number;
   category?: string;
   taxTreatment?: string;
+  /**
+     * @minimum 0
+     * @maximum 100
+     */
+  allowablePercentage?: number;
   accountingClassification?: TransactionUpdateAccountingClassification;
 }
