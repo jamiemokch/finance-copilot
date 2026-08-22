@@ -15,8 +15,8 @@ For original documents, keep extraction/review separate from the ledger: only an
 
 **How to apply:** Gate every workflow-2 document route that could create import outcomes, use active-lifecycle predicates under transaction locks, and use server-derived content hashes with database uniqueness for object/document reuse. Do not let hash reuse suppress a later, legitimate link.
 
-Private bytes may be physically deduplicated for one uploader, but each business profile needs its own explicit logical object binding before a workflow-2 document may be registered, downloaded, processed, reviewed, linked, replaced, or tombstoned.
+Private bytes may be physically deduplicated only within the same authenticated user, while every business profile needs its own logical upload binding before it can register, resume, replace, link, or download evidence.
 
-**Why:** User-level object ownership alone lets a person with multiple profiles accidentally use one profile’s private evidence through another profile context.
+**Why:** An unguessable object path and same-user byte reuse are storage optimisations, not authorization. A path-only download or a user-only upload record can otherwise cross the selected business boundary.
 
-**How to apply:** Treat a matching hash as a byte-level optimization only. Create and verify the profile/object binding at every profile-scoped document boundary, and reject path-only private evidence reads after registration.
+**How to apply:** Create or verify the profile-to-upload binding at direct/presigned upload time, require it again at every evidence mutation, and serve evidence through the profile-and-evidence route rather than a path-only private-object URL.

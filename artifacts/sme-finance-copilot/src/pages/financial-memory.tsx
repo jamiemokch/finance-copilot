@@ -1,8 +1,8 @@
 import { Badge, Button, Card } from '@/components/ui';
-import { evidenceApi, transactionsApi, type APIEvidenceItem, type APITransaction } from '@/lib/api';
+import { evidenceApi, transactionsApi, type APIEvidenceItem, type APIEvidenceLink, type APITransaction } from '@/lib/api';
 import { useStore, type TransactionItem } from '@/lib/store';
-import { ArrowLeft, CalendarDays, ChevronRight, Clock3, FileText, RefreshCw } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, CalendarDays, ChevronRight, Clock3, FileText, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 
 function money(amount: number) {
@@ -60,6 +60,10 @@ export default function FinancialMemory() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [unmatchedEvidence, setUnmatchedEvidence] = useState<APIEvidenceItem[]>([]);
+  const [linkedEvidence, setLinkedEvidence] = useState<APIEvidenceLink[]>([]);
+  const [documentActionId, setDocumentActionId] = useState<string | null>(null);
+  const replacementInputRef = useRef<HTMLInputElement>(null);
+  const [replacementTarget, setReplacementTarget] = useState<APIEvidenceItem | null>(null);
 
   useEffect(() => {
     if (entryId) return;
@@ -78,11 +82,20 @@ export default function FinancialMemory() {
     let cancelled = false;
     setLoading(true);
     setError('');
-    transactionsApi.get(activeProfileId, entryId)
-      .then(result => { if (!cancelled) setEntry(result); })
+    Promise.all([
+      transactionsApi.get(activeProfileId, entryId),
+      transactionsApi.evidenceLinks(activeProfileId, entryId),
+    ])
+      .then(([result, links]) => {
+        if (!cancelled) {
+          setEntry(result);
+          setLinkedEvidence(links);
+        }
+      })
       .catch(() => {
         if (!cancelled) {
           setEntry(null);
+          setLinkedEvidence([]);
           setError('This record is unavailable to this business profile.');
         }
       })
@@ -117,6 +130,56 @@ export default function FinancialMemory() {
     }
   };
 
+  const detachEvidence = async (evidenceId: string) => {
+    if (!entry || !activeProfileId || !window.confirm('Detach this supporting document? The financial record will not be changed.')) return;
+    setDocumentActionId(evidenceId);
+    setError('');
+    try {
+      await evidenceApi.detach(activeProfileId, evidenceId, entry.id);
+      setLinkedEvidence(current => current.filter(link => link.evidenceId !== evidenceId));
+    } catch {
+      setError('We could not detach this supporting document. Please try again.');
+    } finally {
+      setDocumentActionId(null);
+    }
+  };
+
+  const tombstoneDocument = async (document: APIEvidenceItem) => {
+    if (!activeProfileId || !window.confirm(`Retire "${document.filename}"? It will remain in the audit trail, but cannot be used again.`)) return;
+    setDocumentActionId(document.id);
+    setError('');
+    try {
+      await evidenceApi.tombstone(activeProfileId, document.id);
+      setUnmatchedEvidence(current => current.filter(item => item.id !== document.id));
+      await refreshData();
+    } catch {
+      setError('We could not retire this document. Please try again.');
+    } finally {
+      setDocumentActionId(null);
+    }
+  };
+
+  const replaceDocument = async (file: File) => {
+    if (!activeProfileId || !replacementTarget) return;
+    setDocumentActionId(replacementTarget.id);
+    setError('');
+    try {
+      const { objectPath } = await evidenceApi.uploadDirect(activeProfileId, file);
+      await evidenceApi.replace(activeProfileId, replacementTarget.id, {
+        objectPath,
+        filename: file.name,
+        mimeType: file.type || 'application/octet-stream',
+      });
+      setUnmatchedEvidence(await evidenceApi.unmatched(activeProfileId));
+      await refreshData();
+    } catch {
+      setError('We could not replace this document. Please try again.');
+    } finally {
+      setReplacementTarget(null);
+      setDocumentActionId(null);
+    }
+  };
+
   if (entryId) {
     if (loading) {
       return <div className="max-w-3xl mx-auto"><Card className="p-8 text-sm text-muted-foreground">Loading financial record…</Card></div>;
@@ -142,6 +205,10 @@ export default function FinancialMemory() {
           <div className="sm:col-span-2"><dt className="text-muted-foreground">Note</dt><dd className="font-medium mt-1">{entry.note?.trim() || 'No note added.'}</dd></div>
         </dl>
       </Card>
+       <Card className="overflow-hidden">
+         <div className="border-b border-border p-4"><h2 className="font-serif text-xl">Supporting documents</h2><p className="mt-1 text-sm text-muted-foreground">These links provide supporting evidence only. Detaching one does not change this financial record.</p></div>
+         {linkedEvidence.length ? <div className="divide-y divide-border">{linkedEvidence.map(link => <div key={link.id} className="flex flex-wrap items-center justify-between gap-3 p-4"><div className="min-w-0"><p className="truncate font-medium">{link.filename}</p><p className="mt-1 text-xs text-muted-foreground">Linked {formatTimestamp(link.linkedAt)} · {link.documentLifecycle}</p></div><div className="flex gap-2"><a className="text-sm text-primary hover:underline self-center" href={evidenceApi.downloadUrl(activeProfileId, link.evidenceId)}>Download</a><Button size="sm" variant="outline" disabled={documentActionId === link.evidenceId} onClick={() => void detachEvidence(link.evidenceId)}>{documentActionId === link.evidenceId ? 'Detaching…' : 'Detach'}</Button></div></div>)}</div> : <div className="p-5 text-sm text-muted-foreground">No active supporting documents are linked to this record.</div>}
+       </Card>
       <p className="text-xs text-muted-foreground">This is a durable record in your business’s Financial Memory.</p>
     </div>;
   }
@@ -165,8 +232,13 @@ export default function FinancialMemory() {
     </Card>
     <Card className="overflow-hidden">
       <div className="border-b border-border p-4"><h2 className="font-serif text-xl">Supporting documents awaiting a financial link</h2><p className="mt-1 text-sm text-muted-foreground">These files are safely stored as evidence, but they do not change income, expenses, profit, tax, or Financial Memory until you explicitly confirm or link a transaction.</p></div>
-      {unmatchedEvidence.length ? <div className="divide-y divide-border">{unmatchedEvidence.map(document => <div key={document.id} className="flex flex-wrap items-center justify-between gap-3 p-4"><div className="flex min-w-0 gap-3"><FileText className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><div className="min-w-0"><p className="truncate font-medium">{document.filename}</p><p className="mt-1 text-xs text-muted-foreground">{document.reviewState === 'reviewed' ? 'Review saved — not posted' : document.reviewState === 'review_required' ? 'Ready to review — not posted' : 'Waiting for extraction'} · Uploaded {formatTimestamp(document.uploadedAt)}</p></div></div><Button size="sm" variant="outline" onClick={() => navigate('/ingest')}>Review document</Button></div>)}</div> : <div className="p-5 text-sm text-muted-foreground">No unmatched supporting documents for this profile.</div>}
+      {unmatchedEvidence.length ? <div className="divide-y divide-border">{unmatchedEvidence.map(document => <div key={document.id} className="flex flex-wrap items-center justify-between gap-3 p-4"><div className="flex min-w-0 gap-3"><FileText className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><div className="min-w-0"><p className="truncate font-medium">{document.filename}</p><p className="mt-1 text-xs text-muted-foreground">{document.reviewState === 'reviewed' ? 'Review saved — not posted' : document.reviewState === 'review_required' ? 'Ready to review — not posted' : 'Waiting for extraction'} · Uploaded {formatTimestamp(document.uploadedAt)}</p></div></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => navigate('/ingest')}>Review document</Button><Button size="sm" variant="outline" disabled={documentActionId === document.id} onClick={() => { setReplacementTarget(document); replacementInputRef.current?.click(); }}><UploadCloud className="mr-1 h-3.5 w-3.5" />Replace</Button><Button size="sm" variant="outline" className="text-destructive" disabled={documentActionId === document.id} onClick={() => void tombstoneDocument(document)}><Trash2 className="mr-1 h-3.5 w-3.5" />Retire</Button></div></div>)}</div> : <div className="p-5 text-sm text-muted-foreground">No unmatched supporting documents for this profile.</div>}
     </Card>
+    <input ref={replacementInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.heic" className="hidden" onChange={event => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (file) void replaceDocument(file);
+    }} />
     <p className="text-xs text-muted-foreground">{records.length} saved record{records.length === 1 ? '' : 's'} for this business profile.</p>
   </div>;
 }

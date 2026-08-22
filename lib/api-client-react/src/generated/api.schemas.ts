@@ -452,6 +452,24 @@ export interface EvidenceInput {
   category?: string;
 }
 
+export type EvidenceLinkDocumentLifecycle = typeof EvidenceLinkDocumentLifecycle[keyof typeof EvidenceLinkDocumentLifecycle];
+
+
+export const EvidenceLinkDocumentLifecycle = {
+  active: 'active',
+  replaced: 'replaced',
+  tombstoned: 'tombstoned',
+} as const;
+
+export interface EvidenceLink {
+  id: string;
+  evidenceId: string;
+  linkedAt: string;
+  filename: string;
+  mimeType: string;
+  documentLifecycle: EvidenceLinkDocumentLifecycle;
+}
+
 export type TransactionRecordType = typeof TransactionRecordType[keyof typeof TransactionRecordType];
 
 
@@ -978,4 +996,3 @@ returnTo?: string;
 export type UploadPrivateObjectDirect200 = {
   objectPath: string;
 };
-

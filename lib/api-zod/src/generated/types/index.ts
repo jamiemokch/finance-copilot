@@ -47,6 +47,8 @@ export * from './demoResetResponse';
 export * from './errorEnvelope';
 export * from './evidenceInput';
 export * from './evidenceItem';
+export * from './evidenceLink';
+export * from './evidenceLinkDocumentLifecycle';
 export * from './extractedData';
 export * from './financialAccount';
 export * from './financialAccountAccountType';

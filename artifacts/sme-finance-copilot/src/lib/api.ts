@@ -309,6 +309,15 @@ export interface APIEvidenceItem {
   replacementOfEvidenceId?: string | null;
 }
 
+export interface APIEvidenceLink {
+  id: string;
+  evidenceId: string;
+  linkedAt: string;
+  filename: string;
+  mimeType: string;
+  documentLifecycle: 'active' | 'replaced' | 'tombstoned';
+}
+
 export interface APIUploadUrl {
   uploadURL: string;
   objectPath: string;
@@ -324,7 +333,7 @@ export const evidenceApi = {
       method: "DELETE",
     }),
   /** Upload file bytes directly through the API server (avoids GCS CORS) */
-  uploadDirect: async (file: File, profileId?: string): Promise<{ objectPath: string }> => {
+  uploadDirect: async (profileId: string, file: File): Promise<{ objectPath: string }> => {
     const buffer = await file.arrayBuffer();
     return apiFetch<{ objectPath: string }>("/storage/uploads/direct", {
       method: "POST",
@@ -332,7 +341,7 @@ export const evidenceApi = {
         "Content-Type": "application/octet-stream",
         "X-Filename": encodeURIComponent(file.name),
         "X-Content-Type": file.type || "application/octet-stream",
-        ...(profileId ? { "X-Profile-Id": profileId } : {}),
+        "X-Profile-Id": profileId,
       },
       body: buffer,
     });
@@ -361,8 +370,14 @@ export const evidenceApi = {
   }),
   tombstone: (profileId: string, evidenceId: string) =>
     apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/tombstone`, { method: "POST" }),
+  replace: (profileId: string, evidenceId: string, data: { objectPath: string; filename: string; mimeType: string }) =>
+    apiFetch<APIEvidenceItem>(`/profiles/${profileId}/evidence/${evidenceId}/replace`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  detach: (profileId: string, evidenceId: string, transactionId: string) =>
+    apiFetch<void>(`/profiles/${profileId}/evidence/${evidenceId}/links/${transactionId}`, { method: "DELETE" }),
   downloadUrl: (profileId: string, evidenceId: string) =>
-    `${API_BASE}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
+    `${API}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
   detectSchema: (profileId: string, evidenceId: string) =>
     apiFetch<{ mappingSchema: unknown; previewRows: string[][] }>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
   processBatch: (profileId: string, evidenceId: string, confirmedMapping: unknown, bankCsv?: boolean) =>
@@ -441,6 +456,8 @@ export const transactionsApi = {
     apiFetch<APITransaction>(`/profiles/${profileId}/transactions/${transactionId}/attach-evidence`, {
       method: "PATCH", body: JSON.stringify({ evidenceId }),
     }),
+  evidenceLinks: (profileId: string, transactionId: string) =>
+    apiFetch<APIEvidenceLink[]>(`/profiles/${profileId}/transactions/${transactionId}/evidence-links`),
 };
 
 // ── Bank CSV imports ───────────────────────────────────────────────────────────

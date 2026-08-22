@@ -10,8 +10,8 @@ import {
   db,
   bankImportBatchesTable,
   evidenceItemsTable,
+  privateUploadBindingsTable,
   privateUploadObjectsTable,
-  privateUploadProfileBindingsTable,
   profilesTable,
 } from '@workspace/db';
 import {
@@ -40,8 +40,7 @@ function hasAuthenticatedSession(
  *
  * Upload file bytes directly through the API server (avoids browser→GCS CORS).
  * Body: raw bytes (application/octet-stream), size limit 25 MB.
- * Headers: X-Filename (URI-encoded), X-Content-Type (MIME type of the file),
- * X-Profile-Id (optional authenticated profile used to bind the upload).
+ * Headers: X-Filename (URI-encoded), X-Content-Type (MIME type of the file).
  * Returns: { objectPath } — the normalised /objects/… path for DB storage.
  */
 router.post(
@@ -56,37 +55,37 @@ router.post(
       res.status(400).json({ error: 'Empty body' });
       return;
     }
+    const profileId = req.headers['x-profile-id'];
+    if (typeof profileId !== 'string' || !profileId) {
+      res.status(400).json({ error: 'A profile binding is required' });
+      return;
+    }
+    const [profile] = await db.select({ id: profilesTable.id }).from(profilesTable)
+      .where(and(eq(profilesTable.id, profileId), eq(profilesTable.userId, req.user.id)))
+      .limit(1);
+    if (!profile) {
+      res.status(404).json({ error: 'Profile not found' });
+      return;
+    }
     const contentType =
       (req.headers['x-content-type'] as string) || 'application/octet-stream';
     try {
       const contentHash = createHash('sha256').update(req.body).digest('hex');
-      const profileId = typeof req.headers['x-profile-id'] === 'string'
-        ? req.headers['x-profile-id']
-        : null;
-      if (profileId) {
-        const [profile] = await db.select({ id: profilesTable.id }).from(profilesTable).where(and(
-          eq(profilesTable.id, profileId),
-          eq(profilesTable.userId, req.user.id),
-        )).limit(1);
-        if (!profile) {
-          res.status(404).json({ error: 'Profile not found' });
-          return;
-        }
-      }
       // Hash matching is scoped to the authenticated uploader. Reusing the
       // private object prevents file dedupe from becoming a cross-user oracle.
-      // A profile context is required before returning a reused path so every
-      // profile-level reuse can be recorded as an explicit logical binding.
-      const [reusable] = profileId ? await db.select({ objectPath: privateUploadObjectsTable.objectPath })
+      const [reusable] = await db.select({
+        id: privateUploadObjectsTable.id,
+        objectPath: privateUploadObjectsTable.objectPath,
+      })
         .from(privateUploadObjectsTable)
         .where(and(
           eq(privateUploadObjectsTable.userId, req.user.id),
           eq(privateUploadObjectsTable.contentHash, contentHash),
-        )) : [];
-      if (reusable && profileId) {
-        await db.insert(privateUploadProfileBindingsTable).values({
-          profileId,
-          objectPath: reusable.objectPath,
+        ));
+      if (reusable) {
+        await db.insert(privateUploadBindingsTable).values({
+          profileId: profile.id,
+          objectId: reusable.id,
           userId: req.user.id,
         }).onConflictDoNothing();
         res.json({ objectPath: reusable.objectPath });
@@ -97,19 +96,17 @@ router.post(
         contentType,
       );
       try {
-        await db.insert(privateUploadObjectsTable).values({
+        const [createdUpload] = await db.insert(privateUploadObjectsTable).values({
           objectPath,
           userId: req.user.id,
           contentHash,
           objectSize: req.body.length,
-        });
-        if (profileId) {
-          await db.insert(privateUploadProfileBindingsTable).values({
-            profileId,
-            objectPath,
-            userId: req.user.id,
-          }).onConflictDoNothing();
-        }
+        }).returning({ id: privateUploadObjectsTable.id });
+        await db.insert(privateUploadBindingsTable).values({
+          profileId: profile.id,
+          objectId: createdUpload.id,
+          userId: req.user.id,
+        }).onConflictDoNothing();
       } catch (err) {
         await objectStorageService.getObjectEntityFile(objectPath)
           .then((file) => file.delete())
@@ -123,10 +120,14 @@ router.post(
               eq(privateUploadObjectsTable.contentHash, contentHash),
             ));
           if (winner) {
-            if (profileId) {
-              await db.insert(privateUploadProfileBindingsTable).values({
-                profileId,
-                objectPath: winner.objectPath,
+            const [winnerUpload] = await db.select({ id: privateUploadObjectsTable.id })
+              .from(privateUploadObjectsTable)
+              .where(eq(privateUploadObjectsTable.objectPath, winner.objectPath))
+              .limit(1);
+            if (winnerUpload) {
+              await db.insert(privateUploadBindingsTable).values({
+                profileId: profile.id,
+                objectId: winnerUpload.id,
                 userId: req.user.id,
               }).onConflictDoNothing();
             }
@@ -166,6 +167,18 @@ router.post(
       res.status(400).json({ error: 'Missing or invalid required fields' });
       return;
     }
+    const profileId = req.headers['x-profile-id'];
+    if (typeof profileId !== 'string' || !profileId) {
+      res.status(400).json({ error: 'A profile binding is required' });
+      return;
+    }
+    const [profile] = await db.select({ id: profilesTable.id }).from(profilesTable)
+      .where(and(eq(profilesTable.id, profileId), eq(profilesTable.userId, req.user.id)))
+      .limit(1);
+    if (!profile) {
+      res.status(404).json({ error: 'Profile not found' });
+      return;
+    }
 
     try {
       const { name, size, contentType } = parsed.data;
@@ -173,6 +186,16 @@ router.post(
       const uploadURL = await objectStorageService.getObjectEntityUploadURL();
       const objectPath =
         objectStorageService.normalizeObjectEntityPath(uploadURL);
+      const [upload] = await db.insert(privateUploadObjectsTable).values({
+        objectPath,
+        userId: req.user.id,
+        objectSize: size,
+      }).returning({ id: privateUploadObjectsTable.id });
+      await db.insert(privateUploadBindingsTable).values({
+        profileId: profile.id,
+        objectId: upload.id,
+        userId: req.user.id,
+      }).onConflictDoNothing();
 
       res.json(
         RequestUploadUrlResponse.parse({
@@ -252,33 +275,32 @@ router.get('/storage/objects/*path', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Object not found' });
       return;
     }
-    const [evidenceReference] = await db.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable)
-      .where(eq(evidenceItemsTable.objectPath, objectPath))
+    const [uploaded] = await db.select({
+      id: privateUploadObjectsTable.id,
+      userId: privateUploadObjectsTable.userId,
+    }).from(privateUploadObjectsTable)
+      .where(eq(privateUploadObjectsTable.objectPath, objectPath))
       .limit(1);
-    if (evidenceReference) {
-      // Once a blob is an evidence object, force callers through the
-      // profile-scoped evidence download route instead of exposing a
-      // path-only authorization bypass.
+    if (!uploaded || uploaded.userId !== req.user.id) {
+      // Evidence and staged uploads are served only through routes that carry
+      // the profile and evidence IDs. A path-only URL is never an ACL.
       res.status(404).json({ error: 'Object not found' });
       return;
     }
-    const [uploaded] = await db.select().from(privateUploadObjectsTable)
-      .where(eq(privateUploadObjectsTable.objectPath, objectPath))
+    // Even an object owned by this user may be bound to several profiles. Do
+    // not let this legacy path-only route become a cross-profile download
+    // oracle; callers must use /profiles/:profileId/evidence/:evidenceId/download.
+    const [binding] = await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(eq(privateUploadBindingsTable.objectId, uploaded.id))
       .limit(1);
-    let ownerId = uploaded?.userId ?? null;
-    // A compatibility lookup keeps existing private evidence readable while
-    // ensuring bank-import objects use the stronger direct-upload owner record.
-    if (!ownerId) {
-      const [evidenceOwner] = await db.select({ userId: profilesTable.userId })
-        .from(evidenceItemsTable)
-        .innerJoin(profilesTable, eq(evidenceItemsTable.profileId, profilesTable.id))
-        .where(eq(evidenceItemsTable.objectPath, objectPath))
-        .limit(1);
-      ownerId = evidenceOwner?.userId ?? null;
-    }
-    if (!ownerId || ownerId !== req.user.id) {
-      // A 404 avoids confirming that a private object path exists for someone
-      // else, while still providing a clear not-found outcome to the caller.
+    // Legacy evidence predates private_upload_bindings but is still profile
+    // scoped. Its bytes must never fall back to this path-only download route.
+    const [evidence] = await db.select({ id: evidenceItemsTable.id })
+      .from(evidenceItemsTable)
+      .where(eq(evidenceItemsTable.objectPath, objectPath))
+      .limit(1);
+    if (binding || evidence) {
       res.status(404).json({ error: 'Object not found' });
       return;
     }

@@ -89,6 +89,29 @@ export const privateUploadObjectsTable = pgTable('private_upload_objects', {
 ]);
 
 /**
+ * A physical upload may be reused without copying bytes, but each business
+ * profile gets an explicit logical authorization binding. The userId is
+ * repeated deliberately so a profile binding can never outlive or drift from
+ * the authenticated owner relationship.
+ */
+export const privateUploadBindingsTable = pgTable('private_upload_bindings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  objectId: uuid('object_id')
+    .notNull()
+    .references(() => privateUploadObjectsTable.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => usersTable.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('private_upload_bindings_profile_object_unique').on(table.profileId, table.objectId),
+  index('private_upload_bindings_user_profile_idx').on(table.userId, table.profileId),
+]);
+
+/**
  * A private blob may be physically reused, but every profile that uses it gets
  * an explicit logical binding. Profile-scoped evidence routes are the only
  * supported way to read or mutate evidence once it is registered.

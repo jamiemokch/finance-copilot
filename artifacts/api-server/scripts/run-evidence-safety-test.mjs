@@ -15,40 +15,32 @@ if (!administrationUrl) {
   process.exit(1);
 }
 
-const temporaryDatabaseName = `m9_evidence_test_${process.pid}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-if (!/^m9_evidence_test_[a-z0-9_]+$/i.test(temporaryDatabaseName)) {
-  throw new Error('Generated evidence test database name is invalid.');
-}
-
+const databaseName = `m9_evidence_test_${process.pid}_${Date.now()}_${randomUUID().slice(0, 8)}`;
 const testDatabaseUrl = new URL(administrationUrl);
-testDatabaseUrl.pathname = `/${temporaryDatabaseName}`;
+testDatabaseUrl.pathname = `/${databaseName}`;
 const env = {
   ...process.env,
   DATABASE_URL: testDatabaseUrl.toString(),
   NODE_ENV: 'test',
   EVIDENCE_TEST_DATABASE: '1',
-  // The suite proves the deterministic review-only fallback. Empty values
-  // override inherited workspace secrets without exposing them.
   AI_INTEGRATIONS_OPENAI_API_KEY: '',
   OPENAI_API_KEY: '',
 };
 
 let databaseCreated = false;
 try {
-  console.log(`Creating isolated temporary database ${temporaryDatabaseName} for M9 evidence safety tests.`);
-  execFileSync('createdb', ['--maintenance-db', administrationUrl, temporaryDatabaseName], {
+  console.log(`Creating isolated temporary database ${databaseName} for M9 evidence safety tests.`);
+  execFileSync('createdb', ['--maintenance-db', administrationUrl, databaseName], {
     cwd: workspaceDir,
     stdio: 'inherit',
     env,
   });
   databaseCreated = true;
-
   execFileSync('pnpm', ['--filter', '@workspace/db', 'run', 'push'], {
     cwd: workspaceDir,
     stdio: 'inherit',
     env,
   });
-
   execFileSync('pnpm', [
     'exec',
     'esbuild',
@@ -61,8 +53,11 @@ try {
     '--external:thread-stream',
     '--external:pino-pretty',
     '--outfile=dist/evidence.test.cjs',
-  ], { cwd: apiServerDir, stdio: 'inherit', env });
-
+  ], {
+    cwd: apiServerDir,
+    stdio: 'inherit',
+    env,
+  });
   execFileSync('node', ['--test', 'dist/evidence.test.cjs'], {
     cwd: apiServerDir,
     stdio: 'inherit',
@@ -70,8 +65,8 @@ try {
   });
 } finally {
   if (databaseCreated) {
-    console.log(`Dropping isolated temporary database ${temporaryDatabaseName}.`);
-    execFileSync('dropdb', ['--maintenance-db', administrationUrl, '--force', temporaryDatabaseName], {
+    console.log(`Dropping isolated temporary database ${databaseName}.`);
+    execFileSync('dropdb', ['--maintenance-db', administrationUrl, '--force', databaseName], {
       cwd: workspaceDir,
       stdio: 'inherit',
       env,

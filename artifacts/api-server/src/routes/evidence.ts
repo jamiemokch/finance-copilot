@@ -2,7 +2,10 @@ import { Router } from "express";
 import { randomUUID } from "crypto";
 import { Readable } from "stream";
 import {
-  bankImportBatchesTable, db, privateUploadObjectsTable, privateUploadProfileBindingsTable,
+  bankImportBatchesTable,
+  db,
+  privateUploadBindingsTable,
+  privateUploadObjectsTable,
 } from "@workspace/db";
 import {
   evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
@@ -95,9 +98,6 @@ router.get("/profiles/:profileId/evidence/:evidenceId/download", async (req, res
     if (!evidence || evidence.documentLifecycle === "tombstoned") {
       res.status(404).json({ error: "Document not found" }); return;
     }
-    if (evidence.workflowVersion >= 2 && !(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
-      res.status(404).json({ error: "Document not found" }); return;
-    }
     const objectFile = await storageService.getObjectEntityFile(evidence.objectPath);
     const response = await storageService.downloadObject(objectFile, 0);
     res.status(response.status);
@@ -128,7 +128,24 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
     const [upload] = await db.select().from(privateUploadObjectsTable).where(
       eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
     ).limit(1);
-    if (!upload || upload.userId !== req.user.id) {
+    // Only truly unbound pre-M9 staged uploads may be adopted on first
+    // registration. An object already bound to another profile stays scoped.
+    const [anyBinding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(eq(privateUploadBindingsTable.objectId, upload.id)).limit(1) : [];
+    if (upload && upload.userId === req.user.id && !anyBinding) {
+      await db.insert(privateUploadBindingsTable).values({
+        profileId: profile.id, objectId: upload.id, userId: req.user.id,
+      }).onConflictDoNothing();
+    }
+    const [binding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(and(
+        eq(privateUploadBindingsTable.objectId, upload.id),
+        eq(privateUploadBindingsTable.profileId, profile.id),
+        eq(privateUploadBindingsTable.userId, req.user.id),
+      )).limit(1) : [];
+    if (!upload || upload.userId !== req.user.id || !binding) {
       // An opaque storage path alone is never proof that the caller owns the
       // bytes. This blocks attachment and downstream processing cross-user.
       res.status(404).json({ error: "Uploaded file not found" });
@@ -151,26 +168,19 @@ router.post("/profiles/:profileId/evidence", async (req, res) => {
     }
     let item: typeof evidenceItemsTable.$inferSelect;
     try {
-      [item] = await db.transaction(async (tx) => {
-        await tx.insert(privateUploadProfileBindingsTable).values({
-          profileId: profile.id,
-          objectPath: body.data.objectPath,
-          userId: req.user.id,
-        }).onConflictDoNothing();
-        return tx.insert(evidenceItemsTable).values({
-          profileId: profile.id,
-          filename: body.data.filename,
-          objectPath: body.data.objectPath,
-          mimeType: body.data.mimeType,
-          category: body.data.category,
-          evidenceType: body.data.evidenceType,
-          status: "received",
-          workflowVersion: body.data.evidenceType === "document" ? 2 : 1,
-          reviewState: "pending",
-          contentHash: upload.contentHash,
-          objectSize: upload.objectSize,
-        }).returning();
-      });
+      [item] = await db.insert(evidenceItemsTable).values({
+        profileId: profile.id,
+        filename: body.data.filename,
+        objectPath: body.data.objectPath,
+        mimeType: body.data.mimeType,
+        category: body.data.category,
+        evidenceType: body.data.evidenceType,
+        status: "received",
+        workflowVersion: body.data.evidenceType === "document" ? 2 : 1,
+        reviewState: "pending",
+        contentHash: upload.contentHash,
+        objectSize: upload.objectSize,
+      }).returning();
     } catch (err) {
       const dbError = err as { cause?: { code?: string } };
       if (dbError.cause?.code === "23505" && body.data.evidenceType === "document" && upload.contentHash) {
@@ -212,14 +222,6 @@ router.delete("/profiles/:profileId/evidence/:evidenceId", async (req, res) => {
       )).for("update");
       if (!evidenceItem) return { error: "Evidence item not found", status: 404 as const };
       if (evidenceItem.workflowVersion >= 2) {
-          const [binding] = await tx.select({ id: privateUploadProfileBindingsTable.id })
-            .from(privateUploadProfileBindingsTable)
-            .where(and(
-              eq(privateUploadProfileBindingsTable.profileId, profile.id),
-              eq(privateUploadProfileBindingsTable.objectPath, evidenceItem.objectPath),
-            ))
-            .limit(1);
-          if (!binding) return { error: "Evidence item not found", status: 404 as const };
         const [tombstoned] = await tx.update(evidenceItemsTable).set({
           documentLifecycle: "tombstoned",
         }).where(eq(evidenceItemsTable.id, evidenceItem.id)).returning();
@@ -297,9 +299,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 
     const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!existingEvidence) { res.status(404).json({ error: "Evidence item not found" }); return; }
-    if (existingEvidence.workflowVersion >= 2 && !(await hasProfileObjectBinding(profile.id, existingEvidence.objectPath))) {
-      res.status(404).json({ error: "Evidence item not found" }); return;
-    }
     if (existingEvidence.workflowVersion >= 2 && existingEvidence.documentLifecycle !== "active") {
       res.status(409).json({ error: "This document is no longer active" }); return;
     }
@@ -913,9 +912,6 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/review", async (req, res
     if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
       res.status(404).json({ error: "Active reviewable document not found" }); return;
     }
-    if (!(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
-      res.status(404).json({ error: "Active reviewable document not found" }); return;
-    }
     const [updated] = await db.transaction(async (tx) => {
       const [item] = await tx.update(evidenceItemsTable).set({
         ...(body.data.extractedData ? { extractedData: body.data.extractedData } : {}),
@@ -965,14 +961,48 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
     if (!evidence || evidence.workflowVersion < 2 || evidence.documentLifecycle !== "active") {
       res.status(404).json({ error: "Active reviewable document not found" }); return;
     }
-    if (!(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
-      res.status(404).json({ error: "Active reviewable document not found" }); return;
-    }
+    const isIncome = body.data.taxTreatment === "income";
+    const canonicalAmount = isIncome ? Math.abs(body.data.amount) : -Math.abs(body.data.amount);
+    const deductible = body.data.taxTreatment !== "non_deductible" && !isIncome;
+    const allowableAmount = isIncome
+      ? canonicalAmount
+      : deductible ? -Math.abs(canonicalAmount) * (body.data.allowablePercentage / 100) : 0;
+    const matchesConfirmation = (candidate: typeof transactionsTable.$inferSelect) =>
+      candidate.date === body.data.date
+      && candidate.description === body.data.description
+      && Number(candidate.amount) === canonicalAmount
+      && candidate.recordType === (isIncome ? "income" : "expense")
+      && candidate.category === body.data.category
+      && candidate.taxTreatment === body.data.taxTreatment
+      && candidate.accountingCategory === body.data.category
+      && Number(candidate.allowablePercentage) === (isIncome ? 100 : body.data.allowablePercentage)
+      && Number(candidate.allowableAmount) === allowableAmount
+      && candidate.source === "manual"
+      && candidate.evidenceId === null
+      && candidate.evidenceTier === 1
+      && candidate.userOverride === true;
+    const hasConfirmationBridge = async (transactionId: string) => {
+      const [confirmation] = await db.select({ id: evidenceTransactionLinksTable.id })
+        .from(evidenceTransactionLinksTable).where(and(
+          eq(evidenceTransactionLinksTable.profileId, profile.id),
+          eq(evidenceTransactionLinksTable.evidenceId, evidence.id),
+          eq(evidenceTransactionLinksTable.transactionId, transactionId),
+          eq(evidenceTransactionLinksTable.linkReason, "explicit_financial_confirmation"),
+        )).limit(1);
+      return Boolean(confirmation);
+    };
     const [existing] = await db.select().from(transactionsTable).where(and(
       eq(transactionsTable.id, body.data.idempotencyKey),
       eq(transactionsTable.profileId, profile.id),
     )).limit(1);
-    if (existing) { res.json(existing); return; }
+    if (existing) {
+      if (!await hasConfirmationBridge(existing.id) || !matchesConfirmation(existing)) {
+        res.status(409).json({ error: "This confirmation key belongs to a different financial outcome" });
+        return;
+      }
+      res.json(existing);
+      return;
+    }
 
     const [transaction] = await db.transaction(async (tx) => {
       const [owned] = await tx.select().from(evidenceItemsTable).where(and(
@@ -984,14 +1014,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
       // The explicit treatment determines direction for a document candidate.
       // People naturally type “12.34” for a £12.34 receipt; keeping it positive
       // must not turn a deductible expense into income.
-      const isIncome = body.data.taxTreatment === "income";
-      const canonicalAmount = isIncome ? Math.abs(body.data.amount) : -Math.abs(body.data.amount);
-      const deductible = body.data.taxTreatment !== "non_deductible" && !isIncome;
-      const allowableAmount = isIncome
-        ? canonicalAmount
-        : deductible
-          ? -Math.abs(canonicalAmount) * (body.data.allowablePercentage / 100)
-          : 0;
       const [created] = await tx.insert(transactionsTable).values({
         id: body.data.idempotencyKey,
         profileId: profile.id,
@@ -1032,7 +1054,34 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-transaction", asy
         eq(transactionsTable.id, body.data.idempotencyKey),
         eq(transactionsTable.profileId, req.params.profileId),
       ));
-      if (existing) { res.json(existing); return; }
+       const isIncome = body.data.taxTreatment === "income";
+       const canonicalAmount = isIncome ? Math.abs(body.data.amount) : -Math.abs(body.data.amount);
+       const deductible = body.data.taxTreatment !== "non_deductible" && !isIncome;
+       const allowableAmount = isIncome
+         ? canonicalAmount
+         : deductible ? -Math.abs(canonicalAmount) * (body.data.allowablePercentage / 100) : 0;
+       const [confirmation] = existing ? await db.select({ id: evidenceTransactionLinksTable.id })
+         .from(evidenceTransactionLinksTable).where(and(
+           eq(evidenceTransactionLinksTable.profileId, req.params.profileId),
+           eq(evidenceTransactionLinksTable.evidenceId, req.params.evidenceId),
+           eq(evidenceTransactionLinksTable.transactionId, existing.id),
+           eq(evidenceTransactionLinksTable.linkReason, "explicit_financial_confirmation"),
+         )).limit(1) : [];
+       if (existing && confirmation
+         && existing.date === body.data.date
+         && existing.description === body.data.description
+         && Number(existing.amount) === canonicalAmount
+         && existing.recordType === (isIncome ? "income" : "expense")
+         && existing.category === body.data.category
+         && existing.taxTreatment === body.data.taxTreatment
+         && existing.accountingCategory === body.data.category
+         && Number(existing.allowablePercentage) === (isIncome ? 100 : body.data.allowablePercentage)
+         && Number(existing.allowableAmount) === allowableAmount
+         && existing.source === "manual"
+         && existing.evidenceId === null
+         && existing.evidenceTier === 1
+         && existing.userOverride === true) { res.json(existing); return; }
+       if (existing) { res.status(409).json({ error: "This confirmation key belongs to a different financial outcome" }); return; }
     }
     req.log.error(err, "Failed to confirm evidence transaction");
     res.status(500).json({ error: "Failed to confirm financial record" });
@@ -1061,15 +1110,43 @@ router.delete("/profiles/:profileId/evidence/:evidenceId/links/:transactionId", 
   }
 });
 
+router.get("/profiles/:profileId/transactions/:transactionId/evidence-links", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const [transaction] = await db.select({ id: transactionsTable.id }).from(transactionsTable).where(and(
+      eq(transactionsTable.id, req.params.transactionId),
+      eq(transactionsTable.profileId, profile.id),
+    )).limit(1);
+    if (!transaction) { res.status(404).json({ error: "Transaction not found" }); return; }
+    const links = await db.select({
+      id: evidenceTransactionLinksTable.id,
+      evidenceId: evidenceTransactionLinksTable.evidenceId,
+      linkedAt: evidenceTransactionLinksTable.createdAt,
+      filename: evidenceItemsTable.filename,
+      mimeType: evidenceItemsTable.mimeType,
+      documentLifecycle: evidenceItemsTable.documentLifecycle,
+    }).from(evidenceTransactionLinksTable)
+      .innerJoin(evidenceItemsTable, eq(evidenceTransactionLinksTable.evidenceId, evidenceItemsTable.id))
+      .where(and(
+        eq(evidenceTransactionLinksTable.profileId, profile.id),
+        eq(evidenceTransactionLinksTable.transactionId, transaction.id),
+        eq(evidenceTransactionLinksTable.linkStatus, "active"),
+      ))
+      .orderBy(desc(evidenceTransactionLinksTable.createdAt));
+    res.json(links);
+  } catch (err) {
+    req.log.error(err, "Failed to list transaction evidence links");
+    res.status(500).json({ error: "Failed to list linked documents" });
+  }
+});
+
 router.post("/profiles/:profileId/evidence/:evidenceId/tombstone", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
-    const evidence = await getEvidenceItem(profile.id, req.params.evidenceId);
-    if (!evidence || evidence.workflowVersion < 2 || !(await hasProfileObjectBinding(profile.id, evidence.objectPath))) {
-      res.status(404).json({ error: "Active document not found" }); return;
-    }
     const [updated] = await db.update(evidenceItemsTable).set({
       documentLifecycle: "tombstoned",
     }).where(and(
@@ -1096,15 +1173,26 @@ router.post("/profiles/:profileId/evidence/:evidenceId/replace", async (req, res
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
-    const existingEvidence = await getEvidenceItem(profile.id, req.params.evidenceId);
-    if (!existingEvidence || existingEvidence.workflowVersion < 2 || !(await hasProfileObjectBinding(profile.id, existingEvidence.objectPath))) {
-      res.status(404).json({ error: "Active document not found" }); return;
-    }
     const [upload] = await db.select().from(privateUploadObjectsTable).where(and(
       eq(privateUploadObjectsTable.objectPath, body.data.objectPath),
       eq(privateUploadObjectsTable.userId, req.user.id),
     )).limit(1);
-    if (!upload) { res.status(404).json({ error: "Uploaded replacement not found" }); return; }
+    const [anyBinding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(eq(privateUploadBindingsTable.objectId, upload.id)).limit(1) : [];
+    if (upload && upload.userId === req.user.id && !anyBinding) {
+      await db.insert(privateUploadBindingsTable).values({
+        profileId: profile.id, objectId: upload.id, userId: req.user.id,
+      }).onConflictDoNothing();
+    }
+    const [binding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(and(
+        eq(privateUploadBindingsTable.objectId, upload.id),
+        eq(privateUploadBindingsTable.profileId, profile.id),
+        eq(privateUploadBindingsTable.userId, req.user.id),
+      )).limit(1) : [];
+    if (!upload || !binding) { res.status(404).json({ error: "Uploaded replacement not found" }); return; }
     const [replacement] = await db.transaction(async (tx) => {
       const [original] = await tx.update(evidenceItemsTable).set({
         documentLifecycle: "replaced",
@@ -1121,11 +1209,6 @@ router.post("/profiles/:profileId/evidence/:evidenceId/replace", async (req, res
         workflowVersion: 2, reviewState: "pending", status: "received",
         contentHash: upload.contentHash, objectSize: upload.objectSize, replacementOfEvidenceId: original.id,
       }).returning();
-      await tx.insert(privateUploadProfileBindingsTable).values({
-        profileId: profile.id,
-        objectPath: body.data.objectPath,
-        userId: req.user.id,
-      }).onConflictDoNothing();
       await tx.insert(evidenceAuditEventsTable).values([
         { profileId: profile.id, evidenceId: original.id, actorUserId: req.user.id, eventType: "document_replaced", details: { replacementEvidenceId: created.id } },
         { profileId: profile.id, evidenceId: created.id, actorUserId: req.user.id, eventType: "replacement_registered", details: { replacedEvidenceId: original.id } },
@@ -1154,9 +1237,6 @@ router.patch("/profiles/:profileId/transactions/:txId/attach-evidence", async (r
     const evidenceItem = await getEvidenceItem(profile.id, body.data.evidenceId);
     if (!transaction || !evidenceItem) { res.status(404).json({ error: "Transaction or evidence item not found" }); return; }
     if (evidenceItem.workflowVersion >= 2 && evidenceItem.documentLifecycle === "active") {
-      if (!(await hasProfileObjectBinding(profile.id, evidenceItem.objectPath))) {
-        res.status(404).json({ error: "Transaction or evidence item not found" }); return;
-      }
       const attached = await db.transaction(async (tx) => {
         const [activeEvidence] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
           eq(evidenceItemsTable.id, evidenceItem.id),
@@ -1209,17 +1289,6 @@ async function getEvidenceItem(profileId: string, evidenceId: string) {
     eq(evidenceItemsTable.id, evidenceId), eq(evidenceItemsTable.profileId, profileId),
   ));
   return item;
-}
-
-async function hasProfileObjectBinding(profileId: string, objectPath: string): Promise<boolean> {
-  const [binding] = await db.select({ id: privateUploadProfileBindingsTable.id })
-    .from(privateUploadProfileBindingsTable)
-    .where(and(
-      eq(privateUploadProfileBindingsTable.profileId, profileId),
-      eq(privateUploadProfileBindingsTable.objectPath, objectPath),
-    ))
-    .limit(1);
-  return Boolean(binding);
 }
 
 async function addEvidenceAudit(

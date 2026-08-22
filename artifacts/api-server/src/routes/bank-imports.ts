@@ -8,6 +8,7 @@ import {
   bankImportRowsTable,
   db,
   financialAccountsTable,
+  privateUploadBindingsTable,
   privateUploadObjectsTable,
   transactionsTable,
 } from "@workspace/db";
@@ -184,7 +185,24 @@ router.post("/profiles/:profileId/bank-imports", async (req, res) => {
         .limit(1),
     ]);
     if (!account) { res.status(404).json({ error: "Financial account not found" }); return; }
-    if (!upload || upload.userId !== req.user.id) {
+    // Only unbound legacy uploads may be adopted. A present binding means the
+    // object already belongs to a specific profile and must not cross over.
+    const [anyBinding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(eq(privateUploadBindingsTable.objectId, upload.id)).limit(1) : [];
+    if (upload && upload.userId === req.user.id && !anyBinding) {
+      await db.insert(privateUploadBindingsTable).values({
+        profileId: profile.id, objectId: upload.id, userId: req.user.id,
+      }).onConflictDoNothing();
+    }
+    const [binding] = upload ? await db.select({ id: privateUploadBindingsTable.id })
+      .from(privateUploadBindingsTable)
+      .where(and(
+        eq(privateUploadBindingsTable.objectId, upload.id),
+        eq(privateUploadBindingsTable.profileId, profile.id),
+        eq(privateUploadBindingsTable.userId, req.user.id),
+      )).limit(1) : [];
+    if (!upload || upload.userId !== req.user.id || !binding) {
       res.status(404).json({ error: "The uploaded CSV was not found" });
       return;
     }

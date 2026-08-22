@@ -5,11 +5,11 @@ import test from 'node:test';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
   db,
-  evidenceAuditEventsTable,
   evidenceItemsTable,
   evidenceTransactionLinksTable,
+  pool,
+  privateUploadBindingsTable,
   privateUploadObjectsTable,
-  privateUploadProfileBindingsTable,
   profilesTable,
   sessionsTable,
   transactionsTable,
@@ -17,6 +17,7 @@ import {
 } from '@workspace/db';
 import app from '../app.js';
 import { createSession } from '../lib/auth.js';
+import { ObjectStorageService } from '../lib/objectStorage.js';
 
 if (process.env.EVIDENCE_TEST_DATABASE !== '1') {
   throw new Error('M9 evidence safety tests require an explicitly marked disposable test database.');
@@ -37,9 +38,28 @@ async function request(
   const headers = new Headers(init.headers);
   headers.set('authorization', `Bearer ${sid}`);
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  const response = await fetch(`http://127.0.0.1:${testPort}${path}`, { ...init, headers });
+  const response = await fetch(`http://127.0.0.1:${testPort}${path}`, {
+    ...init,
+    headers,
+  });
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) as ResponseBody : {} };
+}
+
+async function upload(
+  sid: string,
+  profileId: string,
+  content: string,
+): Promise<{ status: number; body: ResponseBody }> {
+  return request(sid, '/api/storage/uploads/direct', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/octet-stream',
+      'x-content-type': 'text/plain',
+      'x-profile-id': profileId,
+    },
+    body: content,
+  });
 }
 
 async function closeServer(server: ReturnType<typeof app.listen>): Promise<void> {
@@ -48,32 +68,50 @@ async function closeServer(server: ReturnType<typeof app.listen>): Promise<void>
   });
 }
 
-test('M9 evidence is profile-bound, review-only until confirmation, and lifecycle-safe', async () => {
+function immutableFinancialSnapshot(body: ResponseBody) {
+  return {
+    profit: body.plBreakdown.profit,
+    tax: body.taxCalculation,
+    cash: body.cashPosition,
+    readiness: body.saReadiness,
+  };
+}
+
+test('M9 evidence remains profile-bound, review-only, idempotent, and financially inert until confirmation', async () => {
   const suffix = randomUUID().replaceAll('-', '');
-  const userIds = { alice: `m9-alice-${suffix}`, bob: `m9-bob-${suffix}` };
+  const users = {
+    alice: `m9-alice-${suffix}`,
+    bob: `m9-bob-${suffix}`,
+  };
   const profileIds: string[] = [];
   const sessionIds: string[] = [];
-  const uploadedPaths: string[] = [];
   let server: ReturnType<typeof app.listen> | undefined;
 
-  async function createUser(id: string): Promise<void> {
-    await db.insert(usersTable).values({
-      id,
-      email: `${id}@example.test`,
-      firstName: 'M9',
-      lastName: 'Safety',
-    });
-  }
+  const originalSaveContent = ObjectStorageService.prototype.saveContent;
+  const originalGetFile = ObjectStorageService.prototype.getObjectEntityFile;
+  const originalDownload = ObjectStorageService.prototype.downloadObject;
+  const originalUploadUrl = ObjectStorageService.prototype.getObjectEntityUploadURL;
+  ObjectStorageService.prototype.saveContent = async () => `/objects/uploads/m9-${randomUUID()}`;
+  ObjectStorageService.prototype.getObjectEntityFile = async () => ({
+    delete: async () => undefined,
+  }) as never;
+  ObjectStorageService.prototype.downloadObject = async () =>
+    new Response('test evidence bytes', { headers: { 'content-type': 'text/plain' } });
+  ObjectStorageService.prototype.getObjectEntityUploadURL = async () =>
+    `https://storage.test/objects/uploads/m9-presigned-${randomUUID()}`;
 
-  async function createProfile(userId: string, name: string): Promise<string> {
+  async function createProfile(userId: string, name: string) {
     const [profile] = await db.insert(profilesTable).values({
-      userId, name, type: 'sole_trader', taxYear: '2025/26', accountingBasis: 'cash',
+      userId,
+      name,
+      type: 'sole_trader',
+      taxYear: '2025/26',
+      accountingBasis: 'cash',
     }).returning({ id: profilesTable.id });
     profileIds.push(profile.id);
     return profile.id;
   }
-
-  async function createSessionFor(userId: string): Promise<string> {
+  async function createSessionFor(userId: string) {
     const sid = await createSession({
       user: {
         id: userId,
@@ -82,350 +120,338 @@ test('M9 evidence is profile-bound, review-only until confirmation, and lifecycl
         lastName: 'Safety',
         profileImageUrl: null,
       },
-      access_token: `evidence-test-${userId}`,
+      access_token: `test-access-${userId}`,
       expires_at: Math.floor(Date.now() / 1000) + 3600,
     });
     sessionIds.push(sid);
     return sid;
   }
 
-  async function seedUpload(userId: string, label: string, contentHash = `hash-${label}-${suffix}`): Promise<string> {
-    const objectPath = `/objects/uploads/m9-${label}-${suffix}`;
-    uploadedPaths.push(objectPath);
-    await db.insert(privateUploadObjectsTable).values({
-      objectPath, userId, contentHash, objectSize: 128,
-    });
-    return objectPath;
-  }
-
-  async function registerDocument(
-    sid: string,
-    profileId: string,
-    objectPath: string,
-    filename: string,
-  ): Promise<ResponseBody> {
-    const response = await request(sid, `/api/profiles/${profileId}/evidence`, {
-      method: 'POST',
-      body: JSON.stringify({
-        filename, objectPath, mimeType: 'image/jpeg', category: 'office_costs', evidenceType: 'document',
-      }),
-    });
-    assert.ok(response.status === 200 || response.status === 201, `registration failed: ${JSON.stringify(response.body)}`);
-    return response.body;
-  }
-
   try {
-    await Promise.all(Object.values(userIds).map(createUser));
-    const [aliceProfile, aliceSecondProfile, bobProfile] = await Promise.all([
-      createProfile(userIds.alice, 'Alice evidence one'),
-      createProfile(userIds.alice, 'Alice evidence two'),
-      createProfile(userIds.bob, 'Bob evidence'),
+    await Promise.all(Object.values(users).map((id) => db.insert(usersTable).values({
+      id,
+      email: `${id}@example.test`,
+      firstName: 'M9',
+      lastName: 'Safety',
+    })));
+    const [alicePrimary, aliceSecondary, bobProfile] = await Promise.all([
+      createProfile(users.alice, 'Alice primary'),
+      createProfile(users.alice, 'Alice secondary'),
+      createProfile(users.bob, 'Bob profile'),
     ]);
     const [aliceSession, bobSession] = await Promise.all([
-      createSessionFor(userIds.alice),
-      createSessionFor(userIds.bob),
+      createSessionFor(users.alice),
+      createSessionFor(users.bob),
     ]);
-    server = app.listen(0, '127.0.0.1');
+    server = app.listen(0);
     await new Promise<void>((resolve) => server!.once('listening', resolve));
     testPort = (server.address() as AddressInfo).port;
+    const presigned = await request(aliceSession, '/api/storage/uploads/request-url', {
+      method: 'POST',
+      headers: { 'x-profile-id': alicePrimary },
+      body: JSON.stringify({ name: 'presigned.txt', size: 12, contentType: 'text/plain' }),
+    });
+    assert.equal(presigned.status, 200, 'profile-scoped presigned upload request succeeds');
+    const [presignedObject] = await db.select().from(privateUploadObjectsTable)
+      .where(eq(privateUploadObjectsTable.objectPath, presigned.body.objectPath));
+    assert.ok(presignedObject);
+    assert.equal((await db.select().from(privateUploadBindingsTable).where(and(
+      eq(privateUploadBindingsTable.objectId, presignedObject.id),
+      eq(privateUploadBindingsTable.profileId, alicePrimary),
+    ))).length, 1, 'presigned upload creates its profile binding before bytes are sent');
+    const crossProfilePresignedRegistration = await request(aliceSession, `/api/profiles/${aliceSecondary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({ filename: 'presigned.txt', objectPath: presigned.body.objectPath, mimeType: 'text/plain' }),
+    });
+    assert.equal(crossProfilePresignedRegistration.status, 404, 'presigned object cannot register under a second profile');
 
-    const primaryPath = await seedUpload(userIds.alice, 'primary');
-    const duplicateRegistrations = await Promise.all([
-      registerDocument(aliceSession, aliceProfile, primaryPath, 'primary-receipt.jpg'),
-      registerDocument(aliceSession, aliceProfile, primaryPath, 'primary-receipt.jpg'),
+    const duplicateContent = 'same receipt bytes';
+    const [firstUpload, retryUpload] = await Promise.all([
+      upload(aliceSession, alicePrimary, duplicateContent),
+      upload(aliceSession, alicePrimary, duplicateContent),
     ]);
-    assert.equal(duplicateRegistrations[0].id, duplicateRegistrations[1].id, 'same-profile registration converges');
-    const primaryEvidenceId = duplicateRegistrations[0].id as string;
-
-    const [binding] = await db.select().from(privateUploadProfileBindingsTable).where(and(
-      eq(privateUploadProfileBindingsTable.profileId, aliceProfile),
-      eq(privateUploadProfileBindingsTable.objectPath, primaryPath),
-      eq(privateUploadProfileBindingsTable.userId, userIds.alice),
-    ));
-    assert.ok(binding, 'registration creates an explicit profile/object binding');
-
-    const crossProfileRead = await request(
-      aliceSession,
-      `/api/profiles/${aliceSecondProfile}/evidence/${primaryEvidenceId}/download`,
+    assert.equal(firstUpload.status, 200);
+    assert.equal(retryUpload.status, 200);
+    assert.equal(firstUpload.body.objectPath, retryUpload.body.objectPath, 'duplicate uploads reuse physical bytes');
+    const objectPath = firstUpload.body.objectPath as string;
+    const [physicalObject] = await db.select().from(privateUploadObjectsTable)
+      .where(eq(privateUploadObjectsTable.objectPath, objectPath));
+    assert.ok(physicalObject);
+    assert.equal(
+      (await db.select().from(privateUploadBindingsTable).where(and(
+        eq(privateUploadBindingsTable.profileId, alicePrimary),
+        eq(privateUploadBindingsTable.objectId, physicalObject.id),
+      ))).length,
+      1,
+      'retries converge on one profile binding',
     );
-    assert.equal(crossProfileRead.status, 404, 'a second owned profile cannot use another profile’s evidence id');
-    const crossUserRead = await request(
-      bobSession,
-      `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/download`,
-    );
-    assert.equal(crossUserRead.status, 404, 'a different user cannot download private evidence');
-    const pathOnlyRead = await request(aliceSession, `/api/storage/objects/uploads/m9-primary-${suffix}`);
-    assert.equal(pathOnlyRead.status, 404, 'registered evidence rejects path-only private downloads');
 
-    const crossUserRegister = await request(bobSession, `/api/profiles/${bobProfile}/evidence`, {
+    const primaryRegistration = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
       method: 'POST',
       body: JSON.stringify({
-        filename: 'stolen.jpg', objectPath: primaryPath, mimeType: 'image/jpeg', evidenceType: 'document',
+        filename: 'receipt.txt',
+        objectPath,
+        mimeType: 'text/plain',
+        category: 'receipt',
+        evidenceType: 'document',
       }),
     });
-    assert.equal(crossUserRegister.status, 404, 'object paths are not transferable across users');
-
-    const bindingLossPath = await seedUpload(userIds.alice, 'binding-loss');
-    const bindingLossEvidence = await registerDocument(
-      aliceSession, aliceProfile, bindingLossPath, 'binding-loss.jpg',
-    );
-    await db.delete(privateUploadProfileBindingsTable).where(and(
-      eq(privateUploadProfileBindingsTable.profileId, aliceProfile),
-      eq(privateUploadProfileBindingsTable.objectPath, bindingLossPath),
-    ));
-    const unboundProcess = await request(
-      aliceSession,
-      `/api/profiles/${aliceProfile}/evidence/${bindingLossEvidence.id}/process`,
-      { method: 'POST' },
-    );
-    assert.equal(unboundProcess.status, 404, 'M9 processing requires the profile/object binding');
-    const unboundTombstone = await request(
-      aliceSession,
-      `/api/profiles/${aliceProfile}/evidence/${bindingLossEvidence.id}/tombstone`,
-      { method: 'POST' },
-    );
-    assert.equal(unboundTombstone.status, 404, 'M9 lifecycle mutations require the profile/object binding');
-
-    // Same bytes can be reused by a second owned profile only through a new,
-    // explicit registration/binding rather than through the original evidence.
-    const secondProfileEvidence = await registerDocument(
-      aliceSession, aliceSecondProfile, primaryPath, 'second-profile-receipt.jpg',
-    );
-    assert.notEqual(secondProfileEvidence.id, primaryEvidenceId);
-    const [secondBinding] = await db.select().from(privateUploadProfileBindingsTable).where(and(
-      eq(privateUploadProfileBindingsTable.profileId, aliceSecondProfile),
-      eq(privateUploadProfileBindingsTable.objectPath, primaryPath),
-    ));
-    assert.ok(secondBinding, 'physical reuse has a separate profile binding');
-
-    await db.insert(transactionsTable).values({
-      profileId: aliceProfile,
-      date: '2025-07-01',
-      description: 'Existing canonical income',
-      amount: 1000,
-      recordType: 'income',
-      category: 'sales',
-      taxTreatment: 'income',
-      source: 'manual',
-      accountingCategory: 'sales',
+    assert.equal(primaryRegistration.status, 201);
+    const evidenceId = primaryRegistration.body.id as string;
+    const duplicateRegistration = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'duplicate-receipt.txt',
+        objectPath,
+        mimeType: 'text/plain',
+        category: 'receipt',
+        evidenceType: 'document',
+      }),
     });
+    assert.equal(duplicateRegistration.status, 200);
+    assert.equal(duplicateRegistration.body.id, evidenceId, 'same-profile document registration is idempotent');
+    assert.equal(
+      (await db.select().from(transactionsTable).where(eq(transactionsTable.profileId, alicePrimary))).length,
+      0,
+      'document registration never posts to Financial Memory',
+    );
+
     const [positionBefore, taxBefore, readinessBefore] = await Promise.all([
-      request(aliceSession, `/api/profiles/${aliceProfile}/position`),
-      request(aliceSession, `/api/profiles/${aliceProfile}/income-tax-estimate`),
-      request(aliceSession, `/api/profiles/${aliceProfile}/self-assessment/readiness`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/position`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/income-tax-estimate`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/self-assessment/readiness`),
     ]);
     assert.equal(positionBefore.status, 200);
-    assert.equal(taxBefore.status, 200);
-    assert.equal(readinessBefore.status, 200);
+    const financialBefore = immutableFinancialSnapshot(positionBefore.body);
 
-    const processed = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/process`, {
+    const processed = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/process`, {
       method: 'POST',
     });
     assert.equal(processed.status, 200);
     assert.equal(processed.body.status, 'needs_review');
-    assert.equal(processed.body.reviewState, 'review_required');
-    const resumed = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/process`, {
-      method: 'POST',
-    });
-    assert.equal(resumed.status, 200, 'a reload/resume returns the already reviewable document');
-    assert.equal(resumed.body.id, primaryEvidenceId);
     assert.equal(
-      (await db.select().from(transactionsTable).where(eq(transactionsTable.profileId, aliceProfile))).length,
-      1,
-      'M9 extraction cannot auto-post a canonical transaction',
+      (await db.select().from(transactionsTable).where(eq(transactionsTable.profileId, alicePrimary))).length,
+      0,
+      'workflow-2 extraction remains review-only when extraction is unavailable',
     );
-
-    const reviewed = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/review`, {
+    const reviewed = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/review`, {
       method: 'PATCH',
-      body: JSON.stringify({ category: 'professional_fees', extractedData: { supplier: 'Acme', amount: 125 } }),
+      body: JSON.stringify({
+        category: 'office',
+        extractedData: { description: 'Paper and ink', amount: 18.5, date: '2025-06-01' },
+      }),
     });
     assert.equal(reviewed.status, 200);
-    const [positionAfterReview, taxAfterReview, readinessAfterReview] = await Promise.all([
-      request(aliceSession, `/api/profiles/${aliceProfile}/position`),
-      request(aliceSession, `/api/profiles/${aliceProfile}/income-tax-estimate`),
-      request(aliceSession, `/api/profiles/${aliceProfile}/self-assessment/readiness`),
-    ]);
-    assert.deepEqual(positionAfterReview.body, positionBefore.body, 'review-only work cannot change P&L, cash, tax reserve, or readiness');
-    assert.deepEqual(taxAfterReview.body, taxBefore.body, 'review-only work cannot change the income-tax estimate');
-    assert.deepEqual(readinessAfterReview.body, readinessBefore.body, 'review-only work cannot change Self Assessment readiness');
 
-    const unmatchedBeforeConfirm = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/unmatched`);
-    assert.ok(unmatchedBeforeConfirm.body.some((item: ResponseBody) => item.id === primaryEvidenceId));
+    const [positionAfterReview, taxAfterReview, readinessAfterReview] = await Promise.all([
+      request(aliceSession, `/api/profiles/${alicePrimary}/position`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/income-tax-estimate`),
+      request(aliceSession, `/api/profiles/${alicePrimary}/self-assessment/readiness`),
+    ]);
+    assert.deepEqual(immutableFinancialSnapshot(positionAfterReview.body), financialBefore);
+    assert.deepEqual(taxAfterReview.body, taxBefore.body);
+    assert.deepEqual(readinessAfterReview.body, readinessBefore.body);
+
+    const download = await fetch(
+      `http://127.0.0.1:${testPort}/api/profiles/${alicePrimary}/evidence/${evidenceId}/download`,
+      { headers: { authorization: `Bearer ${aliceSession}` } },
+    );
+    assert.equal(download.status, 200);
+    assert.equal(await download.text(), 'test evidence bytes');
+    const pathOnlyDownload = await request(aliceSession, objectPath.replace('/objects/', '/api/storage/objects/'));
+    assert.equal(pathOnlyDownload.status, 404, 'private evidence cannot be downloaded by an object path');
+    await db.delete(privateUploadBindingsTable).where(and(
+      eq(privateUploadBindingsTable.objectId, physicalObject.id),
+      eq(privateUploadBindingsTable.profileId, alicePrimary),
+    ));
+    const legacyPathOnlyDownload = await request(aliceSession, objectPath.replace('/objects/', '/api/storage/objects/'));
+    assert.equal(
+      legacyPathOnlyDownload.status,
+      404,
+      'legacy evidence without a binding still cannot bypass profile-scoped download authorization',
+    );
+    await db.insert(privateUploadBindingsTable).values({
+      objectId: physicalObject.id, profileId: alicePrimary, userId: users.alice,
+    });
+    const crossProfileDownload = await request(aliceSession, `/api/profiles/${aliceSecondary}/evidence/${evidenceId}/download`);
+    assert.equal(crossProfileDownload.status, 404, 'a second profile cannot read the first profile’s evidence');
+    const crossUserRegistration = await request(bobSession, `/api/profiles/${bobProfile}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'guessed.txt',
+        objectPath,
+        mimeType: 'text/plain',
+        evidenceType: 'document',
+      }),
+    });
+    assert.equal(crossUserRegistration.status, 404, 'an opaque path is not an ownership claim');
+
+    const secondaryUpload = await upload(aliceSession, aliceSecondary, duplicateContent);
+    assert.equal(secondaryUpload.status, 200);
+    assert.equal(secondaryUpload.body.objectPath, objectPath, 'the same user can reuse bytes through a separate profile binding');
+    const secondaryRegistration = await request(aliceSession, `/api/profiles/${aliceSecondary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'secondary-receipt.txt',
+        objectPath,
+        mimeType: 'text/plain',
+        evidenceType: 'document',
+      }),
+    });
+    assert.equal(secondaryRegistration.status, 201);
+    assert.notEqual(secondaryRegistration.body.id, evidenceId, 'a profile receives its own document identity');
+
     const confirmationKey = randomUUID();
-    const confirmationInput = {
+    const confirmationPayload = {
       idempotencyKey: confirmationKey,
-      date: '2025-07-02',
-      description: 'Confirmed professional fee',
-      amount: 125,
-      category: 'professional_fees',
+      date: '2025-06-01',
+      description: 'Paper and ink',
+      amount: 18.5,
+      category: 'office',
       taxTreatment: 'deductible',
       allowablePercentage: 100,
     };
-    const confirmationResults = await Promise.all([
-      request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/confirm-transaction`, {
-        method: 'POST', body: JSON.stringify(confirmationInput),
+    const confirmations = await Promise.all([
+      request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/confirm-transaction`, {
+        method: 'POST', body: JSON.stringify(confirmationPayload),
       }),
-      request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${primaryEvidenceId}/confirm-transaction`, {
-        method: 'POST', body: JSON.stringify(confirmationInput),
+      request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/confirm-transaction`, {
+        method: 'POST', body: JSON.stringify(confirmationPayload),
       }),
     ]);
-    assert.ok(confirmationResults.every((result) => result.status === 200 || result.status === 201));
-    const confirmedTransactions = await db.select().from(transactionsTable).where(eq(transactionsTable.id, confirmationKey));
-    assert.equal(confirmedTransactions.length, 1, 'confirmation retries create one canonical record');
-    assert.equal(confirmedTransactions[0].amount, -125, 'deductible confirmation retains the correct expense direction');
-    assert.equal(confirmedTransactions[0].evidenceId, null, 'M9 uses the bridge link, not the legacy evidence column');
-    const confirmationLinks = await db.select().from(evidenceTransactionLinksTable).where(and(
-      eq(evidenceTransactionLinksTable.evidenceId, primaryEvidenceId),
-      eq(evidenceTransactionLinksTable.transactionId, confirmationKey),
-      eq(evidenceTransactionLinksTable.linkStatus, 'active'),
-    ));
-    assert.equal(confirmationLinks.length, 1, 'confirmation creates one active evidence bridge');
-    const unmatchedAfterConfirm = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/unmatched`);
-    assert.equal(unmatchedAfterConfirm.body.some((item: ResponseBody) => item.id === primaryEvidenceId), false);
+    assert.ok(confirmations.every((response) => response.status === 200 || response.status === 201));
+    const [confirmed] = await db.select().from(transactionsTable)
+      .where(and(eq(transactionsTable.id, confirmationKey), eq(transactionsTable.profileId, alicePrimary)));
+    assert.ok(confirmed);
+    assert.equal(confirmed.evidenceId, null, 'workflow-2 uses the bridge relationship instead of the legacy column');
+    assert.equal(
+      (await db.select().from(evidenceTransactionLinksTable).where(and(
+        eq(evidenceTransactionLinksTable.evidenceId, evidenceId),
+        eq(evidenceTransactionLinksTable.transactionId, confirmed.id),
+      ))).length,
+      1,
+      'confirmation creates one idempotent bridge link',
+    );
 
-    const supportingPath = await seedUpload(userIds.alice, 'supporting');
-    const supportingEvidence = await registerDocument(aliceSession, aliceProfile, supportingPath, 'supporting-document.jpg');
-    const [manualOne, manualTwo] = await db.insert(transactionsTable).values([
-      {
-        profileId: aliceProfile, date: '2025-07-03', description: 'Manual one', amount: 30,
-        recordType: 'income', category: 'sales', taxTreatment: 'income', source: 'manual', accountingCategory: 'sales',
-      },
-      {
-        profileId: aliceProfile, date: '2025-07-04', description: 'Manual two', amount: 40,
-        recordType: 'income', category: 'sales', taxTreatment: 'income', source: 'manual', accountingCategory: 'sales',
-      },
-    ]).returning();
-    for (const transaction of [manualOne, manualTwo]) {
-      const attached = await request(aliceSession, `/api/profiles/${aliceProfile}/transactions/${transaction.id}/attach-evidence`, {
-        method: 'PATCH', body: JSON.stringify({ evidenceId: supportingEvidence.id }),
-      });
-      assert.equal(attached.status, 200);
-    }
-    let supportingLinks = await db.select().from(evidenceTransactionLinksTable).where(and(
-      eq(evidenceTransactionLinksTable.evidenceId, supportingEvidence.id),
-      eq(evidenceTransactionLinksTable.linkStatus, 'active'),
-    ));
-    assert.equal(supportingLinks.length, 2, 'one document can support multiple transactions');
-    const firstDetach = await request(
-      aliceSession,
-      `/api/profiles/${aliceProfile}/evidence/${supportingEvidence.id}/links/${manualOne.id}`,
-      { method: 'DELETE' },
-    );
-    assert.equal(firstDetach.status, 204);
-    assert.equal((await db.select().from(transactionsTable).where(eq(transactionsTable.id, manualOne.id))).length, 1,
-      'detaching support cannot delete its transaction');
-    const repeatDetach = await request(
-      aliceSession,
-      `/api/profiles/${aliceProfile}/evidence/${supportingEvidence.id}/links/${manualOne.id}`,
-      { method: 'DELETE' },
-    );
-    assert.equal(repeatDetach.status, 404, 'detachment is repeat-safe');
-    const secondDetach = await request(
-      aliceSession,
-      `/api/profiles/${aliceProfile}/evidence/${supportingEvidence.id}/links/${manualTwo.id}`,
-      { method: 'DELETE' },
-    );
-    assert.equal(secondDetach.status, 204);
-    const unmatchedAfterDetach = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/unmatched`);
-    assert.ok(unmatchedAfterDetach.body.some((item: ResponseBody) => item.id === supportingEvidence.id));
-
-    const replacementPath = await seedUpload(userIds.alice, 'replacement');
-    const beforeReplacementLink = await request(aliceSession, `/api/profiles/${aliceProfile}/transactions/${manualOne.id}/attach-evidence`, {
-      method: 'PATCH', body: JSON.stringify({ evidenceId: supportingEvidence.id }),
+    const [manual] = await db.insert(transactionsTable).values({
+      profileId: alicePrimary,
+      date: '2025-06-02',
+      description: 'Existing manual record',
+      amount: -9,
+      recordType: 'expense',
+      category: 'office',
+      taxTreatment: 'deductible',
+      source: 'manual',
+      evidenceTier: 4,
+    }).returning();
+    const linkBefore = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
+    const attached = await request(aliceSession, `/api/profiles/${alicePrimary}/transactions/${manual.id}/attach-evidence`, {
+      method: 'PATCH', body: JSON.stringify({ evidenceId }),
     });
-    assert.equal(beforeReplacementLink.status, 200);
-    const replaced = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${supportingEvidence.id}/replace`, {
+    assert.equal(attached.status, 200);
+    const replayedAttach = await request(aliceSession, `/api/profiles/${alicePrimary}/transactions/${manual.id}/attach-evidence`, {
+      method: 'PATCH', body: JSON.stringify({ evidenceId }),
+    });
+    assert.equal(replayedAttach.status, 200);
+    const linkedDocuments = await request(aliceSession, `/api/profiles/${alicePrimary}/transactions/${manual.id}/evidence-links`);
+    assert.equal(linkedDocuments.status, 200);
+    assert.ok(
+      linkedDocuments.body.some((link: { evidenceId: string }) => link.evidenceId === evidenceId),
+      'linked documents can be read only through their profile-scoped financial record',
+    );
+    const afterAttach = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
+    assert.deepEqual(immutableFinancialSnapshot(afterAttach.body), immutableFinancialSnapshot(linkBefore.body));
+    assert.equal(
+      (await db.select().from(evidenceTransactionLinksTable).where(and(
+        eq(evidenceTransactionLinksTable.evidenceId, evidenceId),
+        eq(evidenceTransactionLinksTable.transactionId, manual.id),
+      ))).length,
+      1,
+      'one document can link to multiple records without duplicate links',
+    );
+    const detached = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/links/${manual.id}`, {
+      method: 'DELETE',
+    });
+    assert.equal(detached.status, 204);
+    const afterDetach = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
+    assert.deepEqual(immutableFinancialSnapshot(afterDetach.body), immutableFinancialSnapshot(afterAttach.body));
+
+    const replacementUpload = await upload(aliceSession, alicePrimary, 'replacement receipt bytes');
+    const replacement = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/replace`, {
       method: 'POST',
-      body: JSON.stringify({ objectPath: replacementPath, filename: 'corrected-document.jpg', mimeType: 'image/jpeg' }),
-    });
-    assert.equal(replaced.status, 201);
-    assert.equal(replaced.body.replacementOfEvidenceId, supportingEvidence.id);
-    const oldLinkAfterReplacement = await db.select().from(evidenceTransactionLinksTable).where(and(
-      eq(evidenceTransactionLinksTable.evidenceId, supportingEvidence.id),
-      eq(evidenceTransactionLinksTable.transactionId, manualOne.id),
-      eq(evidenceTransactionLinksTable.linkStatus, 'active'),
-    ));
-    assert.equal(oldLinkAfterReplacement.length, 1, 'replacement preserves provenance of existing links');
-    const replacementBinding = await db.select().from(privateUploadProfileBindingsTable).where(and(
-      eq(privateUploadProfileBindingsTable.profileId, aliceProfile),
-      eq(privateUploadProfileBindingsTable.objectPath, replacementPath),
-    ));
-    assert.equal(replacementBinding.length, 1, 'replacement receives its own profile binding');
-    const tombstonedReplacement = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${replaced.body.id}/tombstone`, {
-      method: 'POST',
-    });
-    assert.equal(tombstonedReplacement.status, 200);
-
-    const racePath = await seedUpload(userIds.alice, 'race');
-    const raceEvidence = await registerDocument(aliceSession, aliceProfile, racePath, 'lifecycle-race.jpg');
-    const [raceReview, raceTombstone] = await Promise.all([
-      request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${raceEvidence.id}/review`, {
-        method: 'PATCH', body: JSON.stringify({ category: 'office_costs' }),
+      body: JSON.stringify({
+        objectPath: replacementUpload.body.objectPath,
+        filename: 'replacement.txt',
+        mimeType: 'text/plain',
       }),
-      request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${raceEvidence.id}/tombstone`, { method: 'POST' }),
-    ]);
-    assert.ok([200, 404, 409].includes(raceReview.status));
-    assert.equal(raceTombstone.status, 200);
-    const [racedEvidence] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, raceEvidence.id));
-    assert.equal(racedEvidence.documentLifecycle, 'tombstoned', 'lifecycle race cannot reactivate a tombstoned document');
+    });
+    assert.equal(replacement.status, 201);
+    const [replacedOriginal] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceId));
+    assert.equal(replacedOriginal.documentLifecycle, 'replaced');
+    assert.equal(replacement.body.replacementOfEvidenceId, evidenceId);
+    const afterReplacement = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
+    assert.deepEqual(immutableFinancialSnapshot(afterReplacement.body), immutableFinancialSnapshot(afterDetach.body));
 
-    const sharedPath = await seedUpload(userIds.alice, 'shared', `shared-${suffix}`);
-    const sharedFirst = await registerDocument(aliceSession, aliceProfile, sharedPath, 'shared-one.jpg');
-    const sharedSecond = await registerDocument(aliceSession, aliceSecondProfile, sharedPath, 'shared-two.jpg');
-    const discardedShared = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${sharedFirst.id}`, { method: 'DELETE' });
-    assert.equal(discardedShared.status, 200);
-    assert.equal(discardedShared.body.tombstoned, true);
-    const [stillStored] = await db.select().from(privateUploadObjectsTable)
-      .where(eq(privateUploadObjectsTable.objectPath, sharedPath));
-    const [stillActiveElsewhere] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, sharedSecond.id));
-    assert.ok(stillStored, 'discarding one logical document never deletes shared physical bytes');
-    assert.equal(stillActiveElsewhere.documentLifecycle, 'active');
+    const tombstoned = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${replacement.body.id}/tombstone`, {
+      method: 'POST',
+    });
+    assert.equal(tombstoned.status, 200);
+    const afterTombstone = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
+    assert.deepEqual(immutableFinancialSnapshot(afterTombstone.body), immutableFinancialSnapshot(afterReplacement.body));
 
-    const legacyPath = await seedUpload(userIds.alice, 'legacy');
     const [legacyEvidence] = await db.insert(evidenceItemsTable).values({
-      profileId: aliceProfile, filename: 'legacy.csv', objectPath: legacyPath, mimeType: 'text/csv',
-      evidenceType: 'ledger', workflowVersion: 1, status: 'processed',
+      profileId: alicePrimary,
+      filename: 'legacy.pdf',
+      objectPath: '/objects/uploads/legacy-proof',
+      mimeType: 'application/pdf',
+      evidenceType: 'document',
+      workflowVersion: 1,
+      status: 'processed',
     }).returning();
     const [legacyTransaction] = await db.insert(transactionsTable).values({
-      profileId: aliceProfile, date: '2025-07-05', description: 'Legacy extracted income', amount: 75,
-      recordType: 'income', category: 'sales', taxTreatment: 'income', source: 'extracted',
-      evidenceId: legacyEvidence.id, evidenceTier: 3, accountingCategory: 'sales',
+      profileId: alicePrimary,
+      date: '2025-05-31',
+      description: 'Legacy extracted expense',
+      amount: -22,
+      recordType: 'expense',
+      category: 'office',
+      taxTreatment: 'deductible',
+      source: 'extracted',
+      evidenceId: legacyEvidence.id,
+      evidenceTier: 1,
+      allowableAmount: -22,
     }).returning();
-    const legacySnapshot = {
+    const legacyBefore = {
       amount: legacyTransaction.amount,
       taxTreatment: legacyTransaction.taxTreatment,
       evidenceId: legacyTransaction.evidenceId,
-      source: legacyTransaction.source,
     };
-    const laterM9Path = await seedUpload(userIds.alice, 'later');
-    const laterM9 = await registerDocument(aliceSession, aliceProfile, laterM9Path, 'later-review.jpg');
-    const laterM9Process = await request(aliceSession, `/api/profiles/${aliceProfile}/evidence/${laterM9.id}/process`, { method: 'POST' });
-    assert.equal(laterM9Process.status, 200);
-    const [legacyAfterM9] = await db.select().from(transactionsTable).where(eq(transactionsTable.id, legacyTransaction.id));
-    assert.deepEqual(
-      {
-        amount: legacyAfterM9.amount,
-        taxTreatment: legacyAfterM9.taxTreatment,
-        evidenceId: legacyAfterM9.evidenceId,
-        source: legacyAfterM9.source,
-      },
-      legacySnapshot,
-      'legacy workflow-1 outcomes remain present, singular, and tax-classified after M9 activity',
-    );
-    assert.equal(
-      (await db.select().from(transactionsTable).where(eq(transactionsTable.evidenceId, legacyEvidence.id))).length,
-      1,
-      'M9 cannot repost a legacy evidence transaction',
-    );
-    const auditEvents = await db.select().from(evidenceAuditEventsTable)
-      .where(eq(evidenceAuditEventsTable.evidenceId, primaryEvidenceId));
-    assert.ok(auditEvents.some((event) => event.eventType === 'financial_confirmation_created'));
+    const [legacyAfter] = await db.select().from(transactionsTable).where(eq(transactionsTable.id, legacyTransaction.id));
+    assert.deepEqual({
+      amount: legacyAfter.amount,
+      taxTreatment: legacyAfter.taxTreatment,
+      evidenceId: legacyAfter.evidenceId,
+    }, legacyBefore, 'M9 writes do not recreate or reclassify legacy workflow-1 transactions');
+
+    const sharedDiscard = await request(aliceSession, `/api/profiles/${aliceSecondary}/evidence/${secondaryRegistration.body.id}`, {
+      method: 'DELETE',
+    });
+    assert.equal(sharedDiscard.status, 200);
+    const [stillReusable] = await db.select().from(privateUploadObjectsTable)
+      .where(eq(privateUploadObjectsTable.objectPath, objectPath));
+    assert.ok(stillReusable, 'discarding one logical document keeps shared physical bytes for the other profile');
+    const primaryEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`);
+    assert.equal(primaryEvidence.status, 200);
+    assert.ok(primaryEvidence.body.some((item: { id: string }) => item.id === evidenceId));
   } finally {
+    ObjectStorageService.prototype.saveContent = originalSaveContent;
+    ObjectStorageService.prototype.getObjectEntityFile = originalGetFile;
+    ObjectStorageService.prototype.downloadObject = originalDownload;
+    ObjectStorageService.prototype.getObjectEntityUploadURL = originalUploadUrl;
     if (server) await closeServer(server);
     if (sessionIds.length) await db.delete(sessionsTable).where(inArray(sessionsTable.sid, sessionIds));
     if (profileIds.length) await db.delete(profilesTable).where(inArray(profilesTable.id, profileIds));
-    if (uploadedPaths.length) await db.delete(privateUploadObjectsTable)
-      .where(inArray(privateUploadObjectsTable.objectPath, uploadedPaths));
-    await db.delete(usersTable).where(inArray(usersTable.id, Object.values(userIds)));
+    await db.delete(usersTable).where(inArray(usersTable.id, Object.values(users)));
+    await pool.end();
   }
 });

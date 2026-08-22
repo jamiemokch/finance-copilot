@@ -179,6 +179,13 @@ paths:
       tags: [Storage]
       operationId: requestUploadUrl
       summary: Request a presigned URL for file upload
+      parameters:
+        - name: X-Profile-Id
+          in: header
+          required: true
+          description: The selected, authenticated business profile that will own the logical upload binding.
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -211,8 +218,8 @@ paths:
       operationId: uploadPrivateObjectDirect
       summary: Upload private bytes through the API server
       description: >
-        Uploads a private object without browser-to-storage CORS. Supplying
-        X-Profile-Id binds the object to an authenticated business profile and
+        Uploads a private object without browser-to-storage CORS. X-Profile-Id
+        binds the object to an authenticated business profile and
         enables safe same-user byte reuse without granting cross-profile access.
       parameters:
         - $ref: '#/components/parameters/AuthorizationSessionHeader'
@@ -229,7 +236,7 @@ paths:
             type: string
         - name: X-Profile-Id
           in: header
-          required: false
+          required: true
           description: An authenticated profile ID for a logical private-object binding.
           schema:
             type: string
@@ -678,6 +685,34 @@ paths:
       responses:
         '204':
           description: Transaction deleted.
+
+  /profiles/{profileId}/transactions/{transactionId}/evidence-links:
+    get:
+      tags: [Evidence]
+      operationId: listTransactionEvidenceLinks
+      summary: List active supporting-document links for a Financial Memory record
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdParam'
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Active profile-scoped evidence links.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EvidenceLink'
+        '404':
+          description: Transaction or profile not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 
   /profiles/{profileId}/financial-accounts:
     get:
@@ -1838,6 +1873,24 @@ components:
           type: string
         category:
           type: string
+
+    EvidenceLink:
+      type: object
+      required: [id, evidenceId, linkedAt, filename, mimeType, documentLifecycle]
+      properties:
+        id:
+          type: string
+        evidenceId:
+          type: string
+        linkedAt:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        documentLifecycle:
+          type: string
+          enum: [active, replaced, tombstoned]
 
     Transaction:
       type: object

@@ -16,7 +16,6 @@ export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
 
-
 /**
  * @summary Get the currently authenticated user
  */
@@ -111,6 +110,10 @@ export const LogoutMobileSessionResponse = zod.object({
 /**
  * @summary Request a presigned URL for file upload
  */
+export const RequestUploadUrlHeader = zod.object({
+  "X-Profile-Id": zod.string().describe('The selected, authenticated business profile that will own the logical upload binding.')
+})
+
 
 
 
@@ -139,14 +142,14 @@ export const RequestUploadUrlResponse = zod.object({
 
 
 /**
- * Uploads a private object without browser-to-storage CORS. Supplying X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
+ * Uploads a private object without browser-to-storage CORS. X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
  * @summary Upload private bytes through the API server
  */
 export const UploadPrivateObjectDirectHeader = zod.object({
   "Authorization": zod.string().optional().describe('Opaque session token — `Bearer <sid>`.'),
   "X-Filename": zod.string().optional(),
   "X-Content-Type": zod.string().optional(),
-  "X-Profile-Id": zod.string().optional().describe('An authenticated profile ID for a logical private-object binding.')
+  "X-Profile-Id": zod.string().describe('An authenticated profile ID for a logical private-object binding.')
 })
 
 export const UploadPrivateObjectDirectResponse = zod.object({
@@ -856,6 +859,25 @@ export const DeleteTransactionParams = zod.object({
 })
 
 export const DeleteTransactionResponse = zod.void()
+
+
+/**
+ * @summary List active supporting-document links for a Financial Memory record
+ */
+export const ListTransactionEvidenceLinksParams = zod.object({
+  "profileId": zod.coerce.string(),
+  "transactionId": zod.coerce.string()
+})
+
+export const ListTransactionEvidenceLinksResponseItem = zod.object({
+  "id": zod.string(),
+  "evidenceId": zod.string(),
+  "linkedAt": zod.string(),
+  "filename": zod.string(),
+  "mimeType": zod.string(),
+  "documentLifecycle": zod.enum(['active', 'replaced', 'tombstoned'])
+})
+export const ListTransactionEvidenceLinksResponse = zod.array(ListTransactionEvidenceLinksResponseItem)
 
 
 /**
@@ -2012,5 +2034,3 @@ export const ResetDemoDataResponse = zod.object({
   "profileId": zod.string(),
   "message": zod.string().optional()
 })
-
-

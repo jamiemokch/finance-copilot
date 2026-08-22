@@ -16,6 +16,8 @@ interface UploadResponse {
 interface UseUploadOptions {
   /** Base path where object storage routes are mounted (default: "/api/storage") */
   basePath?: string;
+  /** Authenticated business profile that owns the logical private-upload binding. */
+  profileId: string;
   onSuccess?: (response: UploadResponse) => void;
   onError?: (error: Error) => void;
 }
@@ -31,6 +33,7 @@ interface UseUploadOptions {
  * ```tsx
  * function FileUploader() {
  *   const { uploadFile, isUploading, error } = useUpload({
+ *     profileId,
  *     onSuccess: (response) => {
  *       console.log("Uploaded to:", response.objectPath);
  *     },
@@ -53,8 +56,9 @@ interface UseUploadOptions {
  * }
  * ```
  */
-export function useUpload(options: UseUploadOptions = {}) {
+export function useUpload(options: UseUploadOptions) {
   const basePath = options.basePath ?? '/api/storage';
+  const profileId = options.profileId;
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [progress, setProgress] = useState(0);
@@ -65,6 +69,7 @@ export function useUpload(options: UseUploadOptions = {}) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Profile-Id': profileId,
         },
         body: JSON.stringify({
           name: file.name,
@@ -80,7 +85,7 @@ export function useUpload(options: UseUploadOptions = {}) {
 
       return response.json();
     },
-    [],
+    [basePath, profileId],
   );
 
   const uploadToPresignedUrl = useCallback(
@@ -140,6 +145,7 @@ export function useUpload(options: UseUploadOptions = {}) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Profile-Id': profileId,
         },
         body: JSON.stringify({
           name: file.name,
@@ -159,7 +165,7 @@ export function useUpload(options: UseUploadOptions = {}) {
         headers: { 'Content-Type': file.type || 'application/octet-stream' },
       };
     },
-    [],
+    [basePath, profileId],
   );
 
   return {

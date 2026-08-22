@@ -9,6 +9,8 @@ import {
   type APIEvidenceCoverage,
 } from './api';
 
+const ACTIVE_PROFILE_STORAGE_KEY = 'sme-finance-copilot.active-profile-id';
+
 // ─── Core entity types ────────────────────────────────────────────────────────
 
 export type ProfileType = 'individual' | 'sole_trader' | 'landlord' | 'company';
@@ -718,6 +720,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setDecisionMemory([]);
     setBusinessIdeas([]);
     setSAChecklist([]);
+    try {
+      window.sessionStorage.setItem(ACTIVE_PROFILE_STORAGE_KEY, profileId);
+    } catch {
+      // Profile selection can still work when browser storage is unavailable.
+    }
     setActiveProfileId(profileId);
   }, []);
 
@@ -798,8 +805,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         const mapped = profs.map(mapProfile);
         setProfiles(mapped);
-        const firstId = profs[0].id;
-        selectActiveProfile(firstId);
+        let selectedId = profs[0].id;
+        try {
+          const rememberedId = window.sessionStorage.getItem(ACTIVE_PROFILE_STORAGE_KEY);
+          if (rememberedId && mapped.some(profile => profile.id === rememberedId)) {
+            selectedId = rememberedId;
+          }
+        } catch {
+          // Default to the first owned profile when browser storage is unavailable.
+        }
+        selectActiveProfile(selectedId);
         setProfilesLoaded(true);
       } catch (err) {
         console.error('[store] init failed', err);

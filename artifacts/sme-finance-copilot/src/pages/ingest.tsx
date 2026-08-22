@@ -101,7 +101,7 @@ function DocumentFlow({ profileId, refresh, onBack, resumeEvidence }: { profileI
     setStatus('working'); setMessage('Reading your document and checking the transaction…');
     try {
       if (!registeredEvidenceId.current) {
-        const { objectPath } = await evidenceApi.uploadDirect(file, profileId);
+        const { objectPath } = await evidenceApi.uploadDirect(profileId, file);
         const item = await evidenceApi.register(profileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' });
         registeredEvidenceId.current = item.id;
       }
@@ -189,7 +189,7 @@ function BankImportFlow({ profileId, refresh, onBack }: { profileId: string; ref
     try {
       if (!file.name.toLowerCase().endsWith('.csv')) throw new Error('Bank imports accept CSV files only.');
       const selectedAccountId = await accountForUpload();
-      const { objectPath } = await evidenceApi.uploadDirect(file, profileId);
+      const { objectPath } = await evidenceApi.uploadDirect(profileId, file);
       const result = await bankImportsApi.register(profileId, { filename: file.name, objectPath, accountId: selectedAccountId });
       setBatch(result.batch); setRows(result.rows);
       setHeaders(result.proposal.headers); setExamples(result.proposal.examples);
@@ -334,7 +334,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     try {
       let reusableEvidenceId = evidenceId;
       if (!reusableEvidenceId) {
-        const { objectPath } = await evidenceApi.uploadDirect(file);
+        const { objectPath } = await evidenceApi.uploadDirect(profileId, file);
         const evidence = await evidenceApi.register(profileId, { filename: file.name, objectPath, mimeType: file.type || 'text/csv', category: kind === 'bank' ? 'bank_statement' : 'other', evidenceType: kind === 'bank' ? 'bank_csv' : 'ledger' });
         reusableEvidenceId = evidence.id;
       }
@@ -444,7 +444,7 @@ export default function AddRecords() {
   const attachReceipt = async (file: File) => {
     if (!attachTo || attachInFlight.current) return;
     attachInFlight.current = true; setAttaching(true); setAttachError('');
-    try { const { objectPath } = await evidenceApi.uploadDirect(file); const evidence = await evidenceApi.register(activeProfileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' }); await transactionsApi.attachEvidence(activeProfileId, attachTo, evidence.id); await refreshData(); setAttachTo(null); }
+    try { const { objectPath } = await evidenceApi.uploadDirect(activeProfileId, file); const evidence = await evidenceApi.register(activeProfileId, { filename: file.name, objectPath, mimeType: file.type || 'application/octet-stream', category: 'receipt', evidenceType: 'document' }); await transactionsApi.attachEvidence(activeProfileId, attachTo, evidence.id); await refreshData(); setAttachTo(null); }
     catch { setAttachError('We could not attach that receipt. Please try again.'); }
     finally { attachInFlight.current = false; setAttaching(false); }
   };

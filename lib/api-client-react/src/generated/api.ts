@@ -42,6 +42,7 @@ import type {
   ErrorEnvelope,
   EvidenceInput,
   EvidenceItem,
+  EvidenceLink,
   FinancialAccount,
   FinancialAccountInput,
   FinancialPosition,
@@ -730,7 +731,7 @@ export const getUploadPrivateObjectDirectUrl = () => {
 }
 
 /**
- * Uploads a private object without browser-to-storage CORS. Supplying X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
+ * Uploads a private object without browser-to-storage CORS. X-Profile-Id binds the object to an authenticated business profile and enables safe same-user byte reuse without granting cross-profile access.
  * @summary Upload private bytes through the API server
  */
 export const uploadPrivateObjectDirect = async (uploadPrivateObjectDirectBody: Blob, options?: Parameters<typeof customFetch>[1]): Promise<UploadPrivateObjectDirect200> => {
@@ -2367,6 +2368,88 @@ export const useDeleteTransaction = <TError = ErrorType<unknown>,
       return useMutation(getDeleteTransactionMutationOptions(options));
     }
 
+export const getListTransactionEvidenceLinksUrl = (profileId: string,
+    transactionId: string,) => {
+
+
+
+
+  return `/api/profiles/${profileId}/transactions/${transactionId}/evidence-links`
+}
+
+/**
+ * @summary List active supporting-document links for a Financial Memory record
+ */
+export const listTransactionEvidenceLinks = async (profileId: string,
+    transactionId: string, options?: Parameters<typeof customFetch>[1]): Promise<EvidenceLink[]> => {
+
+  return customFetch<EvidenceLink[]>(getListTransactionEvidenceLinksUrl(profileId,transactionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListTransactionEvidenceLinksQueryKey = (profileId: string,
+    transactionId: string,) => {
+    return [
+    `/api/profiles/${profileId}/transactions/${transactionId}/evidence-links`
+    ] as const;
+    }
+
+
+export const getListTransactionEvidenceLinksQueryOptions = <TData = Awaited<ReturnType<typeof listTransactionEvidenceLinks>>, TError = ErrorType<ErrorEnvelope>>(profileId: string,
+    transactionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTransactionEvidenceLinks>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListTransactionEvidenceLinksQueryKey(profileId,transactionId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listTransactionEvidenceLinks>>> = ({ signal }) => listTransactionEvidenceLinks(profileId,transactionId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: profileId !== null && profileId !== undefined && transactionId !== null && transactionId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTransactionEvidenceLinks>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListTransactionEvidenceLinksQueryResult = NonNullable<Awaited<ReturnType<typeof listTransactionEvidenceLinks>>>
+export type ListTransactionEvidenceLinksQueryError = ErrorType<ErrorEnvelope>
+
+
+/**
+ * @summary List active supporting-document links for a Financial Memory record
+ */
+
+export function useListTransactionEvidenceLinks<TData = Awaited<ReturnType<typeof listTransactionEvidenceLinks>>, TError = ErrorType<ErrorEnvelope>>(
+ profileId: string,
+    transactionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTransactionEvidenceLinks>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListTransactionEvidenceLinksQueryOptions(profileId,transactionId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getListFinancialAccountsUrl = (profileId: string,) => {
 
 
@@ -3785,4 +3868,3 @@ export const useResetDemoData = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getResetDemoDataMutationOptions(options));
     }
-

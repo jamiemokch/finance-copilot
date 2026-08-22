@@ -10,17 +10,16 @@ description: Architecture decisions for the full-stack SME Finance Copilot — w
 - Auth: Replit OIDC (session cookie, requireAuth middleware)
 
 ## Data flow (live since the backend rewrite)
-1. User uploads evidence → POST /storage/uploads/direct (server-side GCS save) with a profile-scoped logical binding
-2. POST /evidence/:id/process → AI extraction (GPT-4o-mini) with ExtractionContext
-3. M9 documents stop at review-required; only explicit confirmation creates a canonical transaction
-4. Legacy workflow-1 evidence retains the compatibility path where high-confidence extraction may auto-post; this is not available to M9 documents
-5. User resolves legacy Inbox items → PATCH /inbox/:id/resolve → write ledger transaction
-6. GET /position recomputes everything from transactions on demand (no stored P&L)
+1. User uploads evidence through a profile-bound logical binding → POST /storage/uploads/direct (server-side GCS save); same-user physical bytes may be reused without sharing profile access.
+2. Workflow-2 documents use POST /evidence/:id/process only to create review fields; it never writes Financial Memory.
+3. User explicitly confirms reviewed document details → idempotent transaction plus an evidence-to-transaction bridge link.
+4. Legacy workflow-1 evidence retains its existing high-confidence auto-post/Inbox behavior for compatibility only.
+5. GET /position recomputes everything from transactions on demand (no stored P&L)
 
 ## Key backend decisions
 - Finance arithmetic is server-side only (finance.ts); AI never calculates
 - Non-deductible items ARE recorded in ledger (taxTreatment: non_deductible) for transparency
-- High-confidence auto-posting is legacy workflow-1 compatibility behavior only; M9 documents require explicit confirmation
+- High-confidence auto-posting is legacy workflow-1 compatibility only; all new workflow-2 document financial outcomes require explicit confirmation
 - Mixed-use: allowableAmount = amount × allowablePercentage/100 (stored alongside full amount)
 - taxImpact on inbox resolution = computeTaxImpactDiff(profitBefore, profitAfter) — no flat %
 - Business Ideas = forecast layer only (decision_memory table, never touches transactions)
