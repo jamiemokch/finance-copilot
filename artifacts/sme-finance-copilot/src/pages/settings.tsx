@@ -34,7 +34,7 @@ function currentUkTaxYearDates() {
 export default function Settings() {
   const {
     profiles, activeProfileId, setActiveProfileId,
-    updateProfile, resetDemoData, loadSampleData,
+    updateProfile, resetDemoData, resetFreshUser, loadSampleData,
   } = useStore();
 
   const activeProfile = profiles.find(p => p.id === activeProfileId);
@@ -70,6 +70,7 @@ export default function Settings() {
   const [saveOk, setSaveOk] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState<'sample' | 'reset' | null>(null);
+  const [freshResetLoading, setFreshResetLoading] = useState(false);
 
   useEffect(() => {
     const coverage = currentUkTaxYearDates();
@@ -171,6 +172,20 @@ export default function Settings() {
       console.error('Reset failed:', err);
     } finally {
       setDemoLoading(null);
+    }
+  };
+
+  const handleFreshUserReset = async () => {
+    const confirmed = confirm(
+      'Development/UAT fresh-user reset: this will permanently delete every Finance Copilot profile, financial record, upload, evidence item, review, task, reconciliation record, and Self Assessment setup belonging to this signed-in user. It will not affect other users or shared data, and it will not recreate demo data. Your account will stay signed in and the next screen will be first-time onboarding. Continue?',
+    );
+    if (!confirmed) return;
+    setFreshResetLoading(true);
+    try {
+      await resetFreshUser();
+    } catch (err) {
+      console.error('UAT fresh-user reset failed:', err);
+      setFreshResetLoading(false);
     }
   };
 
@@ -506,6 +521,33 @@ export default function Settings() {
           </div>
         </Card>
       </section>
+
+      {import.meta.env.DEV && (
+        <section className="border-2 border-amber-300 rounded-xl p-5 bg-amber-50/60">
+          <h2 className="text-xl font-serif mb-1">Development / UAT only</h2>
+          <p className="text-muted-foreground text-sm mb-4">
+            Start this signed-in user again from the real first-time onboarding screen. This removes this user&apos;s Finance Copilot data only and does not load sample data.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <div className="flex-1">
+              <h3 className="font-medium text-sm text-amber-950">Fresh-user reset</h3>
+              <p className="text-xs text-amber-900/80 mt-0.5">
+                Deletes all profiles and related test data for this account, then returns to onboarding.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              className="cursor-pointer gap-2 shrink-0 border-amber-500 text-amber-950 hover:bg-amber-100"
+              onClick={handleFreshUserReset}
+              disabled={freshResetLoading}
+            >
+              {freshResetLoading
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Resetting…</>
+                : <><RotateCcw className="w-4 h-4" /> Fresh-user reset</>}
+            </Button>
+          </div>
+        </section>
+      )}
 
       {/* ── Alpha notice ── */}
       <div className="text-xs text-muted-foreground bg-secondary/30 border border-border rounded-lg p-4 flex items-start gap-2">

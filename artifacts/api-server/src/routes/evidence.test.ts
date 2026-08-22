@@ -146,24 +146,12 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     server = app.listen(0);
     await new Promise<void>((resolve) => server!.once('listening', resolve));
     testPort = (server.address() as AddressInfo).port;
-    const presigned = await request(aliceSession, '/api/storage/uploads/request-url', {
+    const retiredPresigned = await request(aliceSession, '/api/storage/uploads/request-url', {
       method: 'POST',
       headers: { 'x-profile-id': alicePrimary },
       body: JSON.stringify({ name: 'presigned.txt', size: 12, contentType: 'text/plain' }),
     });
-    assert.equal(presigned.status, 200, 'profile-scoped presigned upload request succeeds');
-    const [presignedObject] = await db.select().from(privateUploadObjectsTable)
-      .where(eq(privateUploadObjectsTable.objectPath, presigned.body.objectPath));
-    assert.ok(presignedObject);
-    assert.equal((await db.select().from(privateUploadBindingsTable).where(and(
-      eq(privateUploadBindingsTable.objectId, presignedObject.id),
-      eq(privateUploadBindingsTable.profileId, alicePrimary),
-    ))).length, 1, 'presigned upload creates its profile binding before bytes are sent');
-    const crossProfilePresignedRegistration = await request(aliceSession, `/api/profiles/${aliceSecondary}/evidence`, {
-      method: 'POST',
-      body: JSON.stringify({ filename: 'presigned.txt', objectPath: presigned.body.objectPath, mimeType: 'text/plain' }),
-    });
-    assert.equal(crossProfilePresignedRegistration.status, 404, 'presigned object cannot register under a second profile');
+    assert.equal(retiredPresigned.status, 410, 'the retired direct-to-storage endpoint cannot mint a reset-escaping write URL');
 
     const duplicateContent = 'same receipt bytes';
     const [firstUpload, retryUpload] = await Promise.all([

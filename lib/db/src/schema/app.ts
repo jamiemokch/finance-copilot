@@ -89,6 +89,27 @@ export const privateUploadObjectsTable = pgTable('private_upload_objects', {
 ]);
 
 /**
+ * Durable cleanup intent for private objects after a full user-data reset. It
+ * intentionally does not reference privateUploadObjects because its row is
+ * removed in the same transaction as the reset. The worker retries until the
+ * physical blob is gone, preventing a database rollback from deleting bytes
+ * that live Finance Copilot records still reference.
+ */
+export const privateUploadDeletionJobsTable = pgTable('private_upload_deletion_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => usersTable.id, { onDelete: 'cascade' }),
+  objectPath: text('object_path').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('private_upload_deletion_jobs_user_object_unique').on(table.userId, table.objectPath),
+  index('private_upload_deletion_jobs_user_idx').on(table.userId, table.createdAt),
+]);
+
+/**
  * A physical upload may be reused without copying bytes, but each business
  * profile gets an explicit logical authorization binding. The userId is
  * repeated deliberately so a profile binding can never outlive or drift from

@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   profilesApi, positionApi, inboxApi, evidenceApi, transactionsApi,
-  decisionsApi, ideasApi, saChecklistApi, demoApi, getAuthUser, reconciliationApi,
+  decisionsApi, ideasApi, saChecklistApi, demoApi, uatApi, getAuthUser, reconciliationApi,
   type APITransaction, type APIFinancialPosition, type APIInboxItem,
   type APIEvidenceItem, type APIDecision, type APIBusinessIdea,
   type APISAChecklistItem, type AuthUser,
@@ -425,6 +425,7 @@ export interface AppState {
   setCopilotTrigger: (msg: string | null) => void;
 
   resetDemoData: () => Promise<void>;
+  resetFreshUser: () => Promise<void>;
 }
 
 // ─── Mappers — API format → frontend format ───────────────────────────────────
@@ -1153,6 +1154,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     await fetchAll(profileId);
   }, [fetchAll, selectActiveProfile]);
 
+  const resetFreshUser = useCallback(async (): Promise<void> => {
+    const result = await uatApi.freshUserReset();
+    if (result.cleanupPending) {
+      window.alert("Your profile data has been reset. Private upload cleanup is queued for retry; you can begin onboarding now.");
+    }
+    setProfiles([]);
+    selectActiveProfile('');
+    setProfilesLoaded(true);
+    setProfileLoadError(false);
+    try {
+      window.sessionStorage.removeItem(ACTIVE_PROFILE_STORAGE_KEY);
+    } catch {
+      // The authenticated reset has already completed; onboarding can still
+      // start if browser storage is unavailable.
+    }
+    const base = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL?.replace(/\/+$/, '') ?? '';
+    window.location.assign(`${base}/onboarding`);
+  }, [selectActiveProfile]);
+
   const updateSharedContext = useCallback((data: Partial<SharedContext>) => {
     setSharedContext(prev => ({ ...prev, ...data }));
   }, []);
@@ -1237,6 +1257,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setCopilotTrigger,
 
     resetDemoData,
+    resetFreshUser,
   };
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

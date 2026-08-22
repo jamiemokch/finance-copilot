@@ -1,9 +1,5 @@
 import { createHash } from 'crypto';
 import { Readable } from 'stream';
-import {
-  RequestUploadUrlBody,
-  RequestUploadUrlResponse,
-} from '@workspace/api-zod';
 import express, { Router, type IRouter, type Request, type Response } from 'express';
 import { and, eq } from 'drizzle-orm';
 import {
@@ -13,6 +9,7 @@ import {
   privateUploadBindingsTable,
   privateUploadObjectsTable,
   profilesTable,
+  usersTable,
 } from '@workspace/db';
 import {
   ObjectNotFoundError,
@@ -60,84 +57,66 @@ router.post(
       res.status(400).json({ error: 'A profile binding is required' });
       return;
     }
-    const [profile] = await db.select({ id: profilesTable.id }).from(profilesTable)
-      .where(and(eq(profilesTable.id, profileId), eq(profilesTable.userId, req.user.id)))
-      .limit(1);
-    if (!profile) {
-      res.status(404).json({ error: 'Profile not found' });
-      return;
-    }
     const contentType =
       (req.headers['x-content-type'] as string) || 'application/octet-stream';
     try {
       const contentHash = createHash('sha256').update(req.body).digest('hex');
-      // Hash matching is scoped to the authenticated uploader. Reusing the
-      // private object prevents file dedupe from becoming a cross-user oracle.
-      const [reusable] = await db.select({
-        id: privateUploadObjectsTable.id,
-        objectPath: privateUploadObjectsTable.objectPath,
-      })
-        .from(privateUploadObjectsTable)
-        .where(and(
-          eq(privateUploadObjectsTable.userId, req.user.id),
-          eq(privateUploadObjectsTable.contentHash, contentHash),
-        ));
-      if (reusable) {
-        await db.insert(privateUploadBindingsTable).values({
-          profileId: profile.id,
-          objectId: reusable.id,
-          userId: req.user.id,
-        }).onConflictDoNothing();
-        res.json({ objectPath: reusable.objectPath });
+      const upload = await db.transaction(async (tx) => {
+        // A user-row lock serializes private-upload ownership writes with the
+        // UAT fresh-user reset. A reset either captures this upload for durable
+        // cleanup or finishes first and makes the profile unavailable here.
+        await tx.select({ id: usersTable.id }).from(usersTable)
+          .where(eq(usersTable.id, req.user.id))
+          .for('update');
+        const [profile] = await tx.select({ id: profilesTable.id }).from(profilesTable)
+          .where(and(eq(profilesTable.id, profileId), eq(profilesTable.userId, req.user.id)))
+          .limit(1);
+        if (!profile) return null;
+
+        // Hash matching is scoped to the authenticated uploader. Reusing the
+        // private object prevents file dedupe from becoming a cross-user oracle.
+        const [reusable] = await tx.select({
+          id: privateUploadObjectsTable.id,
+          objectPath: privateUploadObjectsTable.objectPath,
+        })
+          .from(privateUploadObjectsTable)
+          .where(and(
+            eq(privateUploadObjectsTable.userId, req.user.id),
+            eq(privateUploadObjectsTable.contentHash, contentHash),
+          ));
+        if (reusable) {
+          await tx.insert(privateUploadBindingsTable).values({
+            profileId: profile.id,
+            objectId: reusable.id,
+            userId: req.user.id,
+          }).onConflictDoNothing();
+          return reusable.objectPath;
+        }
+
+        const objectPath = await objectStorageService.saveContent(req.body, contentType);
+        try {
+          const [createdUpload] = await tx.insert(privateUploadObjectsTable).values({
+            objectPath,
+            userId: req.user.id,
+            contentHash,
+            objectSize: req.body.length,
+          }).returning({ id: privateUploadObjectsTable.id });
+          await tx.insert(privateUploadBindingsTable).values({
+            profileId: profile.id,
+            objectId: createdUpload.id,
+            userId: req.user.id,
+          }).onConflictDoNothing();
+          return objectPath;
+        } catch (err) {
+          await objectStorageService.deleteObjectEntity(objectPath).catch(() => undefined);
+          throw err;
+        }
+      });
+      if (!upload) {
+        res.status(404).json({ error: 'Profile not found' });
         return;
       }
-      const objectPath = await objectStorageService.saveContent(
-        req.body,
-        contentType,
-      );
-      try {
-        const [createdUpload] = await db.insert(privateUploadObjectsTable).values({
-          objectPath,
-          userId: req.user.id,
-          contentHash,
-          objectSize: req.body.length,
-        }).returning({ id: privateUploadObjectsTable.id });
-        await db.insert(privateUploadBindingsTable).values({
-          profileId: profile.id,
-          objectId: createdUpload.id,
-          userId: req.user.id,
-        }).onConflictDoNothing();
-      } catch (err) {
-        await objectStorageService.getObjectEntityFile(objectPath)
-          .then((file) => file.delete())
-          .catch(() => undefined);
-        const dbError = err as { cause?: { code?: string } };
-        if (dbError.cause?.code === '23505') {
-          const [winner] = await db.select({ objectPath: privateUploadObjectsTable.objectPath })
-            .from(privateUploadObjectsTable)
-            .where(and(
-              eq(privateUploadObjectsTable.userId, req.user.id),
-              eq(privateUploadObjectsTable.contentHash, contentHash),
-            ));
-          if (winner) {
-            const [winnerUpload] = await db.select({ id: privateUploadObjectsTable.id })
-              .from(privateUploadObjectsTable)
-              .where(eq(privateUploadObjectsTable.objectPath, winner.objectPath))
-              .limit(1);
-            if (winnerUpload) {
-              await db.insert(privateUploadBindingsTable).values({
-                profileId: profile.id,
-                objectId: winnerUpload.id,
-                userId: req.user.id,
-              }).onConflictDoNothing();
-            }
-            res.json({ objectPath: winner.objectPath });
-            return;
-          }
-        }
-        throw err;
-      }
-      res.json({ objectPath });
+      res.json({ objectPath: upload });
     } catch (err) {
       req.log.error({ err }, 'Direct upload failed');
       res.status(500).json({ error: 'Upload failed' });
@@ -148,66 +127,20 @@ router.post(
 /**
  * POST /storage/uploads/request-url
  *
- * Request a presigned URL for file upload.
- * The client sends JSON metadata (name, size, contentType) — NOT the file.
- * Then uploads the file directly to the returned presigned URL.
- * Requires auth middleware so public callers cannot mint write-capable URLs.
+ * Retired: a directly writeable object-storage URL cannot be revoked when a
+ * fresh-user reset completes. Active app uploads use the authenticated direct
+ * endpoint above, which serializes ownership creation with that reset.
  */
 router.post(
   '/storage/uploads/request-url',
   async (req: Request, res: Response) => {
     if (!hasAuthenticatedSession(req)) {
       res.status(401).json({ error: 'Unauthorized' });
-
       return;
     }
-
-    const parsed = RequestUploadUrlBody.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Missing or invalid required fields' });
-      return;
-    }
-    const profileId = req.headers['x-profile-id'];
-    if (typeof profileId !== 'string' || !profileId) {
-      res.status(400).json({ error: 'A profile binding is required' });
-      return;
-    }
-    const [profile] = await db.select({ id: profilesTable.id }).from(profilesTable)
-      .where(and(eq(profilesTable.id, profileId), eq(profilesTable.userId, req.user.id)))
-      .limit(1);
-    if (!profile) {
-      res.status(404).json({ error: 'Profile not found' });
-      return;
-    }
-
-    try {
-      const { name, size, contentType } = parsed.data;
-
-      const uploadURL = await objectStorageService.getObjectEntityUploadURL();
-      const objectPath =
-        objectStorageService.normalizeObjectEntityPath(uploadURL);
-      const [upload] = await db.insert(privateUploadObjectsTable).values({
-        objectPath,
-        userId: req.user.id,
-        objectSize: size,
-      }).returning({ id: privateUploadObjectsTable.id });
-      await db.insert(privateUploadBindingsTable).values({
-        profileId: profile.id,
-        objectId: upload.id,
-        userId: req.user.id,
-      }).onConflictDoNothing();
-
-      res.json(
-        RequestUploadUrlResponse.parse({
-          uploadURL,
-          objectPath,
-          metadata: { name, size, contentType },
-        }),
-      );
-    } catch (error) {
-      req.log.error({ err: error }, 'Error generating upload URL');
-      res.status(500).json({ error: 'Failed to generate upload URL' });
-    }
+    res.status(410).json({
+      error: 'Direct-to-storage uploads are retired. Upload through /storage/uploads/direct instead.',
+    });
   },
 );
 

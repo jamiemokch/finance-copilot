@@ -14,6 +14,7 @@ import incomeTaxEstimateRouter from "./income-tax-estimate.js";
 import selfAssessmentRouter from "./self-assessment.js";
 import bankImportsRouter from "./bank-imports.js";
 import reconciliationRouter from "./reconciliation.js";
+import uatRouter from "./uat.js";
 
 const router: IRouter = Router();
 
@@ -32,5 +33,6 @@ router.use(inboxRouter);
 router.use(decisionsRouter);
 router.use(copilotRouter);
 router.use(demoRouter);
+router.use(uatRouter);
 
 export default router;

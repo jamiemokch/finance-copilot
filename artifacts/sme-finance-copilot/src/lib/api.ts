@@ -898,3 +898,12 @@ export const demoApi = {
   seedTransactions: (profileId: string) =>
     apiFetch<{ success: boolean; message: string }>(`/demo/seed-transactions/${profileId}`, { method: "POST" }),
 };
+
+// ── Development / UAT ─────────────────────────────────────────────────────────
+
+export const uatApi = {
+  freshUserReset: () =>
+    apiFetch<{ success: boolean; message: string; cleanupPending: boolean }>("/uat/fresh-user-reset", {
+      method: "POST",
+    }),
+};
