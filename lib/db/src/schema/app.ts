@@ -210,6 +210,46 @@ export const insertEvidenceItemSchema = createInsertSchema(evidenceItemsTable).o
 export type EvidenceItem = typeof evidenceItemsTable.$inferSelect;
 export type InsertEvidenceItem = z.infer<typeof insertEvidenceItemSchema>;
 
+// Every inspected spreadsheet source row gets one durable outcome after
+// confirmation. This is deliberately separate from transactions: skipped,
+// invalid, duplicate, and unselected rows are part of the audit population but
+// must never become financial records.
+export const spreadsheetRowOutcomesTable = pgTable('spreadsheet_row_outcomes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  sheetId: text('sheet_id').notNull(),
+  worksheet: text('worksheet').notNull(),
+  sourceRowIndex: integer('source_row_index').notNull(),
+  sourceRowNumber: integer('source_row_number').notNull(),
+  physicalLineStart: integer('physical_line_start'),
+  physicalLineEnd: integer('physical_line_end'),
+  primaryDisposition: text('primary_disposition').notNull(),
+  secondaryFindings: jsonb('secondary_findings').notNull().default('[]'),
+  reason: text('reason').notNull(),
+  rawValueReference: jsonb('raw_value_reference').notNull(),
+  normalizedValueReference: jsonb('normalized_value_reference').notNull(),
+  duplicateFingerprint: text('duplicate_fingerprint'),
+  decisionSource: text('decision_source').notNull().default('deterministic'),
+  mappingRevision: text('mapping_revision').notNull(),
+  taxYear: text('tax_year'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('spreadsheet_row_outcomes_evidence_source_unique').on(table.evidenceId, table.sourceRowIndex),
+  index('spreadsheet_row_outcomes_profile_created_idx').on(table.profileId, table.createdAt),
+]);
+
+export const insertSpreadsheetRowOutcomeSchema = createInsertSchema(spreadsheetRowOutcomesTable).omit({
+  id: true,
+  createdAt: true,
+});
+export type SpreadsheetRowOutcome = typeof spreadsheetRowOutcomesTable.$inferSelect;
+export type InsertSpreadsheetRowOutcome = z.infer<typeof insertSpreadsheetRowOutcomeSchema>;
+
 // ─── Financial Accounts & Bank Import Audit ────────────────────────────────────
 
 /**

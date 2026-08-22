@@ -61,6 +61,7 @@ export default function Settings() {
   const defaultCoverage = currentUkTaxYearDates();
   const [coverageStartDate, setCoverageStartDate] = useState(activeProfile?.coverageStartDate ?? defaultCoverage.start);
   const [coverageEndDate, setCoverageEndDate] = useState(activeProfile?.coverageEndDate ?? defaultCoverage.end);
+  const [businessStartDate, setBusinessStartDate] = useState(activeProfile?.businessStartDate ?? '');
   const [otherTaxableIncome, setOtherTaxableIncome] = useState(
     activeProfile?.otherTaxableIncome == null || activeProfile.otherTaxableIncomeTaxYear !== taxYear
       ? '' : String(activeProfile.otherTaxableIncome)
@@ -83,6 +84,7 @@ export default function Settings() {
     setOpeningDetails(activeProfile?.openingDetails ?? '');
     setCoverageStartDate(activeProfile?.coverageStartDate ?? coverage.start);
     setCoverageEndDate(activeProfile?.coverageEndDate ?? coverage.end);
+    setBusinessStartDate(activeProfile?.businessStartDate ?? '');
     setOtherTaxableIncome(
       activeProfile?.otherTaxableIncome == null || activeProfile.otherTaxableIncomeTaxYear !== (activeProfile?.taxYear ?? '2024/25')
         ? '' : String(activeProfile.otherTaxableIncome)
@@ -139,6 +141,7 @@ export default function Settings() {
         openingDetails: openingDetails.trim() || null,
         coverageStartDate: coverageStartDate || null,
         coverageEndDate: coverageEndDate || null,
+        businessStartDate: businessStartDate || null,
         otherTaxableIncome: parsedOtherTaxableIncome,
         otherTaxableIncomeTaxYear: parsedOtherTaxableIncome === null ? null : taxYear,
       });
@@ -339,6 +342,22 @@ export default function Settings() {
           </p>
           <Card className="p-6 shadow-sm space-y-6">
             <div>
+              <label className="text-sm font-medium block mb-2">Business / trading start date</label>
+              <p className="text-xs text-muted-foreground mb-3">
+                This durable business fact is separate from the dates covered by your imported records. Spreadsheet reviews flag earlier movements for your decision.
+              </p>
+              <label className="space-y-1.5 block max-w-sm">
+                <span className="text-xs font-medium text-muted-foreground">Trading start date (optional)</span>
+                <input
+                  type="date"
+                  value={businessStartDate}
+                  onChange={event => setBusinessStartDate(event.target.value)}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                />
+              </label>
+            </div>
+
+            <div className="border-t border-border pt-6">
               <label className="text-sm font-medium block mb-2">Business activity covered by these records</label>
               <p className="text-xs text-muted-foreground mb-3">
                 Confirm the period for the current UK tax year. You can edit this whenever your records change.

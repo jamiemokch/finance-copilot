@@ -153,8 +153,8 @@ export type SpreadsheetAIEnvelope = {
 
 export function aiSampleForWorkbook(workbook: SpreadsheetWorkbook, analysis: SpreadsheetAnalysis) {
   const candidates = analysis.sheets.filter((sheet) => sheet.selected && sheet.role !== 'non_transactional').slice(0, 20);
-  let cells = 0;
   return candidates.map((sheet) => {
+    let cells = 0;
     const source = workbook.sheets.find((item) => item.sheetId === sheet.sheetId)!;
     const sampleRows = source.rows.filter((row) => row.values.some((value) => value.trim())).slice(0, 30).map((row) => ({
       rowNumber: row.rowNumber,

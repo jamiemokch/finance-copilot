@@ -39,6 +39,10 @@ router.post("/profiles", async (req, res) => {
     vatRegistered: z.boolean().optional().default(false),
     taxYear: z.string().optional().default("2024/25"),
     accountingBasis: z.string().optional().default("cash"),
+    businessStartDate: z.string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD dates")
+      .optional()
+      .nullable(),
   }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: "name is required" }); return; }
   try {
@@ -53,6 +57,9 @@ router.post("/profiles", async (req, res) => {
     // accountingBasis handled via cast — column added in migration
     if (body.data.accountingBasis) {
       insertData.accountingBasis = body.data.accountingBasis;
+    }
+    if (body.data.businessStartDate !== undefined) {
+      insertData.businessStartDate = body.data.businessStartDate;
     }
     const [profile] = await db.insert(profilesTable)
       .values(insertData as typeof profilesTable.$inferInsert)

@@ -828,6 +828,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           openingDetails: p.openingDetails ?? null,
           coverageStartDate: p.coverageStartDate ?? null,
           coverageEndDate: p.coverageEndDate ?? null,
+          businessStartDate: p.businessStartDate ?? null,
           otherTaxableIncome: p.otherTaxableIncome ?? null,
           otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
         });
@@ -902,6 +903,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       vatRegistered: profile.vatRegistered,
       taxYear: profile.taxYear ?? '2024/25',
       accountingBasis: profile.accountingBasis ?? 'cash',
+      businessStartDate: profile.businessStartDate ?? null,
     });
     const newProfile: Profile = {
       id: p.id,
@@ -916,6 +918,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: p.openingDetails ?? null,
       coverageStartDate: p.coverageStartDate ?? null,
       coverageEndDate: p.coverageEndDate ?? null,
+      businessStartDate: p.businessStartDate ?? null,
       otherTaxableIncome: p.otherTaxableIncome ?? null,
       otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
     };
@@ -935,6 +938,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: updates.openingDetails,
       coverageStartDate: updates.coverageStartDate,
       coverageEndDate: updates.coverageEndDate,
+      businessStartDate: updates.businessStartDate,
       otherTaxableIncome: updates.otherTaxableIncome,
       otherTaxableIncomeTaxYear: updates.otherTaxableIncomeTaxYear,
     });
@@ -951,6 +955,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             openingDetails: updated.openingDetails ?? null,
             coverageStartDate: updated.coverageStartDate ?? null,
             coverageEndDate: updated.coverageEndDate ?? null,
+            businessStartDate: updated.businessStartDate ?? null,
             otherTaxableIncome: updated.otherTaxableIncome ?? null,
             otherTaxableIncomeTaxYear: updated.otherTaxableIncomeTaxYear ?? null,
           }
@@ -1147,6 +1152,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openingDetails: p.openingDetails ?? null,
       coverageStartDate: p.coverageStartDate ?? null,
       coverageEndDate: p.coverageEndDate ?? null,
+      businessStartDate: p.businessStartDate ?? null,
       otherTaxableIncome: p.otherTaxableIncome ?? null,
       otherTaxableIncomeTaxYear: p.otherTaxableIncomeTaxYear ?? null,
     });

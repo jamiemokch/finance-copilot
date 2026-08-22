@@ -10,3 +10,4 @@
 - [Reconciliation observation lifecycle](reconciliation-observation-lifecycle.md) — resolved facts stay closed until they disappear; only a later return may reopen review
 - [Fresh-user reset upload safety](fresh-user-reset-upload-safety.md) — resets must serialize upload ownership writes and use durable post-commit blob cleanup
 - [Spreadsheet conflict recovery](spreadsheet-conflict-recovery.md) — only failed imports may replace a workbook; confirmations must claim the exact object they parsed
+- [Sparse Excel source rows](sparse-excel-source-rows.md) — audit actual Excel records, not every blank coordinate inside a worksheet’s rectangular extent

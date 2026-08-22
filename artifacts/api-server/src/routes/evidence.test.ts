@@ -13,6 +13,7 @@ import {
   privateUploadObjectsTable,
   profilesTable,
   sessionsTable,
+  spreadsheetRowOutcomesTable,
   transactionsTable,
   usersTable,
 } from '@workspace/db';
@@ -622,6 +623,18 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
         eq(transactionsTable.evidenceId, spreadsheetEvidenceId),
       ));
     assert.equal(persistedBoundaryRows.length, 2);
+    const persistedBoundaryOutcomes = await db.select().from(spreadsheetRowOutcomesTable)
+      .where(and(
+        eq(spreadsheetRowOutcomesTable.profileId, alicePrimary),
+        eq(spreadsheetRowOutcomesTable.evidenceId, spreadsheetEvidenceId),
+      ));
+    assert.equal(persistedBoundaryOutcomes.length, 4,
+      'every actual worksheet source row, including headers, receives one durable disposition');
+    assert.deepEqual(
+      persistedBoundaryOutcomes.map((row) => row.primaryDisposition).sort(),
+      ['header', 'header', 'imported', 'imported'],
+      'final source dispositions reconcile exactly to the inspected source population',
+    );
     assert.deepEqual(
       persistedBoundaryRows
         .map((transaction) => ({
@@ -679,6 +692,45 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       2,
       'repeating the confirmed mapping returns the prior outcome without duplicates',
     );
+
+    spreadsheetBuffer = Buffer.from([
+      'Date,Description,Amount',
+      '06/04/2025,Prior imported movement,19.25',
+    ].join('\n'));
+    const firstDuplicateUpload = await upload(aliceSession, alicePrimary, 'first duplicate workbook bytes');
+    assert.equal(firstDuplicateUpload.status, 200);
+    const firstDuplicateEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({ filename: 'first-duplicate.csv', objectPath: firstDuplicateUpload.body.objectPath, mimeType: 'text/csv', evidenceType: 'ledger' }),
+    });
+    const duplicateConfirmation = {
+      confirmation: true,
+      selectedSheetIds: ['sheet_1'],
+      sheetMappings: { sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } } },
+      filingScope: ['2025-2026'],
+      excludedRowRefs: [],
+      preTradingStartMode: 'exclude',
+      outsideScopeMode: 'exclude',
+    };
+    assert.equal((await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${firstDuplicateEvidence.body.id}/confirm-spreadsheet`, {
+      method: 'POST', body: JSON.stringify(duplicateConfirmation),
+    })).status, 200);
+    const secondDuplicateUpload = await upload(aliceSession, alicePrimary, 'second duplicate workbook bytes');
+    const secondDuplicateEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({ filename: 'second-duplicate.csv', objectPath: secondDuplicateUpload.body.objectPath, mimeType: 'text/csv', evidenceType: 'ledger' }),
+    });
+    const secondDuplicateConfirmation = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${secondDuplicateEvidence.body.id}/confirm-spreadsheet`, {
+      method: 'POST', body: JSON.stringify(duplicateConfirmation),
+    });
+    assert.equal(secondDuplicateConfirmation.status, 200);
+    assert.equal(secondDuplicateConfirmation.body.importedRows, 0,
+      'matching movements in a prior spreadsheet are not silently written twice');
+    const [duplicateOutcome] = await db.select().from(spreadsheetRowOutcomesTable).where(and(
+      eq(spreadsheetRowOutcomesTable.evidenceId, secondDuplicateEvidence.body.id),
+      eq(spreadsheetRowOutcomesTable.primaryDisposition, 'duplicate'),
+    ));
+    assert.deepEqual(duplicateOutcome.secondaryFindings, ['prior_profile_record']);
   } finally {
     ObjectStorageService.prototype.saveContent = originalSaveContent;
     ObjectStorageService.prototype.getObjectEntityFile = originalGetFile;

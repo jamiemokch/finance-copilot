@@ -129,6 +129,7 @@ export const profilesApi = {
     vatRegistered?: boolean;
     taxYear?: string;
     accountingBasis?: string;
+    businessStartDate?: string | null;
   }) =>
     apiFetch<APIProfile>("/profiles", {
       method: "POST",
@@ -374,6 +375,16 @@ export type SpreadsheetInspectionResponse = {
   aiProposal?: unknown;
   aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[] };
   userDecision?: unknown;
+  reviewDraft?: {
+    selectedSheetIds: string[];
+    sheetMappings: Record<string, unknown>;
+    filingScope: string[];
+    excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
+    preTradingStartMode: 'retain' | 'exclude';
+    outsideScopeMode: 'retain' | 'exclude';
+    mappingRevision?: string;
+  } | null;
+  reviewRevisionHistory?: Array<{ mappingRevision: string; savedAt: string }>;
   lastImportError?: SpreadsheetImportError | null;
 };
 
@@ -443,6 +454,17 @@ export const evidenceApi = {
     `${API}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
   detectSchema: (profileId: string, evidenceId: string) =>
     apiFetch<SpreadsheetInspectionResponse>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
+  saveSpreadsheetReview: (profileId: string, evidenceId: string, data: {
+    selectedSheetIds: string[];
+    sheetMappings: Record<string, unknown>;
+    filingScope: string[];
+    excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
+    preTradingStartMode: 'retain' | 'exclude';
+    outsideScopeMode: 'retain' | 'exclude';
+  }) => apiFetch<{ reviewDraft: SpreadsheetInspectionResponse['reviewDraft'] }>(
+    `/profiles/${profileId}/evidence/${evidenceId}/spreadsheet-review`,
+    { method: "PATCH", body: JSON.stringify(data) },
+  ),
   confirmSpreadsheet: (profileId: string, evidenceId: string, data: {
     confirmation: true;
     selectedSheetIds: string[];

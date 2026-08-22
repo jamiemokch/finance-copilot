@@ -71,6 +71,7 @@ export type SpreadsheetSheet = {
 
 export type SpreadsheetWorkbook = {
   contentHash?: string;
+  sourceByteLength: number;
   fileType: 'csv' | 'xls' | 'xlsx';
   filename?: string;
   sheets: SpreadsheetSheet[];
@@ -231,7 +232,23 @@ function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
     const startColumn = parserRange?.startColumn ?? 1;
     const endColumn = parserRange?.endColumn ?? 0;
     const merges = source?.['!merges'] ?? [];
-    for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
+    // Excel's !ref is a rectangular extent, not a list of physical records.
+    // Expanding a sparse sheet with a final cell on row 1,048,576 would invent
+    // more than a million blank source rows and make an audit unsafe to retain.
+    // Preserve every actual cell/style/hidden/merged row instead; CSV blank
+    // records remain physical source rows and are handled separately.
+    const sourceRowNumbers = new Set<number>();
+    for (const key of Object.keys(source ?? {})) {
+      if (key.startsWith('!')) continue;
+      try { sourceRowNumbers.add(XLSX.utils.decode_cell(key).r + 1); } catch { /* ignore non-cell worksheet metadata */ }
+    }
+    (source?.['!rows'] ?? []).forEach((metadata: unknown, index: number) => {
+      if (metadata) sourceRowNumbers.add(index + 1);
+    });
+    for (const merge of merges) {
+      for (let rowIndex = merge.s.r + 1; rowIndex <= merge.e.r + 1; rowIndex += 1) sourceRowNumbers.add(rowIndex);
+    }
+    for (const rowIndex of [...sourceRowNumbers].sort((left, right) => left - right)) {
       const cells: SpreadsheetCell[] = [];
       for (let columnIndex = startColumn; columnIndex <= endColumn; columnIndex += 1) {
         const address = XLSX.utils.encode_cell({ r: rowIndex - 1, c: columnIndex - 1 });
@@ -264,6 +281,7 @@ function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
   });
   return {
     contentHash: createHash('sha256').update(buffer).digest('hex'),
+    sourceByteLength: buffer.byteLength,
     fileType: /\.xls$/i.test(filename) ? 'xls' : 'xlsx',
     filename, sheets,
     totalParserRows: sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0),
@@ -273,8 +291,13 @@ function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
 
 function inspectCsv(buffer: Buffer, filename: string): SpreadsheetWorkbook {
   const text = buffer.toString('utf8');
-  const rows = parse(text, { skip_empty_lines: false, relax_column_count: true, bom: true }) as unknown[][];
-  const values = rows.map((row) => row.map((cell) => String(cell ?? '')));
+  const records = parse(text, {
+    skip_empty_lines: false,
+    relax_column_count: true,
+    bom: true,
+    info: true,
+  }) as unknown as Array<{ record: unknown[]; info: { lines: number } }>;
+  const values = records.map(({ record }) => record.map((cell) => String(cell ?? '')));
   const width = Math.max(0, ...values.map((row) => row.length));
   const sourceRows: SpreadsheetSourceRow[] = values.map((row, index) => ({
     rowNumber: index + 1,
@@ -284,7 +307,8 @@ function inspectCsv(buffer: Buffer, filename: string): SpreadsheetWorkbook {
     })),
     values: Array.from({ length: width }, (_, columnIndex) => row[columnIndex] ?? ''),
     hidden: false, hasFormula: false, hasStyle: false, merged: false,
-    physicalLineStart: index + 1, physicalLineEnd: index + 1,
+    physicalLineStart: index === 0 ? 1 : (records[index - 1]?.info.lines ?? index) + 1,
+    physicalLineEnd: records[index]?.info.lines ?? index + 1,
   }));
   const sheet: SpreadsheetSheet = {
     sheetId: 'sheet_1', displayName: filename || 'CSV', index: 0,
@@ -296,6 +320,7 @@ function inspectCsv(buffer: Buffer, filename: string): SpreadsheetWorkbook {
   };
   return {
     contentHash: createHash('sha256').update(buffer).digest('hex'),
+    sourceByteLength: buffer.byteLength,
     fileType: 'csv', filename, sheets: [sheet],
     totalParserRows: sourceRows.length, totalParserCells: sourceRows.length * width,
   };

@@ -332,15 +332,21 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     setAnalysis(nextAnalysis);
     setAiStatus(detected.aiStatus ?? null);
     setImportError(detected.lastImportError ?? null);
-    const mappings = Object.fromEntries((nextAnalysis?.sheets ?? []).map((sheet) => [
+    const suggestedMappings = Object.fromEntries((nextAnalysis?.sheets ?? []).map((sheet) => [
       sheet.sheetId,
       { headerRow: sheet.mapping.headerRow ?? 0, columns: { ...sheet.mapping.columns }, dateFormat: null, currency: 'GBP' },
     ])) as Record<string, ReviewMapping>;
-    setSheetMappings(mappings);
+    const draft = detected.reviewDraft;
+    const persistedMappings = draft?.sheetMappings as Record<string, ReviewMapping> | undefined;
+    setSheetMappings(persistedMappings && Object.keys(persistedMappings).length ? persistedMappings : suggestedMappings);
     const selectable = (nextAnalysis?.sheets ?? []).filter((sheet) => sheet.role === 'transactional').map((sheet) => sheet.sheetId);
-    setSelectedSheetIds(selectable);
-    setActiveSheetId(selectable[0] ?? nextAnalysis?.sheets[0]?.sheetId ?? '');
-    setFilingScope(nextAnalysis?.taxYears ?? []);
+    const restoredSelected = draft?.selectedSheetIds?.filter((sheetId) => (nextAnalysis?.sheets ?? []).some((sheet) => sheet.sheetId === sheetId)) ?? selectable;
+    setSelectedSheetIds(restoredSelected);
+    setActiveSheetId(restoredSelected[0] ?? selectable[0] ?? nextAnalysis?.sheets[0]?.sheetId ?? '');
+    setFilingScope(draft?.filingScope?.filter((year) => (nextAnalysis?.taxYears ?? []).includes(year)) ?? nextAnalysis?.taxYears ?? []);
+    setPreTradingStartMode(draft?.preTradingStartMode ?? 'exclude');
+    setOutsideScopeMode(draft?.outsideScopeMode ?? 'exclude');
+    setAcknowledgeUnresolved(Boolean(draft?.excludedRowRefs?.length));
   };
   const inspect = async (id: string) => {
     setStage('inspecting'); setError('');
@@ -376,29 +382,56 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   };
   const activeSheet = analysis?.sheets.find((sheet) => sheet.sheetId === activeSheetId) ?? null;
   const activeMapping = activeSheetId ? sheetMappings[activeSheetId] : undefined;
+  const unresolvedRows = (analysis?.sheets ?? []).filter((sheet) => selectedSheetIds.includes(sheet.sheetId))
+    .flatMap((sheet) => sheet.rows.filter((row) => row.primaryDisposition === 'invalid').map((row) => ({ sheetId: sheet.sheetId, rowNumber: row.sourceRow })));
+  const saveReviewDraft = async (overrides: Partial<{
+    sheetMappings: Record<string, ReviewMapping>;
+    selectedSheetIds: string[];
+    filingScope: string[];
+    acknowledgeUnresolved: boolean;
+    preTradingStartMode: 'retain' | 'exclude';
+    outsideScopeMode: 'retain' | 'exclude';
+  }> = {}) => {
+    if (!evidenceId) return;
+    const nextMappings = overrides.sheetMappings ?? sheetMappings;
+    const nextSelected = overrides.selectedSheetIds ?? selectedSheetIds;
+    const nextScope = overrides.filingScope ?? filingScope;
+    const shouldExcludeUnresolved = overrides.acknowledgeUnresolved ?? acknowledgeUnresolved;
+    await evidenceApi.saveSpreadsheetReview(profileId, evidenceId, {
+      selectedSheetIds: nextSelected, sheetMappings: nextMappings, filingScope: nextScope,
+      excludedRowRefs: shouldExcludeUnresolved ? unresolvedRows : [],
+      preTradingStartMode: overrides.preTradingStartMode ?? preTradingStartMode,
+      outsideScopeMode: overrides.outsideScopeMode ?? outsideScopeMode,
+    });
+  };
   const setRole = (column: number, role: ColumnRole) => {
     if (!activeSheetId || !activeMapping) return;
     const columns = { ...activeMapping.columns };
     Object.keys(columns).forEach((key) => { if (columns[key] === column) delete columns[key]; });
     if (role !== 'none') columns[role] = column;
-    setSheetMappings((current) => ({ ...current, [activeSheetId]: { ...activeMapping, columns } }));
+    const nextMappings = { ...sheetMappings, [activeSheetId]: { ...activeMapping, columns } };
+    setSheetMappings(nextMappings);
+    void saveReviewDraft({ sheetMappings: nextMappings }).catch((err) => setError(err instanceof Error ? err.message : 'Could not save your mapping changes.'));
   };
   const roleFor = (column: number): ColumnRole => {
     const role = Object.entries(activeMapping?.columns ?? {}).find(([, value]) => value === column)?.[0];
     return ['date', 'amount', 'description', 'category', 'debit', 'credit', 'balance'].includes(role ?? '') ? role as ColumnRole : 'none';
   };
   const toggleSheet = (sheetId: string, checked: boolean) => {
-    setSelectedSheetIds((current) => checked ? [...new Set([...current, sheetId])] : current.filter((id) => id !== sheetId));
+    const nextSelected = checked ? [...new Set([...selectedSheetIds, sheetId])] : selectedSheetIds.filter((id) => id !== sheetId);
+    setSelectedSheetIds(nextSelected);
+    void saveReviewDraft({ selectedSheetIds: nextSelected }).catch((err) => setError(err instanceof Error ? err.message : 'Could not save your worksheet selection.'));
   };
   const toggleScope = (taxYear: string, checked: boolean) => {
-    setFilingScope((current) => checked ? [...new Set([...current, taxYear])].sort() : current.filter((year) => year !== taxYear));
+    const nextScope = checked ? [...new Set([...filingScope, taxYear])].sort() : filingScope.filter((year) => year !== taxYear);
+    setFilingScope(nextScope);
+    void saveReviewDraft({ filingScope: nextScope }).catch((err) => setError(err instanceof Error ? err.message : 'Could not save your filing scope.'));
   };
-  const unresolvedRows = (analysis?.sheets ?? []).filter((sheet) => selectedSheetIds.includes(sheet.sheetId))
-    .flatMap((sheet) => sheet.rows.filter((row) => row.primaryDisposition === 'invalid').map((row) => ({ sheetId: sheet.sheetId, rowNumber: row.sourceRow })));
   const confirm = async () => {
     if (!evidenceId || !analysis) return;
     setStage('confirming'); setError(''); setImportError(null);
     try {
+      await saveReviewDraft();
       const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
         confirmation: true, selectedSheetIds, sheetMappings, filingScope,
         excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
@@ -455,9 +488,9 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       </div>
       {activeSheet && activeMapping && <div className="space-y-3 rounded-xl border p-4"><div><p className="font-medium">Map {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Required: date, description, and either signed amount or debit plus credit. The displayed preview is source evidence, not a financial write.</p></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select value={roleFor(column)} onChange={(event) => setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Ignore</option><option value="date">Date</option><option value="amount">Signed amount</option><option value="debit">Debit</option><option value="credit">Credit</option><option value="description">Description</option><option value="category">Category</option><option value="balance">Balance / audit only</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div>{activeSheet.warnings.map((warning) => <p key={warning} className="text-sm text-amber-800">{warning}</p>)}</div>}
       <div className="grid gap-4 md:grid-cols-2"><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Record coverage</p><p className="text-sm">{analysis.coverage.startDate && analysis.coverage.endDate ? `${analysis.coverage.startDate} to ${analysis.coverage.endDate}` : 'Dates are incomplete — review invalid rows.'}</p><p className="text-xs text-muted-foreground">Coverage describes what is in the source. It is separate from the filing scope below.</p></div><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Confirm filing scope</p>{analysis.taxYears.map((year) => <label key={year} className="flex gap-2 text-sm"><input type="checkbox" checked={filingScope.includes(year)} onChange={(event) => toggleScope(year, event.target.checked)} />{year}</label>)}<p className="text-xs text-muted-foreground">A workbook that crosses 5 April keeps each detected UK tax year visible.</p></div></div>
-      {(unresolvedRows.length > 0 || (analysis.dispositionCounts.pre_trading_start ?? 0) > 0) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950">{unresolvedRows.length > 0 && <label className="flex gap-2 items-start"><input type="checkbox" checked={acknowledgeUnresolved} onChange={(event) => setAcknowledgeUnresolved(event.target.checked)} /><span>I confirm that {unresolvedRows.length} unresolved row{unresolvedRows.length === 1 ? '' : 's'} will be explicitly excluded from this import.</span></label>}{(analysis.dispositionCounts.pre_trading_start ?? 0) > 0 && <label className="space-y-1 block">Pre-trading-start records<select className="ml-2 border rounded px-2 py-1" value={preTradingStartMode} onChange={(event) => setPreTradingStartMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude from this import</option><option value="retain">Retain as historical, outside filing scope</option></select></label>}</div>}
-      <div className="rounded-xl border p-4 space-y-2 text-sm"><p className="font-medium">Rows by current deterministic disposition</p><div className="flex flex-wrap gap-2">{Object.entries(analysis.dispositionCounts).filter(([, count]) => count > 0).map(([key, count]) => <Badge key={key} variant="outline">{count} {key.replaceAll('_', ' ')}</Badge>)}</div><label className="block">Rows outside selected filing scope<select className="ml-2 border rounded px-2 py-1" value={outsideScopeMode} onChange={(event) => setOutsideScopeMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude</option><option value="retain">Retain as outside filing scope</option></select></label></div>
-      <div className="flex justify-between gap-3"><Button variant="outline" onClick={() => void inspect(evidenceId)}>Re-analyse suggestions</Button><Button disabled={!canConfirm} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm mapping and import</Button></div>
+      {(unresolvedRows.length > 0 || (analysis.dispositionCounts.pre_trading_start ?? 0) > 0) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950">{unresolvedRows.length > 0 && <label className="flex gap-2 items-start"><input type="checkbox" checked={acknowledgeUnresolved} onChange={(event) => { setAcknowledgeUnresolved(event.target.checked); void saveReviewDraft({ acknowledgeUnresolved: event.target.checked }).catch(() => undefined); }} /><span>I confirm that {unresolvedRows.length} unresolved row{unresolvedRows.length === 1 ? '' : 's'} will be explicitly excluded from this import.</span></label>}{(analysis.dispositionCounts.pre_trading_start ?? 0) > 0 && <label className="space-y-1 block">Pre-trading-start records<select className="ml-2 border rounded px-2 py-1" value={preTradingStartMode} onChange={(event) => { const value = event.target.value as 'retain' | 'exclude'; setPreTradingStartMode(value); void saveReviewDraft({ preTradingStartMode: value }).catch(() => undefined); }}><option value="exclude">Exclude from this import</option><option value="retain">Retain as historical, outside filing scope</option></select></label>}</div>}
+      <div className="rounded-xl border p-4 space-y-2 text-sm"><p className="font-medium">Rows by current deterministic disposition</p><div className="flex flex-wrap gap-2">{Object.entries(analysis.dispositionCounts).filter(([, count]) => count > 0).map(([key, count]) => <Badge key={key} variant="outline">{count} {key.replaceAll('_', ' ')}</Badge>)}</div><label className="block">Rows outside selected filing scope<select className="ml-2 border rounded px-2 py-1" value={outsideScopeMode} onChange={(event) => { const value = event.target.value as 'retain' | 'exclude'; setOutsideScopeMode(value); void saveReviewDraft({ outsideScopeMode: value }).catch(() => undefined); }}><option value="exclude">Exclude</option><option value="retain">Retain as outside filing scope</option></select></label></div>
+      <div className="flex justify-between gap-3"><Button variant="outline" onClick={() => void saveReviewDraft().then(() => inspect(evidenceId)).catch((err) => setError(err instanceof Error ? err.message : 'Could not save your review before re-analysis.'))}>Re-analyse suggestions</Button><Button disabled={!canConfirm} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm mapping and import</Button></div>
     </div>}
     {stage === 'confirming' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Applying your confirmed mapping deterministically…</div>}
     {stage === 'done' && summary && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-900"><div className="flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" /><div><p className="font-semibold">Spreadsheet import confirmed</p><p className="text-sm mt-1">{summary.importedRows} movement{summary.importedRows === 1 ? '' : 's'} added as unclassified records. They do not affect tax or profit until you classify them.</p><p className="text-xs mt-2">Tax years: {summary.taxYears.join(', ') || 'none'}</p></div></div></div>}

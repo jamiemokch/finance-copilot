@@ -43,6 +43,7 @@ export const SPREADSHEET_AI_LIMITS = {
 } as const;
 
 let _client: OpenAI | null = null;
+const spreadsheetAICache = new Map<string, { expiresAt: number; envelope: SpreadsheetAIEnvelope }>();
 
 function getClient(): OpenAI {
   if (!_client) {
@@ -267,6 +268,24 @@ function validateProposalReferences(proposal: SpreadsheetUnderstandingProposal, 
   return null;
 }
 
+function maxObjectDepth(value: unknown, depth = 0): number {
+  if (value === null || typeof value !== 'object') return depth;
+  if (Array.isArray(value)) return Math.max(depth + 1, ...value.map((item) => maxObjectDepth(item, depth + 1)));
+  return Math.max(depth + 1, ...Object.values(value).map((item) => maxObjectDepth(item, depth + 1)));
+}
+
+function validateProposalSemantics(proposal: SpreadsheetUnderstandingProposal, analysis: SpreadsheetAnalysis): string | null {
+  if (maxObjectDepth(proposal) > SPREADSHEET_AI_LIMITS.maxDepth) return 'proposal_depth_exceeded';
+  if (proposal.sheets.length > SPREADSHEET_AI_LIMITS.maxSheets) return 'proposal_sheet_limit_exceeded';
+  if (proposal.sheets.some((sheet) => sheet.coverage.rowRefs.length > SPREADSHEET_AI_LIMITS.maxRowsPerSheet)) return 'proposal_row_limit_exceeded';
+  const transactional = proposal.sheets.filter((sheet) => sheet.role === 'transactional');
+  if (transactional.some((sheet) => sheet.analysisStatus === 'complete' && sheet.fields.date.state !== 'mapped')) return 'transactional_sheet_without_date';
+  if (proposal.coverage.status === 'known' && proposal.coverage.startDate && proposal.coverage.endDate && proposal.coverage.startDate > proposal.coverage.endDate) return 'coverage_order_invalid';
+  const knownTaxYears = new Set(analysis.taxYears);
+  if (proposal.taxYears.some((year) => !knownTaxYears.has(year.taxYear))) return 'unknown_tax_year';
+  return null;
+}
+
 async function providerCallWithTimeout(
   client: OpenAI,
   payload: string,
@@ -309,6 +328,7 @@ export async function analyseSpreadsheetWithAI(
   workbook: SpreadsheetWorkbook,
   analysis: SpreadsheetAnalysis,
 ): Promise<SpreadsheetAIEnvelope> {
+  let providerCalls = 0;
   const limits = {
     maxSheets: SPREADSHEET_AI_LIMITS.maxSheets, maxRowsPerSheet: SPREADSHEET_AI_LIMITS.maxRowsPerSheet,
     maxCellsPerSheet: SPREADSHEET_AI_LIMITS.maxCellsPerSheet, maxCellCharacters: SPREADSHEET_AI_LIMITS.maxCellCharacters,
@@ -318,11 +338,18 @@ export async function analyseSpreadsheetWithAI(
   const candidates = analysis.sheets.filter((sheet) => sheet.selected && sheet.role !== 'non_transactional');
   const tooLarge = workbook.totalParserRows > SPREADSHEET_AI_LIMITS.largeWorkbookRows
     || workbook.totalParserCells > SPREADSHEET_AI_LIMITS.largeWorkbookCells
-    || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets;
+    || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets
+    || workbook.sourceByteLength > SPREADSHEET_AI_LIMITS.largeWorkbookBytes;
   if (!isConfigured()) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'AI provider is unavailable.', sampledSheetIds: [], providerCalls: 0, limits };
   if (tooLarge) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'This workbook is large for AI; deterministic/manual mapping remains available.', sampledSheetIds: [], providerCalls: 0, limits };
   const sample = aiSampleForWorkbook(workbook, analysis);
   const sampledSheetIds = sample.map((sheet) => sheet.sheetId);
+  const cacheKey = `${workbook.contentHash ?? 'no-hash'}:${analysis.parserVersion}:${sampledSheetIds.join(',')}`;
+  const cached = spreadsheetAICache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ...cached.envelope, providerCalls: 0 };
+  }
+  if (cached) spreadsheetAICache.delete(cacheKey);
   const request = {
     schemaVersion: SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
     instruction: 'Propose mappings and review warnings only. Use exact stable identifiers from the sample. Do not make financial decisions or write records.',
@@ -333,23 +360,38 @@ export async function analyseSpreadsheetWithAI(
   }
   try {
     const result = await providerCallWithTimeout(getClient(), JSON.stringify(request));
+    providerCalls = result.providerCalls;
     if (Buffer.byteLength(result.content) > SPREADSHEET_AI_LIMITS.maxResponseBytes) throw new Error('response_too_large');
     const parsedJson = JSON.parse(result.content) as unknown;
     const parsed = spreadsheetUnderstandingProposalSchema.safeParse(parsedJson);
     if (!parsed.success) throw new Error('schema_invalid');
-    const referenceError = validateProposalReferences(parsed.data, analysis);
+     const referenceError = validateProposalReferences(parsed.data, analysis);
     if (referenceError) throw new Error('reference_invalid');
+     const semanticError = validateProposalSemantics(parsed.data, analysis);
+     if (semanticError) throw new Error(semanticError);
     if (parsed.data.analysisStatus === 'cannot_analyze' || parsed.data.overallConfidence < 60 ||
       !parsed.data.sheets.some((sheet) => sheet.role === 'transactional' && sheet.fields.date.state === 'mapped')) {
       return { status: 'fallback', proposal: parsed.data, reason: 'AI returned a low-confidence or incomplete mapping.', sampledSheetIds, providerCalls: result.providerCalls, limits };
     }
-    return { status: parsed.data.analysisStatus === 'partial' ? 'partial' : 'success', proposal: parsed.data, sampledSheetIds, providerCalls: result.providerCalls, limits };
+    const envelope: SpreadsheetAIEnvelope = {
+      status: parsed.data.analysisStatus === 'partial' ? 'partial' : 'success',
+      proposal: parsed.data, sampledSheetIds, providerCalls: result.providerCalls, limits,
+    };
+    spreadsheetAICache.set(cacheKey, {
+      expiresAt: Date.now() + SPREADSHEET_AI_LIMITS.cacheTtlMs,
+      envelope,
+    });
+    if (spreadsheetAICache.size > 100) {
+      const oldestKey = spreadsheetAICache.keys().next().value;
+      if (oldestKey) spreadsheetAICache.delete(oldestKey);
+    }
+    return envelope;
   } catch (error) {
     const reason = error instanceof Error && error.message === 'timeout' ? 'AI analysis timed out.' :
       error instanceof Error && error.message === 'schema_invalid' ? 'AI returned a malformed proposal.' :
         error instanceof Error && error.message === 'reference_invalid' ? 'AI returned an invalid source reference.' :
           'AI analysis failed; deterministic/manual mapping is available.';
-    return { status: 'failed', proposal: proposalForDeterministicFallback(analysis), reason, sampledSheetIds, providerCalls: 2, limits };
+    return { status: 'failed', proposal: proposalForDeterministicFallback(analysis), reason, sampledSheetIds, providerCalls, limits };
   }
 }
 

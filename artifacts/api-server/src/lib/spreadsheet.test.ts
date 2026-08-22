@@ -80,6 +80,11 @@ continued",-42.00
   const inspected = inspectSpreadsheet(Buffer.from(csv), 'text/csv', 'multiline.csv');
   assert.equal(inspected.sheets[0]?.rows.length, 2);
   assert.equal(inspected.sheets[0]?.rows[1]?.values[1], 'Client note\ncontinued');
+  assert.deepEqual(
+    inspected.sheets[0]?.rows.map((row) => [row.physicalLineStart, row.physicalLineEnd]),
+    [[1, 1], [2, 3]],
+    'logical CSV rows retain their physical source-line span',
+  );
   assert.equal(ukTaxYear('2025-04-05'), '2024-2025');
   assert.equal(ukTaxYear('2025-04-06'), '2025-2026');
 });

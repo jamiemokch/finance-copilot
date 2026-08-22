@@ -9,7 +9,7 @@ import {
 } from "@workspace/db";
 import {
   evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
-  inboxItemsTable, transactionsTable, profilesTable,
+  inboxItemsTable, transactionsTable, profilesTable, spreadsheetRowOutcomesTable,
 } from "@workspace/db/schema";
 import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
@@ -80,6 +80,18 @@ const confirmedSpreadsheetInput = z.object({
   preTradingStartMode: z.enum(["retain", "exclude"]).default("exclude"),
   outsideScopeMode: z.enum(["retain", "exclude"]).default("exclude"),
 }).strict();
+
+const spreadsheetDraftInput = confirmedSpreadsheetInput.omit({ confirmation: true });
+
+type SpreadsheetReviewDraft = z.infer<typeof spreadsheetDraftInput>;
+
+function spreadsheetSourceRowIndex(sheetIndex: number, rowNumber: number) {
+  return sheetIndex * 1_100_000 + rowNumber;
+}
+
+function spreadsheetMovementFingerprint(date: string, amount: number, description: string) {
+  return `${date}|${Math.round(amount * 100)}|${normaliseCell(description).toLowerCase()}`;
+}
 
 // GET /profiles/:profileId/evidence
 router.get("/profiles/:profileId/evidence", async (req, res) => {
@@ -692,6 +704,61 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
   }
 });
 
+// PATCH /profiles/:profileId/evidence/:evidenceId/spreadsheet-review — persist
+// a user-owned draft mapping before confirmation. AI suggestions are never
+// allowed to replace this state on a later inspection.
+router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", async (req, res) => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const body = spreadsheetDraftInput.safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: "Choose selected sheets, mappings, and filing scope before saving this review." }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId, req.user.id);
+    if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
+    if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    if (evidenceItem.workflowVersion >= 2 || evidenceItem.importStatus === "done") {
+      res.status(409).json({ error: "This spreadsheet review can no longer be edited." }); return;
+    }
+    const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
+    const [buffer] = await file.download();
+    const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+    const knownSheets = new Map(workbook.sheets.map((sheet) => [sheet.sheetId, sheet]));
+    for (const sheetId of body.data.selectedSheetIds) {
+      const sheet = knownSheets.get(sheetId);
+      const mapping = body.data.sheetMappings[sheetId];
+      if (!sheet || !mapping) { res.status(400).json({ error: "Every selected worksheet needs a mapping from this workbook." }); return; }
+      const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
+      if (mapping.headerRow >= sheet.rowCount || indices.some((index) => index >= sheet.columnCount)) {
+        res.status(400).json({ error: `The saved mapping contains a row or column outside ${sheet.displayName}.` }); return;
+      }
+    }
+    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const revision = createHash("sha256").update(JSON.stringify({
+      ...body.data, businessStartDate: profile.businessStartDate ?? null,
+    })).digest("hex");
+    const history = Array.isArray(state.reviewRevisionHistory) ? state.reviewRevisionHistory.slice(-19) : [];
+    const reviewDraft = { ...body.data, mappingRevision: revision, savedAt: new Date().toISOString(), actorUserId: req.user.id };
+    const [saved] = await db.update(evidenceItemsTable).set({
+      mappingSchema: {
+        ...state,
+        reviewDraft,
+        reviewRevisionHistory: [...history, { mappingRevision: revision, savedAt: reviewDraft.savedAt, actorUserId: req.user.id }],
+      } as Record<string, unknown>,
+      importStatus: "mapping",
+    }).where(and(
+      eq(evidenceItemsTable.id, evidenceItem.id),
+      eq(evidenceItemsTable.profileId, profile.id),
+      inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "error"]),
+    )).returning();
+    if (!saved) { res.status(409).json({ error: "This spreadsheet is currently being processed. Reload before editing." }); return; }
+    await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_review_saved", { mappingRevision: revision });
+    res.json({ reviewDraft, reviewRevisionHistory: (saved.mappingSchema as Record<string, unknown>)?.reviewRevisionHistory ?? [] });
+  } catch (err) {
+    req.log.error(err, "Failed to save spreadsheet review");
+    res.status(500).json({ error: "Failed to save spreadsheet review" });
+  }
+});
+
 // POST /profiles/:profileId/evidence/:evidenceId/detect-schema — CSV/XLSX column proposal
 router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -717,6 +784,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       aiProposal?: unknown;
       aiStatus?: unknown;
       userDecision?: unknown;
+      reviewDraft?: unknown;
+      reviewRevisionHistory?: unknown;
       lastImportError?: unknown;
     } | null;
     // A user decision is durable and must never be overwritten by a later
@@ -729,6 +798,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         aiProposal: savedState.aiProposal ?? null,
         aiStatus: savedState.aiStatus ?? { status: "not_requested" },
         userDecision: savedState.userDecision,
+        reviewDraft: savedState.reviewDraft ?? null,
+        reviewRevisionHistory: savedState.reviewRevisionHistory ?? [],
         lastImportError: savedState.lastImportError ?? null,
       });
       return;
@@ -756,6 +827,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       aiProposal: ai.proposal,
       aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits },
       userDecision: savedState?.userDecision ?? null,
+      reviewDraft: savedState?.reviewDraft ?? null,
+      reviewRevisionHistory: savedState?.reviewRevisionHistory ?? [],
       lastImportError: savedState?.lastImportError ?? null,
     };
     const [reopened] = await db.update(evidenceItemsTable).set({
@@ -782,7 +855,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     });
     res.json({
       mappingSchema, previewRows, analysis, aiProposal: ai.proposal,
-      aiStatus: state.aiStatus, userDecision: state.userDecision, lastImportError: state.lastImportError,
+      aiStatus: state.aiStatus, userDecision: state.userDecision, reviewDraft: state.reviewDraft,
+      reviewRevisionHistory: state.reviewRevisionHistory, lastImportError: state.lastImportError,
     });
   } catch (err) {
     req.log.error(err, "Failed to detect spreadsheet schema");
@@ -823,16 +897,59 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       "imported", "duplicate", "invalid", "header", "blank", "balance_total", "non_transactional",
       "excluded_by_user", "excluded_by_rule", "unmapped", "outside_scope", "pre_trading_start", "unselected_sheet",
     ].map((key) => [key, 0])) as Record<RowDisposition, number>;
+    type RowOutcome = {
+      sheetId: string; worksheet: string; sourceRowIndex: number; sourceRowNumber: number;
+      physicalLineStart: number | null; physicalLineEnd: number | null; primaryDisposition: RowDisposition;
+      secondaryFindings: string[]; reason: string; rawValueReference: Record<string, unknown>;
+      normalizedValueReference: { date: string | null; amount: number | null; description: string | null };
+      duplicateFingerprint: string | null; decisionSource: string; taxYear: string | null;
+    };
+    const rowOutcomes: RowOutcome[] = [];
     const rowsToWrite: Array<{
       sourceRowIndex: number; row: string[]; sheetId: string; displayName: string; sourceRow: number;
       date: string; amount: number; description: string; taxYear: string; filingScope: boolean; disposition: RowDisposition;
     }> = [];
     const fingerprints = new Set<string>();
     const mappingsForAudit: Record<string, MappingSchema> = {};
+    const existingTransactions = await db.select({
+      evidenceId: transactionsTable.evidenceId, sourceRowIndex: transactionsTable.sourceRowIndex,
+      date: transactionsTable.date, amount: transactionsTable.amount, description: transactionsTable.description,
+    }).from(transactionsTable).where(eq(transactionsTable.profileId, profile.id));
+    const priorFingerprints = new Set(existingTransactions
+      .filter((transaction) => transaction.evidenceId !== confirmedEvidence.id)
+      .map((transaction) => spreadsheetMovementFingerprint(transaction.date, transaction.amount, transaction.description)));
+    const businessStartDate = profile.businessStartDate ?? null;
+    const scopedAnalysis = analyseSpreadsheet(workbook, {
+      selectedSheetIds: body.data.selectedSheetIds, tradingStartDate: businessStartDate,
+    });
+    const sheetRoles = new Map(scopedAnalysis.sheets.map((sheet) => [sheet.sheetId, sheet.role]));
+    const unresolvedRows: Array<{ sheetId: string; worksheet: string; rowNumber: number }> = [];
 
     for (const sheet of workbook.sheets) {
       if (!selected.has(sheet.sheetId)) {
-        for (const row of sheet.rows) counts.unselected_sheet += 1;
+        for (const source of sheet.rows) {
+          rowOutcomes.push({
+            sheetId: sheet.sheetId, worksheet: sheet.displayName, sourceRowIndex: spreadsheetSourceRowIndex(sheet.index, source.rowNumber),
+            sourceRowNumber: source.rowNumber, physicalLineStart: source.physicalLineStart ?? null, physicalLineEnd: source.physicalLineEnd ?? null,
+            primaryDisposition: "unselected_sheet", secondaryFindings: [], reason: "Sheet was not selected for this import.",
+            rawValueReference: { sheetId: sheet.sheetId, worksheet: sheet.displayName, rowNumber: source.rowNumber, values: source.values },
+            normalizedValueReference: { date: null, amount: null, description: null }, duplicateFingerprint: null, decisionSource: "user_selection", taxYear: null,
+          });
+          counts.unselected_sheet += 1;
+        }
+        continue;
+      }
+      if (sheetRoles.get(sheet.sheetId) === "non_transactional") {
+        for (const source of sheet.rows) {
+          rowOutcomes.push({
+            sheetId: sheet.sheetId, worksheet: sheet.displayName, sourceRowIndex: spreadsheetSourceRowIndex(sheet.index, source.rowNumber),
+            sourceRowNumber: source.rowNumber, physicalLineStart: source.physicalLineStart ?? null, physicalLineEnd: source.physicalLineEnd ?? null,
+            primaryDisposition: "non_transactional", secondaryFindings: [], reason: "Sheet is classified as non-transactional.",
+            rawValueReference: { sheetId: sheet.sheetId, worksheet: sheet.displayName, rowNumber: source.rowNumber, values: source.values },
+            normalizedValueReference: { date: null, amount: null, description: null }, duplicateFingerprint: null, decisionSource: "deterministic", taxYear: null,
+          });
+          counts.non_transactional += 1;
+        }
         continue;
       }
       const mapping = body.data.sheetMappings[sheet.sheetId] as MappingSchema | undefined;
@@ -844,34 +961,64 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         res.status(400).json({ error: `The confirmed mapping contains a column outside ${sheet.displayName}.` }); return;
       }
       for (const source of sheet.rows) {
-        if (source.rowNumber <= mapping.headerRow + 1) { counts.header += 1; continue; }
+        const outcomeBase = {
+          sheetId: sheet.sheetId, worksheet: sheet.displayName, sourceRowIndex: spreadsheetSourceRowIndex(sheet.index, source.rowNumber),
+          sourceRowNumber: source.rowNumber, physicalLineStart: source.physicalLineStart ?? null, physicalLineEnd: source.physicalLineEnd ?? null,
+          rawValueReference: { sheetId: sheet.sheetId, worksheet: sheet.displayName, rowNumber: source.rowNumber, values: source.values },
+        };
+        const saveOutcome = (primaryDisposition: RowDisposition, reason: string, normalizedValueReference: RowOutcome["normalizedValueReference"], extras: Partial<Pick<RowOutcome, "secondaryFindings" | "duplicateFingerprint" | "decisionSource" | "taxYear">> = {}) => {
+          rowOutcomes.push({
+            ...outcomeBase, primaryDisposition, reason, normalizedValueReference,
+            secondaryFindings: extras.secondaryFindings ?? [], duplicateFingerprint: extras.duplicateFingerprint ?? null,
+            decisionSource: extras.decisionSource ?? "deterministic", taxYear: extras.taxYear ?? null,
+          });
+          counts[primaryDisposition] += 1;
+        };
+        if (source.rowNumber <= mapping.headerRow + 1) {
+          saveOutcome("header", "Header or title row retained outside the transaction range.", { date: null, amount: null, description: null });
+          continue;
+        }
         const rowKey = `${sheet.sheetId}:${source.rowNumber}`;
-        if (source.values.every((cell) => !normaliseCell(cell))) { counts.blank += 1; continue; }
-        if (excluded.has(rowKey)) { counts.excluded_by_user += 1; continue; }
+        if (source.values.every((cell) => !normaliseCell(cell))) {
+          saveOutcome("blank", "Blank source row.", { date: null, amount: null, description: null }); continue;
+        }
+        if (excluded.has(rowKey)) {
+          saveOutcome("excluded_by_user", "Explicitly excluded by the reviewer.", { date: null, amount: null, description: null }, { secondaryFindings: ["explicit_user_exclusion"], decisionSource: "user_exclusion" }); continue;
+        }
         const mapped = mapSpreadsheetRow(source.values, mapping);
-        if (looksLikeBalanceRow(source.values)) { counts.balance_total += 1; continue; }
+        const normalized = { date: mapped.date, amount: mapped.amount, description: mapped.description };
+        if (looksLikeBalanceRow(source.values)) {
+          saveOutcome("balance_total", "Balance, subtotal, opening, closing, or total row is not a transaction.", normalized, { secondaryFindings: ["balance_total"] }); continue;
+        }
         if (!mapped.date || mapped.amount === null || !mapped.description) {
-          // Unresolved financial rows must be explicitly acknowledged, not
-          // silently dropped. The first confirmation tells the user exactly
-          // which source rows still require an exclusion decision.
-          res.status(400).json({ error: `Row ${source.rowNumber} in ${sheet.displayName} has an unresolved date, amount, or description. Exclude it explicitly or correct the mapping.` });
-          return;
+          saveOutcome("invalid", "Required date, amount, or description could not be normalized.", normalized, { secondaryFindings: ["unresolved_value"] });
+          unresolvedRows.push({ sheetId: sheet.sheetId, worksheet: sheet.displayName, rowNumber: source.rowNumber });
+          continue;
         }
         const taxYear = ukTaxYear(mapped.date);
         if (!taxYear) {
-          res.status(400).json({ error: `Row ${source.rowNumber} in ${sheet.displayName} has an unresolved date. Exclude it explicitly or correct the mapping.` });
-          return;
+          saveOutcome("invalid", "Date could not be assigned to a UK tax year.", normalized, { secondaryFindings: ["unresolved_date"] });
+          unresolvedRows.push({ sheetId: sheet.sheetId, worksheet: sheet.displayName, rowNumber: source.rowNumber });
+          continue;
         }
-        const businessStartDate = (profile as typeof profile & { businessStartDate?: string | null }).businessStartDate;
         const isPreTrading = Boolean(businessStartDate && mapped.date < businessStartDate);
         const inFilingScope = body.data.filingScope.includes(taxYear);
-        if (isPreTrading && body.data.preTradingStartMode === "exclude") { counts.excluded_by_user += 1; continue; }
-        if (!inFilingScope && body.data.outsideScopeMode === "exclude") { counts.excluded_by_user += 1; continue; }
-        const fingerprint = `${mapped.date}|${Math.round(mapped.amount * 100)}|${normaliseCell(mapped.description).toLowerCase()}`;
-        if (fingerprints.has(fingerprint)) { counts.duplicate += 1; continue; }
+        if (isPreTrading && body.data.preTradingStartMode === "exclude") {
+          saveOutcome("excluded_by_user", "Pre-trading record was explicitly excluded.", normalized, { secondaryFindings: ["pre_trading_start"], decisionSource: "user_scope", taxYear }); continue;
+        }
+        if (!inFilingScope && body.data.outsideScopeMode === "exclude") {
+          saveOutcome("excluded_by_user", "Record outside the selected filing scope was explicitly excluded.", normalized, { secondaryFindings: ["outside_scope"], decisionSource: "user_scope", taxYear }); continue;
+        }
+        const fingerprint = spreadsheetMovementFingerprint(mapped.date, mapped.amount, mapped.description);
+        if (fingerprints.has(fingerprint)) {
+          saveOutcome("duplicate", "Duplicate normalized source movement detected in this workbook.", normalized, { duplicateFingerprint: fingerprint, secondaryFindings: ["same_workbook_duplicate"], taxYear }); continue;
+        }
         fingerprints.add(fingerprint);
+        if (priorFingerprints.has(fingerprint)) {
+          saveOutcome("duplicate", "A matching movement already exists in this profile's financial records.", normalized, { duplicateFingerprint: fingerprint, secondaryFindings: ["prior_profile_record"], decisionSource: "existing_ledger", taxYear }); continue;
+        }
         const disposition: RowDisposition = isPreTrading ? "pre_trading_start" : !inFilingScope ? "outside_scope" : "imported";
-        counts[disposition] += 1;
+        saveOutcome(disposition, disposition === "pre_trading_start" ? "Record pre-dates the saved business/trading start date." : disposition === "outside_scope" ? "Record is retained outside the selected filing scope." : "Mapped row is ready for deterministic review.", normalized, { taxYear });
         rowsToWrite.push({
           // Excel has up to 1,048,576 rows. Leave a larger fixed namespace
           // per worksheet so a last-row reference can never collide with the
@@ -883,10 +1030,19 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         });
       }
     }
+    if (unresolvedRows.length) {
+      const first = unresolvedRows[0]!;
+      res.status(400).json({ error: `Row ${first.rowNumber} in ${first.worksheet} has an unresolved date, amount, or description. Exclude it explicitly or correct the mapping.` });
+      return;
+    }
+    if (rowOutcomes.length !== workbook.totalParserRows) {
+      throw new Error("Spreadsheet source-row reconciliation failed before confirmation.");
+    }
 
     const mappingRevision = createHash("sha256").update(JSON.stringify({
       selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode, outsideScopeMode: body.data.outsideScopeMode,
+      businessStartDate,
     })).digest("hex");
     const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
     if (evidenceItem.importStatus === "done") {
@@ -921,6 +1077,18 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
       outsideScopeMode: body.data.outsideScopeMode, confirmedAt: now.toISOString(), actorUserId: req.user.id, mappingRevision,
     };
+    const sheetFinalDispositions = workbook.sheets.map((sheet) => {
+      const sheetRows = rowOutcomes.filter((row) => row.sheetId === sheet.sheetId);
+      return {
+        sheetId: sheet.sheetId, worksheet: sheet.displayName,
+        disposition: selected.has(sheet.sheetId) ? (sheetRoles.get(sheet.sheetId) === "non_transactional" ? "non_transactional" : "processed") : "unselected_sheet",
+        sourceRows: sheetRows.length,
+        dispositionCounts: sheetRows.reduce<Record<string, number>>((summary, row) => {
+          summary[row.primaryDisposition] = (summary[row.primaryDisposition] ?? 0) + 1;
+          return summary;
+        }, {}),
+      };
+    });
 
     const [updated] = await db.transaction(async (tx) => {
       const [owned] = await tx.select({ id: evidenceItemsTable.id }).from(evidenceItemsTable).where(and(
@@ -928,6 +1096,20 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         eq(evidenceItemsTable.importStatus, "processing"), eq(evidenceItemsTable.processingToken, processingToken),
       )).for("update");
       if (!owned) return [];
+      await tx.delete(spreadsheetRowOutcomesTable).where(and(
+        eq(spreadsheetRowOutcomesTable.profileId, profile.id),
+        eq(spreadsheetRowOutcomesTable.evidenceId, confirmedEvidence.id),
+      ));
+      if (rowOutcomes.length) {
+        await tx.insert(spreadsheetRowOutcomesTable).values(rowOutcomes.map((row) => ({
+          profileId: profile.id, evidenceId: confirmedEvidence.id,
+          sheetId: row.sheetId, worksheet: row.worksheet, sourceRowIndex: row.sourceRowIndex, sourceRowNumber: row.sourceRowNumber,
+          physicalLineStart: row.physicalLineStart, physicalLineEnd: row.physicalLineEnd,
+          primaryDisposition: row.primaryDisposition, secondaryFindings: row.secondaryFindings,
+          reason: row.reason, rawValueReference: row.rawValueReference, normalizedValueReference: row.normalizedValueReference,
+          duplicateFingerprint: row.duplicateFingerprint, decisionSource: row.decisionSource, mappingRevision: mappingRevision, taxYear: row.taxYear,
+        })));
+      }
       for (const item of rowsToWrite) {
         const [inserted] = await tx.insert(transactionsTable).values({
           profileId: profile.id, evidenceId: confirmedEvidence.id,
@@ -954,7 +1136,10 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         mappingSchema: (() => {
           const { lastImportError: _lastImportError, ...stateWithoutLastError } = state;
           return {
-            ...stateWithoutLastError, userDecision, confirmedMappingRevision: mappingRevision, finalDispositions: counts,
+            ...stateWithoutLastError, userDecision, reviewDraft: { ...userDecision, savedAt: now.toISOString() },
+            confirmedMappingRevision: mappingRevision, finalDispositions: counts,
+            finalSheetDispositions: sheetFinalDispositions,
+            finalSourceRowCount: rowOutcomes.length,
           };
         })() as Record<string, unknown>,
         totalRows: workbook.totalParserRows, processedRows: rowsToWrite.length, autoPostedRows: 0, inboxRows: 0,
@@ -966,7 +1151,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         profileId: profile.id, evidenceId: confirmedEvidence.id, actorUserId: req.user.id, eventType: "spreadsheet_import_confirmed",
         details: {
           contentHash: workbook.contentHash, parserVersion: "spreadsheet-parser.v2", mappingRevision,
-          userDecision, dispositionCounts: counts, importableRows: rowsToWrite.length,
+          userDecision, dispositionCounts: counts, sheetDispositions: sheetFinalDispositions,
+          auditedSourceRows: rowOutcomes.length, importableRows: rowsToWrite.length,
         },
       });
       return [saved];

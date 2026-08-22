@@ -44,6 +44,7 @@ export default function Onboarding() {
     taxYear: '2024/25',
     accountingBasis: 'cash' as 'cash' | 'accrual',
     vatRegistered: false,
+    businessStartDate: '',
   });
 
   const set = (key: keyof typeof form, value: unknown) =>
@@ -74,6 +75,7 @@ export default function Onboarding() {
         taxYear: form.taxYear,
         accountingBasis: form.accountingBasis,
         vatRegistered: form.vatRegistered,
+        businessStartDate: form.businessStartDate || null,
       });
       setActiveProfileId(id);
       navigate('/ingest');
@@ -173,6 +175,17 @@ export default function Onboarding() {
                 ))}
               </select>
               <p className="text-xs text-muted-foreground">Improves AI accuracy for your sector's allowable expenses.</p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">Business / trading start date <span className="text-muted-foreground font-normal">(optional)</span></label>
+              <input
+                type="date"
+                value={form.businessStartDate}
+                onChange={e => set('businessStartDate', e.target.value)}
+                className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
+              />
+              <p className="text-xs text-muted-foreground">We use this only to flag records that pre-date your trading activity. You can change it later.</p>
             </div>
 
             <Button className="w-full cursor-pointer gap-2" onClick={handleStep1Next}>
@@ -304,6 +317,7 @@ export default function Onboarding() {
                 { label: 'SA deadline', value: taxYearToDeadline(form.taxYear) },
                 { label: 'Accounting', value: form.accountingBasis === 'cash' ? 'Cash basis' : 'Accrual basis' },
                 { label: 'VAT',       value: form.vatRegistered ? 'Registered' : 'Not registered' },
+                ...(form.businessStartDate ? [{ label: 'Trading start', value: form.businessStartDate }] : []),
               ].map(row => (
                 <div key={row.label} className="flex justify-between text-sm">
                   <span className="text-muted-foreground">{row.label}</span>
