@@ -15,23 +15,28 @@ router.get("/profiles/:profileId/income-tax-estimate", async (req, res) => {
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const taxYear = profile.taxYear;
+    if (!taxYear) {
+      res.status(422).json({ error: "Choose a tax year before requesting an income-tax estimate" });
+      return;
+    }
 
-    if (!getUkIncomeTaxRules(profile.taxYear)) {
+    if (!getUkIncomeTaxRules(taxYear)) {
       res.status(422).json({ error: "The selected profile tax year is not supported for an income-tax estimate" });
       return;
     }
 
     const transactions = await db.select().from(transactionsTable)
       .where(and(eq(transactionsTable.profileId, profile.id), eq(transactionsTable.ledgerStatus, "active")));
-    const ledger = summarizeTaxYearLedger(transactions, profile.taxYear);
+    const ledger = summarizeTaxYearLedger(transactions, taxYear);
     if (!ledger) { res.status(422).json({ error: "The selected profile tax year is not supported for an income-tax estimate" }); return; }
     if (!ledger.hasStarted) { res.status(422).json({ error: "The selected tax year has not started yet" }); return; }
 
     const accountingBasis: AccountingBasis = profile.accountingBasis === "accrual" ? "accrual" : "cash";
-    const sa100Context = await getOrMigrateSa100Context(req.user.id, profile.taxYear);
+    const sa100Context = await getOrMigrateSa100Context(req.user.id, taxYear);
     const otherTaxableIncome = sa100Context?.otherTaxableIncome ?? null;
     const estimate = estimateSoleTraderIncomeTax({
-      taxYear: profile.taxYear,
+      taxYear,
       accountingBasis,
       businessProfitInput: ledger.taxableBusinessProfit,
       otherTaxableIncome,
@@ -39,7 +44,7 @@ router.get("/profiles/:profileId/income-tax-estimate", async (req, res) => {
 
     res.json({
       period: ledger.period,
-      taxYear: profile.taxYear,
+      taxYear,
       accountingBasis,
       profitLoss: {
         totalIncome: ledger.totalIncome,

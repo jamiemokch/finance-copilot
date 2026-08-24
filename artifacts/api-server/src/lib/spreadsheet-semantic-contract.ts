@@ -245,6 +245,8 @@ export const spreadsheetAIResponseContract = {
  */
 export const SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN = 'provider-compatibility-check-v1';
 export const SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID = 'sheet_compatibility_probe';
+export const SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN = 'provider-positive-compatibility-v1';
+export const SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_SHEET_ID = 'sheet_positive_compatibility_probe';
 
 export function buildSpreadsheetProviderCompatibilityWorkbook(): SpreadsheetWorkbook {
   return {
@@ -313,6 +315,94 @@ export function buildSpreadsheetProviderCompatibilityPayload(): Record<string, u
     },
     responseContract: spreadsheetAIResponseContract,
     instruction: 'This is a provider compatibility probe. Return only an abstain response using the supplied synthetic sheet and continuation token. Use no workbook facts, and do not write records or request real workbook context.',
+  };
+}
+
+/**
+ * A separate, synthetic ledger that requires a provider-produced positive
+ * final_plan. It is never derived from an upload, evidence record, or session.
+ */
+export function buildSpreadsheetProviderPositiveCompatibilityWorkbook(): SpreadsheetWorkbook {
+  return {
+    sourceByteLength: 0,
+    fileType: 'csv',
+    totalParserRows: 2,
+    totalParserCells: 6,
+    sheets: [{
+      sheetId: SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_SHEET_ID,
+      displayName: 'synthetic-positive',
+      index: 0,
+      rowCount: 2,
+      columnCount: 3,
+      parserRange: { startRow: 1, endRow: 2, startColumn: 1, endColumn: 3 },
+      rows: [
+        {
+          rowNumber: 1,
+          cells: [],
+          values: ['Date', 'Description', 'Amount'],
+          hidden: false,
+          hasFormula: false,
+          hasStyle: false,
+          merged: false,
+        },
+        {
+          rowNumber: 2,
+          cells: [],
+          values: ['[date]', '[synthetic movement]', '[number:positive]'],
+          hidden: false,
+          hasFormula: false,
+          hasStyle: false,
+          merged: false,
+        },
+      ],
+      headers: ['Date', 'Description', 'Amount'],
+      inferredHeaderRow: 1,
+      isEmpty: false,
+      structural: {
+        populatedArea: { startRow: 1, endRow: 2, startColumn: 1, endColumn: 3 },
+        nonEmptyCellCount: 6,
+        formulaCount: 0,
+        mergedCellCount: 0,
+        mergedRangeCount: 0,
+        styledCellCount: 0,
+        hiddenRowCount: 0,
+      },
+    }],
+  };
+}
+
+export function buildSpreadsheetProviderPositiveCompatibilityPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'workbook_overview',
+    continuationToken: SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
+    overview: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      fileType: 'csv',
+      sheets: [{
+        sheetId: SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_SHEET_ID,
+        index: 0,
+        displayName: '[sheet:synthetic-positive]',
+        dimensions: { rows: 2, columns: 3 },
+        parserRange: { startRow: 1, endRow: 2, startColumn: 1, endColumn: 3 },
+        populatedArea: { startRow: 1, endRow: 2, startColumn: 1, endColumn: 3 },
+        structuralSignals: {
+          nonEmptyCellCount: 6,
+          formulaCount: 0,
+          mergedCellCount: 0,
+          mergedRangeCount: 0,
+          styledCellCount: 0,
+          hiddenRowCount: 0,
+        },
+        availableColumnIds: ['col_A', 'col_B', 'col_C'],
+        overviewRows: [
+          { rowNumber: 1, values: ['[header:date]', '[header:description]', '[header:amount]'] },
+          { rowNumber: 2, values: ['[date]', '[text:length-19]', '[number:positive]'] },
+        ],
+      }],
+    },
+    responseContract: spreadsheetAIResponseContract,
+    instruction: 'This is a provider compatibility probe. Return only a final_plan response using the supplied synthetic sheet and continuation token. The plan must be complete, designate the one sheet as transactional, use header row 1 and data/include row 2, and bind date, description, and signedAmount to col_A, col_B, and col_C. Use no workbook facts beyond this synthetic payload, do not request context, and do not write records.',
   };
 }
 

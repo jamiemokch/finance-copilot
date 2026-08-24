@@ -176,6 +176,11 @@ router.post("/profiles/:profileId/bank-imports", async (req, res) => {
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const taxYear = profile.taxYear;
+    if (!taxYear) {
+      res.status(422).json({ error: "Choose a tax year before starting a bank import." });
+      return;
+    }
     const [[account], [upload]] = await Promise.all([
       db.select().from(financialAccountsTable).where(and(
         eq(financialAccountsTable.id, body.data.accountId),
@@ -227,7 +232,7 @@ router.post("/profiles/:profileId/bank-imports", async (req, res) => {
     const batchValues = {
       profileId: profile.id,
       financialAccountId: account.id,
-      taxYearSnapshot: profile.taxYear,
+      taxYearSnapshot: taxYear,
       accountingBasisSnapshot: profile.accountingBasis,
       filename: body.data.filename,
       objectPath: body.data.objectPath,
@@ -287,6 +292,11 @@ router.post("/profiles/:profileId/bank-imports/:batchId/preview", async (req, re
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
+    const taxYear = profile.taxYear;
+    if (!taxYear) {
+      res.status(422).json({ error: "Choose a tax year before previewing a bank import." });
+      return;
+    }
     const batch = await ownedBatch(profile.id, req.params.batchId);
     if (!batch) { res.status(404).json({ error: "Bank import not found" }); return; }
     if (batch.status === "committed") { res.status(409).json({ error: "This bank import has already been committed." }); return; }
@@ -298,7 +308,7 @@ router.post("/profiles/:profileId/bank-imports/:batchId/preview", async (req, re
     const mapping = body.data.mapping as BankMapping;
     const mappingError = validateBankMapping(mapping, parsed.rows);
     if (mappingError) { res.status(400).json({ error: mappingError }); return; }
-    const parsedRows = parseMappedBankRows(parsed.rows, mapping, profile.taxYear);
+    const parsedRows = parseMappedBankRows(parsed.rows, mapping, taxYear);
     const stagedRows = await previewRowsForProfile(profile.id, batch.financialAccountId, parsedRows);
     const stats = previewStats(stagedRows);
 
@@ -329,7 +339,7 @@ router.post("/profiles/:profileId/bank-imports/:batchId/preview", async (req, re
       }));
       if (rowsToInsert.length) await tx.insert(bankImportRowsTable).values(rowsToInsert);
       const [updated] = await tx.update(bankImportBatchesTable).set({
-        taxYearSnapshot: profile.taxYear,
+        taxYearSnapshot: taxYear,
         accountingBasisSnapshot: profile.accountingBasis,
         encoding: parsed.encoding,
         delimiter: parsed.delimiter,

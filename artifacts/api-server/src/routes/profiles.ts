@@ -8,7 +8,9 @@ import { getOrMigrateSa100Context, updateSa100Context } from "../lib/self-assess
 const router = Router();
 
 async function profileWithAnnualTaxContext(profile: typeof profilesTable.$inferSelect) {
-  const context = await getOrMigrateSa100Context(profile.userId, profile.taxYear);
+  const context = profile.taxYear
+    ? await getOrMigrateSa100Context(profile.userId, profile.taxYear)
+    : null;
   return {
     ...profile,
     otherTaxableIncome: context?.otherTaxableIncome ?? null,
@@ -124,6 +126,10 @@ router.patch("/profiles/:profileId", async (req, res) => {
       res.status(400).json({ error: "Other taxable income must use the selected tax year" });
       return;
     }
+    if (body.data.otherTaxableIncome !== undefined && !effectiveTaxYear) {
+      res.status(422).json({ error: "Choose a tax year before saving other taxable income" });
+      return;
+    }
 
     // Validate the complete resulting state rather than only the submitted
     // patch. Users may edit one coverage field or one opening detail at a time.
@@ -178,8 +184,13 @@ router.patch("/profiles/:profileId", async (req, res) => {
       .returning();
 
     if (body.data.otherTaxableIncome !== undefined) {
-      const current = await getOrMigrateSa100Context(req.user.id, effectiveTaxYear);
-      await updateSa100Context(req.user.id, effectiveTaxYear, {
+      const taxYear = effectiveTaxYear;
+      if (!taxYear) {
+        res.status(422).json({ error: "Choose a tax year before saving other taxable income" });
+        return;
+      }
+      const current = await getOrMigrateSa100Context(req.user.id, taxYear);
+      await updateSa100Context(req.user.id, taxYear, {
         otherTaxableIncome: body.data.otherTaxableIncome,
         allSelfEmploymentsDisclosed: current?.allSelfEmploymentsDisclosed ?? null,
       });

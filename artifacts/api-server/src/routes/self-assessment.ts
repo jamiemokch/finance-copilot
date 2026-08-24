@@ -178,10 +178,12 @@ router.patch('/profiles/:profileId/self-assessment/sa103s', async (req, res): Pr
     const profile = await requireProfile(req.params.profileId as string, req.user.id);
     if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
     if (profile.type !== 'sole_trader') { res.status(422).json({ error: 'Business return readiness is available for sole-trader profiles only' }); return; }
-    const existing = await businessContext(profile.id, profile.taxYear);
+    const taxYear = profile.taxYear;
+    if (!taxYear) { res.status(422).json({ error: 'Choose a tax year before saving Self Assessment business details' }); return; }
+    const existing = await businessContext(profile.id, taxYear);
     const values = {
       profileId: profile.id,
-      taxYear: profile.taxYear,
+      taxYear,
       selfEmploymentStartDate: parsed.data.selfEmploymentStartDate === undefined
         ? existing?.selfEmploymentStartDate ?? null
         : parsed.data.selfEmploymentStartDate,
@@ -222,31 +224,33 @@ router.get('/profiles/:profileId/self-assessment/readiness', async (req, res): P
     const profile = await requireProfile(req.params.profileId as string, req.user.id);
     if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
     if (profile.type !== 'sole_trader') { res.status(422).json({ error: 'Business return readiness is available for sole-trader profiles only' }); return; }
+    const taxYear = profile.taxYear;
+    if (!taxYear) { res.status(422).json({ error: 'Choose a tax year before viewing Self Assessment readiness' }); return; }
     const [identity, sa100, sa103s, transactions, ownedProfiles] = await Promise.all([
       publicIdentity(req.user.id),
-      getOrMigrateSa100Context(req.user.id, profile.taxYear),
-      businessContext(profile.id, profile.taxYear),
+      getOrMigrateSa100Context(req.user.id, taxYear),
+      businessContext(profile.id, taxYear),
       db.select().from(transactionsTable).where(and(
         eq(transactionsTable.profileId, profile.id),
         eq(transactionsTable.ledgerStatus, 'active'),
       )),
       db.select().from(profilesTable).where(and(
         eq(profilesTable.userId, req.user.id),
-        eq(profilesTable.taxYear, profile.taxYear),
+        eq(profilesTable.taxYear, taxYear),
       )),
     ]);
-    const ledger = summarizeTaxYearLedger(transactions, profile.taxYear);
+    const ledger = summarizeTaxYearLedger(transactions, taxYear);
     if (!ledger) { res.status(422).json({ error: 'The selected tax year is not supported' }); return; }
     const returnProfiles = ownedProfiles.filter((candidate) => candidate.type === 'sole_trader');
     const contextByProfileId = new Map((await Promise.all(
       returnProfiles.map(async (candidate) => [
         candidate.id,
-        await businessContext(candidate.id, candidate.taxYear),
+        candidate.taxYear ? await businessContext(candidate.id, candidate.taxYear) : null,
       ] as const),
     )));
 
     const readiness = buildSelfAssessmentReadiness({
-      taxYear: profile.taxYear,
+      taxYear,
       profile: {
         id: profile.id,
         name: profile.name,
@@ -279,7 +283,7 @@ router.get('/profiles/:profileId/self-assessment/readiness', async (req, res): P
     res.json({
       identity,
       sa100Context: sa100 ?? {
-        taxYear: profile.taxYear,
+        taxYear,
         otherTaxableIncome: null,
         allSelfEmploymentsDisclosed: null,
         migrationConflict: false,

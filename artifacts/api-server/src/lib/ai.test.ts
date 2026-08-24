@@ -9,6 +9,7 @@ import {
   providerCallWithTimeout,
   resetManagedSpreadsheetProviderPolicyForTests,
   runSpreadsheetProviderCompatibilityCheck,
+  runSpreadsheetProviderPositiveSemanticCompatibilityCheck,
   SPREADSHEET_PROVIDER_MODEL,
   type SpreadsheetSemanticSession,
 } from './ai.js';
@@ -27,6 +28,9 @@ import {
   buildSpreadsheetProviderCompatibilityPayload,
   SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
   SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+  buildSpreadsheetProviderPositiveCompatibilityPayload,
+  SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_SHEET_ID,
+  SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
 } from './spreadsheet-semantic-contract.js';
 
 function failingClient(responses: Array<() => Promise<never>>): OpenAI {
@@ -245,6 +249,51 @@ test('the manual compatibility probe sends only a synthetic semantic payload and
   assert.equal(payload.continuationToken, SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN);
   assert.deepEqual(payload.overview, buildSpreadsheetProviderCompatibilityPayload().overview);
   assert.doesNotMatch(JSON.stringify(payload.overview), /Jane|email|private/i);
+  assert.equal(result.payload.containsWorkbookData, false);
+  assert.equal(result.payload.createsRecords, false);
+});
+
+test('the positive compatibility probe requires a parser-valid synthetic final plan', async () => {
+  let request: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: Record<string, unknown>) => {
+      request = input;
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              response: finalResponse(
+                SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
+                [semanticSheet(SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_SHEET_ID, 'transactional')],
+              ),
+            }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await runSpreadsheetProviderPositiveSemanticCompatibilityCheck({
+    client,
+    environment: 'test',
+    managedRouteConfigured: true,
+    retryDelayMs: 0,
+  });
+  assert.equal(result.status, 'compatible');
+  assert.equal(result.semanticBranch, 'final_plan');
+  assert.deepEqual(result.checks, {
+    strictSchemaAlias: 'accepted',
+    json: 'valid',
+    zod: 'valid',
+    continuation: 'valid',
+    parserBounds: 'valid',
+    semanticPlan: 'valid',
+    responseContract: 'valid',
+  });
+  const payload = JSON.parse(String((request?.messages as Array<{ content: string }>).at(-1)?.content)) as Record<string, unknown>;
+  assert.equal(payload.continuationToken, SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN);
+  assert.deepEqual(payload.overview, buildSpreadsheetProviderPositiveCompatibilityPayload().overview);
+  assert.doesNotMatch(JSON.stringify(payload), /Jane|email|private|yatson/i);
   assert.equal(result.payload.containsWorkbookData, false);
   assert.equal(result.payload.createsRecords, false);
 });

@@ -37,6 +37,9 @@ import {
   buildSpreadsheetProviderCompatibilityPayload,
   buildSpreadsheetProviderCompatibilityWorkbook,
   SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+  buildSpreadsheetProviderPositiveCompatibilityPayload,
+  buildSpreadsheetProviderPositiveCompatibilityWorkbook,
+  SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
   type SpreadsheetImportPlan,
 } from './spreadsheet-semantic-contract.js';
 
@@ -494,6 +497,9 @@ export type SpreadsheetProviderCompatibilityCheckResult = {
 };
 
 type CompatibilityCheckState = SpreadsheetProviderCompatibilityCheckResult['checks'];
+export type SpreadsheetPositiveSemanticCompatibilityCheckResult = SpreadsheetProviderCompatibilityCheckResult & {
+  semanticBranch: 'final_plan' | 'not_received';
+};
 const COMPATIBILITY_CHECK_ALLOWED_ENVIRONMENTS = new Set(['development', 'test']);
 
 function validateCompatibilityResponse(content: string): {
@@ -621,6 +627,103 @@ function validateCompatibilityResponse(content: string): {
   }
 }
 
+function validatePositiveSemanticCompatibilityResponse(content: string): {
+  checks: Omit<SpreadsheetProviderCompatibilityCheckResult['checks'], 'strictSchemaAlias'>;
+  valid: boolean;
+  semanticBranch: 'final_plan' | 'not_received';
+} {
+  const notReceived = {
+    json: 'not_received' as const,
+    zod: 'not_received' as const,
+    continuation: 'not_received' as const,
+    parserBounds: 'not_received' as const,
+    semanticPlan: 'not_received' as const,
+    responseContract: 'not_received' as const,
+  };
+  if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
+    return { valid: false, semanticBranch: 'not_received', checks: { ...notReceived, json: 'invalid', responseContract: 'invalid' } };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    return { valid: false, semanticBranch: 'not_received', checks: { ...notReceived, json: 'invalid', responseContract: 'invalid' } };
+  }
+  const parsed = spreadsheetAIProviderWireResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      valid: false,
+      semanticBranch: 'not_received',
+      checks: { ...notReceived, json: 'valid', zod: 'invalid', responseContract: 'invalid' },
+    };
+  }
+  const response = parsed.data.response;
+  if (response.stage !== 'final_plan') {
+    return {
+      valid: false,
+      semanticBranch: 'not_received',
+      checks: {
+        ...notReceived,
+        json: 'valid',
+        zod: 'valid',
+        continuation: response.stage === 'request_context' && response.request.continuationToken === SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN
+          ? 'valid'
+          : 'not_received',
+        responseContract: 'invalid',
+      },
+    };
+  }
+  if (response.plan.continuationToken !== SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN) {
+    return {
+      valid: false,
+      semanticBranch: 'not_received',
+      checks: { ...notReceived, json: 'valid', zod: 'valid', continuation: 'invalid', responseContract: 'invalid' },
+    };
+  }
+  if (response.plan.status !== 'complete' || response.plan.abstention) {
+    return {
+      valid: false,
+      semanticBranch: 'not_received',
+      checks: {
+        ...notReceived,
+        json: 'valid',
+        zod: 'valid',
+        continuation: 'valid',
+        semanticPlan: 'invalid',
+        responseContract: 'invalid',
+      },
+    };
+  }
+  const planError = validateSpreadsheetImportPlan(response.plan, buildSpreadsheetProviderPositiveCompatibilityWorkbook());
+  if (planError) {
+    return {
+      valid: false,
+      semanticBranch: 'not_received',
+      checks: {
+        ...notReceived,
+        json: 'valid',
+        zod: 'valid',
+        continuation: 'valid',
+        parserBounds: 'invalid',
+        semanticPlan: 'invalid',
+        responseContract: 'invalid',
+      },
+    };
+  }
+  return {
+    valid: true,
+    semanticBranch: 'final_plan',
+    checks: {
+      json: 'valid',
+      zod: 'valid',
+      continuation: 'valid',
+      parserBounds: 'valid',
+      semanticPlan: 'valid',
+      responseContract: 'valid',
+    },
+  };
+}
+
 function compatibilityChecksFromAttempts(attempts: SpreadsheetProviderAttempt[]): CompatibilityCheckState {
   const aliasAttempts = attempts.filter((attempt) => attempt.resolvedModel === SPREADSHEET_PROVIDER_MODEL && attempt.responseMode === 'json_schema');
   return {
@@ -719,6 +822,97 @@ export async function runSpreadsheetProviderCompatibilityCheck(options: {
     status,
     routeClass: 'replit_ai_integrations',
     payload: payloadMetadata,
+    checks,
+    attempts: attempts.map((attempt) => ({
+      attemptNumber: attempt.attemptNumber,
+      requestedModel: attempt.requestedModel,
+      resolvedModel: attempt.resolvedModel,
+      responseMode: attempt.responseMode,
+      outcomeCategory: attempt.outcomeCategory,
+      safeStatus: attempt.safeStatus,
+      statusCode: attempt.statusCode,
+      retryable: attempt.retryable,
+      failurePhase: attempt.failurePhase,
+    })),
+  };
+}
+
+/**
+ * Runs a separate data-free positive semantic probe. Unlike the safe abstain
+ * compatibility check, this requires the provider to produce one complete,
+ * parser-valid final_plan for a synthetic two-row ledger.
+ */
+export async function runSpreadsheetProviderPositiveSemanticCompatibilityCheck(options: {
+  client?: OpenAI;
+  timeoutMs?: number;
+  retryDelayMs?: number;
+  environment?: string;
+  managedRouteConfigured?: boolean;
+  allowRuntimeVerification?: boolean;
+} = {}): Promise<SpreadsheetPositiveSemanticCompatibilityCheckResult> {
+  const payloadMetadata = {
+    kind: 'synthetic_semantic_v2' as const,
+    containsWorkbookData: false as const,
+    createsRecords: false as const,
+  };
+  const empty = (status: SpreadsheetProviderCompatibilityCheckResult['status']): SpreadsheetPositiveSemanticCompatibilityCheckResult => ({
+    status,
+    routeClass: 'replit_ai_integrations',
+    payload: payloadMetadata,
+    semanticBranch: 'not_received',
+    checks: {
+      strictSchemaAlias: 'not_reached',
+      json: 'not_received',
+      zod: 'not_received',
+      continuation: 'not_received',
+      parserBounds: 'not_received',
+      semanticPlan: 'not_received',
+      responseContract: 'not_received',
+    },
+    attempts: [],
+  });
+  const environment = options.environment ?? process.env.NODE_ENV;
+  if ((!environment || !COMPATIBILITY_CHECK_ALLOWED_ENVIRONMENTS.has(environment))
+    && !options.allowRuntimeVerification) return empty('blocked_non_production_environment');
+  const managedRouteConfigured = options.managedRouteConfigured
+    ?? Boolean(process.env.AI_INTEGRATIONS_OPENAI_BASE_URL);
+  if (!managedRouteConfigured || (!options.client && !isConfigured())) return empty('not_configured');
+
+  const attempts: SpreadsheetProviderAttempt[] = [];
+  let result: Awaited<ReturnType<typeof providerCallWithTimeout>> | null = null;
+  let providerError = false;
+  try {
+    result = await providerCallWithTimeout(options.client ?? getClient(), JSON.stringify(buildSpreadsheetProviderPositiveCompatibilityPayload()), {
+      timeoutMs: options.timeoutMs,
+      retryDelayMs: options.retryDelayMs,
+      maxProviderCalls: 1,
+      routeClass: 'replit_ai_integrations',
+      initialResolvedModel: SPREADSHEET_PROVIDER_POLICY.resolvedModel,
+      initialResponseMode: SPREADSHEET_PROVIDER_POLICY.responseMode,
+      classifyResponse: (content) => !validatePositiveSemanticCompatibilityResponse(content).valid
+        ? { outcomeCategory: 'contract_invalid', safeStatus: 'contract_invalid', failurePhase: 'response_validation' }
+        : null,
+      onAttempt: async (attempt) => { attempts.push(attempt); },
+    });
+  } catch {
+    providerError = true;
+  }
+  const checks = compatibilityChecksFromAttempts(attempts);
+  const validation = result ? validatePositiveSemanticCompatibilityResponse(result.content) : null;
+  if (validation) Object.assign(checks, validation.checks);
+  const terminalAttempt = attempts.at(-1);
+  const status: SpreadsheetProviderCompatibilityCheckResult['status'] = checks.responseContract === 'invalid'
+    ? 'contract_invalid'
+    : providerError
+      ? terminalAttempt?.outcomeCategory === 'model_unavailable' ? 'model_unavailable'
+        : terminalAttempt?.outcomeCategory === 'provider_schema_invalid' ? 'route_incompatible'
+          : 'route_unavailable'
+      : 'compatible';
+  return {
+    status,
+    routeClass: 'replit_ai_integrations',
+    payload: payloadMetadata,
+    semanticBranch: validation?.semanticBranch ?? 'not_received',
     checks,
     attempts: attempts.map((attempt) => ({
       attemptNumber: attempt.attemptNumber,
