@@ -1299,6 +1299,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       if (!attempt) return;
       await db.transaction(async (tx) => {
         const [checkpoint] = await tx.update(spreadsheetSemanticSessionsTable).set({
+          providerCalls: Math.max(semanticRecord.providerCalls, attempt.attemptNumber),
           providerAttempts: attempts,
           leaseExpiresAt: new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS),
           updatedAt: new Date(),
@@ -1317,6 +1318,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
           attemptNumber: attempt.attemptNumber,
           telemetryVersion: attempt.telemetryVersion,
           routeClass: attempt.routeClass,
+          requestedModel: attempt.requestedModel,
+          resolvedModel: attempt.resolvedModel,
           model: attempt.model,
           responseMode: attempt.responseMode,
           startedAt: new Date(attempt.startedAt),

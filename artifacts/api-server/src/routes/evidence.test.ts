@@ -1094,7 +1094,9 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
        ));
        assert.equal(providerAttempts.length, 1, 'only the current fenced lease may persist provider telemetry');
        assert.equal(providerAttempts.every((attempt) => attempt.telemetryVersion === 'spreadsheet-provider-attempt.v1'), true);
-       assert.equal(providerAttempts.every((attempt) => attempt.model === 'gpt-5.4-mini'), true);
+       assert.equal(providerAttempts.every((attempt) => attempt.requestedModel === 'gpt-5.4-mini'), true);
+       assert.equal(providerAttempts.every((attempt) => attempt.resolvedModel === 'gpt-5.4-mini'), true);
+       assert.equal(providerAttempts.every((attempt) => attempt.model === attempt.resolvedModel), true);
        assert.equal(providerAttempts.every((attempt) => attempt.failurePhase === null), true);
       const reclaimedPlan = JSON.stringify(reclaimedSession.currentPlan);
 

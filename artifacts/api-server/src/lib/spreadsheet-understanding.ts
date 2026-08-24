@@ -137,15 +137,18 @@ export type SpreadsheetProviderAttempt = {
   telemetryVersion: 'spreadsheet-provider-attempt.v1';
   attemptNumber: number;
   routeClass: 'replit_ai_integrations' | 'direct_openai';
+  requestedModel: string;
+  resolvedModel: string;
+  /** @deprecated Kept for readers of the original telemetry shape. */
   model: string;
   responseMode: 'json_schema' | 'json_object';
   startedAt: string;
   durationMs: number;
-  outcomeCategory: 'success' | 'timeout' | 'rate_limited' | 'compatibility' | 'unavailable';
-  safeStatus: 'ok' | 'timeout' | 'rate_limited' | 'compatibility' | 'network' | 'http_error';
+  outcomeCategory: 'success' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid' | 'unavailable';
+  safeStatus: 'ok' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid' | 'network' | 'http_error';
   statusCode: number | null;
   retryable: boolean;
-  failurePhase: 'provider_request' | null;
+  failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
 };
 
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */

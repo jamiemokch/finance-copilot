@@ -15,7 +15,9 @@ export const SPREADSHEET_SEMANTIC_SCHEMA_VERSION = 'spreadsheet-semantic.v2' as 
 export const SPREADSHEET_SEMANTIC_LIMITS = {
   maxHierarchyDepth: 4,
   maxProviderCalls: 6,
-  maxCallsPerStage: 2,
+  // Alias resolution may require alias strict → dated strict → the narrowly
+  // permitted JSON-object compatibility fallback.
+  maxCallsPerStage: 3,
   maxOverviewRowsPerSheet: 8,
   maxOverviewCellsPerSheet: 96,
   maxRequestedRanges: 4,

@@ -3,7 +3,14 @@ import test from 'node:test';
 import type OpenAI from 'openai';
 import * as XLSX from 'xlsx';
 import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet } from './spreadsheet.js';
-import { analyseSpreadsheetWithAI, detectColumnSchema, providerCallWithTimeout, type SpreadsheetSemanticSession } from './ai.js';
+import {
+  analyseSpreadsheetWithAI,
+  detectColumnSchema,
+  providerCallWithTimeout,
+  SPREADSHEET_PROVIDER_DATED_MODEL,
+  SPREADSHEET_PROVIDER_MODEL,
+  type SpreadsheetSemanticSession,
+} from './ai.js';
 import {
   buildRequestedSpreadsheetContext,
   buildSpreadsheetWorkbookOverview,
@@ -87,7 +94,7 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   ]);
 
   await assert.rejects(
-    () => providerCallWithTimeout(client, '{}', { timeoutMs: 5, retryDelayMs: 0 }),
+    () => providerCallWithTimeout(client, '{}', { timeoutMs: 5, retryDelayMs: 0, maxProviderCalls: 2 }),
     (error: unknown) => {
       assert.equal((error as { message?: string }).message, 'timeout');
       assert.equal((error as { providerCalls?: number }).providerCalls, 2);
@@ -96,16 +103,18 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   );
 });
 
-test('an explicit structured-output compatibility rejection uses the validated JSON fallback once', async () => {
+test('a managed strict-schema alias rejection resolves to the dated strict-schema model', async () => {
   const attemptedModes: string[] = [];
-  const telemetry: Array<{ telemetryVersion: string; responseMode: string; outcomeCategory: string; safeStatus: string }> = [];
+  const attemptedModels: string[] = [];
+  const telemetry: Array<{ telemetryVersion: string; requestedModel: string; resolvedModel: string; responseMode: string; outcomeCategory: string; safeStatus: string }> = [];
   let calls = 0;
   const client = {
-    chat: { completions: { create: async (input: { response_format?: { type?: string } }) => {
+    chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string } }) => {
       calls += 1;
       attemptedModes.push(input.response_format?.type ?? 'missing');
+      attemptedModels.push(input.model ?? 'missing');
       if (calls === 1) {
-        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
+        const error = new Error('response_format json_schema is unsupported; never persist raw workbook value: private-123') as Error & { status?: number };
         error.status = 400;
         throw error;
       }
@@ -115,17 +124,44 @@ test('an explicit structured-output compatibility rejection uses the validated J
 
   const result = await providerCallWithTimeout(client, '{}', {
     retryDelayMs: 0,
+    routeClass: 'replit_ai_integrations',
     onAttempt: async (attempt) => { telemetry.push(attempt); },
   });
 
   assert.equal(result.providerCalls, 2);
-  assert.deepEqual(attemptedModes, ['json_schema', 'json_object']);
-  assert.deepEqual(telemetry.map((attempt) => [attempt.responseMode, attempt.outcomeCategory, attempt.safeStatus]), [
-    ['json_schema', 'compatibility', 'compatibility'],
-    ['json_object', 'success', 'ok'],
+  assert.deepEqual(attemptedModes, ['json_schema', 'json_schema']);
+  assert.deepEqual(attemptedModels, [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_DATED_MODEL]);
+  assert.deepEqual(telemetry.map((attempt) => [attempt.requestedModel, attempt.resolvedModel, attempt.responseMode, attempt.outcomeCategory, attempt.safeStatus]), [
+    [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_MODEL, 'json_schema', 'compatibility', 'compatibility'],
+    [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema', 'success', 'ok'],
   ]);
   assert.equal(telemetry.every((attempt) => attempt.telemetryVersion === 'spreadsheet-provider-attempt.v1'), true);
-  assert.equal(telemetry.every((attempt) => !JSON.stringify(attempt).includes('unsupported')), true);
+  assert.equal(telemetry.every((attempt) => !/unsupported|private-123|workbook value|messages|content/i.test(JSON.stringify(attempt))), true);
+});
+
+test('JSON-object fallback is reserved for an explicit strict-format rejection after dated-model resolution', async () => {
+  const attempted: Array<[string, string]> = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string } }) => {
+      calls += 1;
+      attempted.push([input.model ?? 'missing', input.response_format?.type ?? 'missing']);
+      if (calls < 3) {
+        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
+        error.status = 400;
+        throw error;
+      }
+      return { choices: [{ message: { content: '{}' } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', { retryDelayMs: 0, routeClass: 'direct_openai' });
+  assert.equal(result.providerCalls, 3);
+  assert.deepEqual(attempted, [
+    [SPREADSHEET_PROVIDER_MODEL, 'json_schema'],
+    [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema'],
+    [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_object'],
+  ]);
 });
 
 test('AI fallback telemetry reports both retry and timeout attempts', async () => {
@@ -151,8 +187,8 @@ test('AI fallback telemetry reports both retry and timeout attempts', async () =
 
   assert.equal(result.status, 'failed');
   assert.equal(result.reason, 'AI analysis timed out.');
-  assert.equal(result.providerCalls, 2);
-  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout']);
+  assert.equal(result.providerCalls, 3);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout', 'timeout']);
   assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'replit_ai_integrations' || attempt.routeClass === 'direct_openai'), true);
   assert.equal(result.analysis?.sheets.every((sheet) => !sheet.selected), true, 'a provider failure is never an import plan');
   assert.deepEqual(result.analysis?.sheets.map((sheet) => sheet.mapping.columns), [{}], 'manual recovery must not receive locally inferred column defaults');
@@ -278,6 +314,155 @@ test('provider receives the complete nested strict JSON schema contract', async 
   assert.equal(defs.sheetPlan?.additionalProperties, false);
   assert.equal(defs.fields?.additionalProperties, false);
   assert.equal(defs.request?.additionalProperties, false);
+});
+
+test('a provider-success contract-invalid response gets one bounded repair pass and is revalidated', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Private consulting payment,10\n'), 'text/csv', 'repair.csv');
+  let calls = 0;
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        const invalid = {
+          ...finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+          unexpectedField: true,
+        };
+        return { choices: [{ message: { content: JSON.stringify(invalid) } }] };
+      }
+      repairPayload = payload;
+      const returned = payload.returnedSemanticContent as { plan?: { continuationToken?: string } };
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify(finalResponse(String(returned.plan?.continuationToken), [semanticSheet('sheet_1', 'transactional')])),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.equal(calls, 2);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['success', null],
+  ]);
+  assert.equal(repairPayload?.stage, 'repair_response_contract');
+  assert.match(JSON.stringify(repairPayload), /returnedSemanticContent/);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+  assert.doesNotMatch(JSON.stringify(repairPayload), /Private consulting payment/);
+});
+
+test('repair preserves a previously proven JSON-object compatibility mode', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,JSON-object repair,13\n'), 'text/csv', 'json-object-repair.csv');
+  const requests: Array<{ model?: string; mode?: string }> = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
+      calls += 1;
+      requests.push({ model: input.model, mode: input.response_format?.type });
+      if (calls < 3) {
+        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
+        error.status = 400;
+        throw error;
+      }
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 3) {
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                ...finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+                unexpectedField: true,
+              }),
+            },
+          }],
+        };
+      }
+      const returned = payload.returnedSemanticContent as { plan?: { continuationToken?: string } };
+      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(returned.plan?.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.deepEqual(requests, [
+    { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
+    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_schema' },
+    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
+    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
+  ]);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.responseMode, attempt.outcomeCategory, attempt.failurePhase]), [
+    ['json_schema', 'compatibility', 'provider_request'],
+    ['json_schema', 'compatibility', 'provider_request'],
+    ['json_object', 'contract_invalid', 'response_validation'],
+    ['json_object', 'success', null],
+  ]);
+});
+
+test('a contract-invalid repair result remains unavailable and cannot become an import plan', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'repair-failure.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: JSON.stringify(calls === 1 ? { invalid: true } : { stillInvalid: true }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'AI returned a malformed response.');
+  assert.equal(result.providerCalls, 2);
+  assert.equal((result.semanticPlan as { status?: string }).status, 'incomplete');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['contract_invalid', 'repair_validation'],
+  ]);
+});
+
+test('a failed semantic session retries to success without replaying prior provider attempts', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry-only sale,17\n'), 'text/csv', 'retry-after-contract-failure.csv');
+  const checkpoints: SpreadsheetSemanticSession[] = [];
+  let failedCalls = 0;
+  const failedClient = {
+    chat: { completions: { create: async () => {
+      failedCalls += 1;
+      return { choices: [{ message: { content: JSON.stringify(failedCalls === 1 ? { invalid: true } : { stillInvalid: true }) } }] };
+    } } },
+  } as unknown as OpenAI;
+  const first = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: failedClient,
+    retryDelayMs: 0,
+    persistSession: async (session) => { checkpoints.push(structuredClone(session)); },
+  });
+  assert.equal(first.status, 'failed');
+  assert.equal(failedCalls, 2, 'one invalid response and one repair attempt are bounded');
+  const failedSession = checkpoints.at(-1);
+  assert.ok(failedSession, 'the failed state is durable before an explicit retry');
+
+  let retryCalls = 0;
+  const retryClient = scriptedClient((payload) => {
+    retryCalls += 1;
+    return finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]);
+  });
+  const retried = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: retryClient,
+    retryDelayMs: 0,
+    session: {
+      ...failedSession,
+      stage: 'workbook_overview',
+      currentPlan: null,
+    },
+  });
+  assert.equal(retried.status, 'success');
+  assert.equal(retryCalls, 1, 'the explicit retry issues exactly one new provider request');
+  assert.equal(retried.providerCalls, 3, 'the durable session retains its real prior provider work count');
+  assert.equal(retried.providerAttempts?.length, 3, 'prior attempts are retained rather than duplicated');
 });
 
 test('a persisted pending continuation resumes after an interrupted worker without repeating its overview call', async () => {

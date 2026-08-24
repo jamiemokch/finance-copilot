@@ -328,6 +328,10 @@ export const spreadsheetSemanticProviderAttemptsTable = pgTable('spreadsheet_sem
   attemptNumber: integer('attempt_number').notNull(),
   telemetryVersion: text('telemetry_version').notNull(),
   routeClass: text('route_class').notNull(),
+  // Defaults make this an additive schema push for historical attempt rows;
+  // every new attempt explicitly writes its requested and resolved model.
+  requestedModel: text('requested_model').notNull().default('gpt-5.4-mini'),
+  resolvedModel: text('resolved_model').notNull().default('gpt-5.4-mini'),
   model: text('model').notNull(),
   responseMode: text('response_mode').notNull(),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
