@@ -238,6 +238,16 @@ export const spreadsheetRowOutcomesTable = pgTable('spreadsheet_row_outcomes', {
   duplicateFingerprint: text('duplicate_fingerprint'),
   decisionSource: text('decision_source').notNull().default('deterministic'),
   mappingRevision: text('mapping_revision').notNull(),
+  semanticPlanIdentity: text('semantic_plan_identity').notNull().default('manual-recovery'),
+  semanticSchemaVersion: text('semantic_schema_version').notNull().default('manual-recovery'),
+  semanticSessionId: uuid('semantic_session_id'),
+  sourceContentHash: text('source_content_hash'),
+  sourceObjectPath: text('source_object_path').notNull().default(''),
+  semanticDisposition: text('semantic_disposition').notNull().default('manual_recovery'),
+  semanticValidationReason: text('semantic_validation_reason').notNull().default('No complete semantic plan was available.'),
+  userResolution: text('user_resolution'),
+  overrideReason: text('override_reason'),
+  finalOperationalOutcome: text('final_operational_outcome').notNull().default('pending'),
   taxYear: text('tax_year'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -251,6 +261,50 @@ export const insertSpreadsheetRowOutcomeSchema = createInsertSchema(spreadsheetR
 });
 export type SpreadsheetRowOutcome = typeof spreadsheetRowOutcomesTable.$inferSelect;
 export type InsertSpreadsheetRowOutcome = z.infer<typeof insertSpreadsheetRowOutcomeSchema>;
+
+/**
+ * This is the durable, fenced state machine for AI spreadsheet semantics. It
+ * deliberately lives outside evidence_items.mapping_schema so a stale request
+ * cannot replace a newer provider checkpoint through a JSON read/modify/write.
+ */
+export const spreadsheetSemanticSessionsTable = pgTable('spreadsheet_semantic_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  sourceContentHash: text('source_content_hash').notNull(),
+  sourceObjectPath: text('source_object_path').notNull(),
+  schemaVersion: text('schema_version').notNull(),
+  // ready | working | complete | incomplete
+  status: text('status').notNull().default('ready'),
+  stage: text('stage').notNull().default('workbook_overview'),
+  continuationToken: text('continuation_token').notNull(),
+  requestPayload: jsonb('request_payload').notNull().default({}),
+  contextHistory: jsonb('context_history').notNull().default('[]'),
+  providerCalls: integer('provider_calls').notNull().default(0),
+  currentPlan: jsonb('current_plan'),
+  // Remains stable for the logical review. claimToken changes on every lease
+  // claim and fences a worker that resumes after another has reclaimed it.
+  workIdentity: text('work_identity').notNull(),
+  claimToken: text('claim_token'),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('spreadsheet_semantic_session_evidence_unique').on(table.evidenceId),
+  index('spreadsheet_semantic_session_claim_idx').on(table.evidenceId, table.status, table.leaseExpiresAt),
+]);
+
+export const insertSpreadsheetSemanticSessionSchema = createInsertSchema(spreadsheetSemanticSessionsTable).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type SpreadsheetSemanticSessionRecord = typeof spreadsheetSemanticSessionsTable.$inferSelect;
+export type InsertSpreadsheetSemanticSession = z.infer<typeof insertSpreadsheetSemanticSessionSchema>;
 
 // ─── Financial Accounts & Bank Import Audit ────────────────────────────────────
 

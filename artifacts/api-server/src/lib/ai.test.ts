@@ -3,7 +3,7 @@ import test from 'node:test';
 import type OpenAI from 'openai';
 import * as XLSX from 'xlsx';
 import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet } from './spreadsheet.js';
-import { analyseSpreadsheetWithAI, providerCallWithTimeout } from './ai.js';
+import { analyseSpreadsheetWithAI, detectColumnSchema, providerCallWithTimeout, type SpreadsheetSemanticSession } from './ai.js';
 import {
   buildRequestedSpreadsheetContext,
   buildSpreadsheetWorkbookOverview,
@@ -172,6 +172,26 @@ test('safe unseen multilingual structural headers reach the semantic provider wi
   assert.doesNotMatch(overview, /Malipo ya mteja binafsi|Chakula cha biashara/);
 });
 
+test('semantic overview exposes only safe structural title and sheet labels, not personal labels or local source metadata', () => {
+  const book = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([
+    ['現金帳'],
+    ['Tarikh', 'Butiran', 'Jumlah'],
+    ['06/04/2025', 'Bayaran pelanggan peribadi', 42],
+  ]), '現金帳');
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([
+    ['Jane Example private accounts'],
+    ['Date', 'Description', 'Amount'],
+    ['06/04/2025', 'Private narrative', 10],
+  ]), 'Jane Example ledger');
+  const workbook = inspectSpreadsheet(XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'private.xlsx');
+  const overview = JSON.stringify(buildSpreadsheetWorkbookOverview(workbook));
+  assert.match(overview, /\[title-label:現金帳\]/);
+  assert.match(overview, /\[sheet-label:現金帳\]/);
+  assert.doesNotMatch(overview, /Jane Example|Bayaran pelanggan peribadi|Private narrative/);
+  assert.doesNotMatch(overview, /contentHash|sourceByteLength/);
+});
+
 test('AI can request bounded follow-up context and return an all-sheet semantic plan', async () => {
   const workbook = inspectSpreadsheet(Buffer.from([
     'Date,Description,Amount',
@@ -204,6 +224,81 @@ test('AI can request bounded follow-up context and return an all-sheet semantic 
   assert.equal(result.analysis?.sheets[0]?.selected, true);
 });
 
+test('provider receives the complete nested strict JSON schema contract', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,10\n'), 'text/csv', 'contract.csv');
+  let request: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: Record<string, unknown>) => {
+      request = input;
+      const payload = JSON.parse((input.messages as Array<{ content: string }>).at(-1)?.content ?? '{}') as Record<string, unknown>;
+      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+    } } },
+  } as unknown as OpenAI;
+  await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  const responseFormat = request?.response_format as { type?: string; json_schema?: { strict?: boolean; schema?: Record<string, unknown> } };
+  assert.equal(responseFormat.type, 'json_schema');
+  assert.equal(responseFormat.json_schema?.strict, true);
+  assert.equal(responseFormat.json_schema?.schema?.additionalProperties, false);
+  const defs = responseFormat.json_schema?.schema?.$defs as Record<string, Record<string, unknown>>;
+  assert.equal(defs.plan?.additionalProperties, false);
+  assert.equal(defs.sheetPlan?.additionalProperties, false);
+  assert.equal(defs.fields?.additionalProperties, false);
+  assert.equal(defs.request?.additionalProperties, false);
+});
+
+test('a persisted pending continuation resumes after an interrupted worker without repeating its overview call', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Restart-only sale,11\n'), 'text/csv', 'resume.csv');
+  const checkpoints: SpreadsheetSemanticSession[] = [];
+  let firstCalls = 0;
+  const interrupted = scriptedClient((payload) => {
+    firstCalls += 1;
+    if (firstCalls === 1) {
+      return {
+        schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+        stage: 'request_context',
+        request: {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          continuationToken: String(payload.continuationToken),
+          allowedSheetIds: ['sheet_1'],
+          requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 2, startColumn: 1, endColumn: 3, chunk: 0, reason: 'Need bounded structure.' }],
+        },
+        plan: null,
+      };
+    }
+    throw new Error('simulated_worker_interruption');
+  });
+  await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: interrupted,
+    retryDelayMs: 0,
+    persistSession: async (session) => { checkpoints.push(structuredClone(session)); },
+  });
+  const pending = checkpoints.find((session) => session.stage === 'requested_context');
+  assert.ok(pending, 'the continuation is durable before the next provider call');
+  let resumedCalls = 0;
+  const resumed = scriptedClient((payload) => {
+    resumedCalls += 1;
+    assert.equal(payload.stage, 'requested_context');
+    return finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]);
+  });
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: resumed,
+    retryDelayMs: 0,
+    session: pending,
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(resumedCalls, 1);
+});
+
+test('legacy spreadsheet column detection is deterministic and never invokes a provider', async () => {
+  const mapping = await detectColumnSchema(
+    [['Jane Example', 'jane@example.com', 'Account 12345678']],
+    'Jane Example private.xlsx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  );
+  assert.equal(mapping.confidence, 0.35);
+  assert.equal(Object.values(mapping.columns).every((value) => value === undefined), true);
+});
+
 test('AI plan assigns an explicit final disposition to unseen multilingual and reporting worksheets', async () => {
   const book = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([
@@ -229,7 +324,8 @@ test('AI plan assigns an explicit final disposition to unseen multilingual and r
   assert.match(overviewPayload, /responseContract/);
   assert.match(overviewPayload, /request_context/);
   assert.match(overviewPayload, /transactionalRule/);
-  assert.doesNotMatch(overviewPayload, /今日帳|untitled_42|売上|internal reference/, 'tab names and ordinary transaction/reference narratives remain redacted');
+  assert.match(overviewPayload, /\[sheet-label:今日帳\]/, 'safe structural labels retain useful semantic context');
+  assert.doesNotMatch(overviewPayload, /untitled_42|売上|internal reference/, 'unsafe tab names and ordinary transaction/reference narratives remain redacted');
   assert.deepEqual(result.analysis?.sheets.map((sheet) => [sheet.displayName, sheet.finalDisposition, sheet.selected]), [
     ['今日帳', 'transactional', true],
     ['untitled_42', 'reference', false],

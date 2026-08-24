@@ -6,6 +6,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import * as XLSX from 'xlsx';
 import {
   db,
+  evidenceAuditEventsTable,
   evidenceItemsTable,
   evidenceTransactionLinksTable,
   pool,
@@ -616,6 +617,8 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
         method: 'POST',
         body: JSON.stringify({
           confirmation: true,
+          reviewRevision: savedDraftResponse.body.reviewDraft.mappingRevision,
+          semanticPlanIdentity: savedDraftResponse.body.reviewDraft.semanticPlanIdentity,
           selectedSheetIds: ['sheet_1'],
           sheetMappings: {
             sheet_1: { headerRow: 0, columns: { date: 2, description: 1, amount: 0 } },
@@ -627,15 +630,8 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
         }),
       },
     );
-    assert.equal(actionableRejection.status, 400);
-    assert.equal(actionableRejection.body.error, 'A sheet still has entries we cannot read safely.');
-    assert.deepEqual(actionableRejection.body.issues, [{
-      sheetId: 'sheet_1',
-      worksheet: 'Ledger',
-      rowNumber: 2,
-      field: 'date',
-      message: 'In “Ledger”, row 2 is missing a usable date. Choose another named column, or leave this sheet out for now.',
-    }], 'server rejection identifies the exact sheet, row, field, and layman-safe next step');
+    assert.equal(actionableRejection.status, 409);
+    assert.equal(actionableRejection.body.error, 'This confirmation is not the latest saved spreadsheet review.');
 
     const maximumExcelRow = 1_048_576;
     const boundarySheet = {
@@ -678,15 +674,39 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       headerRow: 0,
       columns: { date: 0, amount: 1, description: 2 },
     };
-    const boundaryConfirmation = {
-      confirmation: true,
-      selectedSheetIds: ['sheet_1', 'sheet_2'],
-      sheetMappings: { sheet_1: boundaryMapping, sheet_2: boundaryMapping },
-      filingScope: ['2025-2026'],
-      excludedRowRefs: [],
-      preTradingStartMode: 'exclude',
-      outsideScopeMode: 'exclude',
+    const saveBoundaryReview = async () => {
+      const inspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/detect-schema`, { method: 'POST' });
+      assert.equal(inspection.status, 200);
+      const review = {
+        selectedSheetIds: ['sheet_1', 'sheet_2'],
+        sheetMappings: { sheet_1: boundaryMapping, sheet_2: boundaryMapping },
+        sheetRoleOverrides: {},
+        sheetResolutions: { sheet_1: 'include_income', sheet_2: 'include_income' },
+        filingScope: ['2025-2026'],
+        excludedRowRefs: [],
+        preTradingStartMode: 'exclude',
+        outsideScopeMode: 'exclude',
+      };
+      const saved = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/spreadsheet-review`, {
+        method: 'PATCH', body: JSON.stringify(review),
+      });
+      assert.equal(saved.status, 200);
+      const draft = saved.body.reviewDraft;
+      return {
+        confirmation: true as const,
+        reviewRevision: draft.mappingRevision,
+        semanticPlanIdentity: draft.semanticPlanIdentity,
+        selectedSheetIds: draft.selectedSheetIds,
+        sheetMappings: draft.sheetMappings,
+        sheetRoleOverrides: draft.sheetRoleOverrides,
+        sheetResolutions: draft.sheetResolutions,
+        filingScope: draft.filingScope,
+        excludedRowRefs: draft.excludedRowRefs,
+        preTradingStartMode: draft.preTradingStartMode,
+        outsideScopeMode: draft.outsideScopeMode,
+      };
     };
+    let boundaryConfirmation = await saveBoundaryReview();
 
     // Seed the second sheet's identity so the first sheet can be inserted
     // before the route encounters the deliberate conflict. The route must
@@ -764,6 +784,7 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     assert.equal(spreadsheetReplacement.body.importStatus, 'idle');
 
     await db.delete(transactionsTable).where(eq(transactionsTable.id, conflictingTransaction.id));
+    boundaryConfirmation = await saveBoundaryReview();
     const confirmedBoundary = await request(
       aliceSession,
       `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/confirm-spreadsheet`,
@@ -789,6 +810,19 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       ['header', 'header', 'imported', 'imported'],
       'final source dispositions reconcile exactly to the inspected source population',
     );
+    assert.equal(persistedBoundaryOutcomes.every((row) =>
+      row.semanticPlanIdentity === boundaryConfirmation.semanticPlanIdentity
+      && Boolean(row.sourceContentHash)
+      && Boolean(row.sourceObjectPath)
+      && Boolean(row.finalOperationalOutcome),
+    ), true, 'row outcomes retain semantic, source, and final operational lineage');
+    const confirmationEvents = await db.select().from(evidenceAuditEventsTable).where(and(
+      eq(evidenceAuditEventsTable.profileId, alicePrimary),
+      eq(evidenceAuditEventsTable.evidenceId, spreadsheetEvidenceId),
+      eq(evidenceAuditEventsTable.eventType, 'spreadsheet_import_confirmed'),
+    ));
+    assert.equal(confirmationEvents.length, 1);
+    assert.equal((confirmationEvents[0]?.details as { semanticPlanIdentity?: string }).semanticPlanIdentity, boundaryConfirmation.semanticPlanIdentity);
     assert.deepEqual(
       persistedBoundaryRows
         .map((transaction) => ({
@@ -857,15 +891,38 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       method: 'POST',
       body: JSON.stringify({ filename: 'first-duplicate.csv', objectPath: firstDuplicateUpload.body.objectPath, mimeType: 'text/csv', evidenceType: 'ledger' }),
     });
-    const duplicateConfirmation = {
-      confirmation: true,
-      selectedSheetIds: ['sheet_1'],
-      sheetMappings: { sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } } },
-      filingScope: ['2025-2026'],
-      excludedRowRefs: [],
-      preTradingStartMode: 'exclude',
-      outsideScopeMode: 'exclude',
+    const saveDuplicateReview = async (evidenceId: string) => {
+      assert.equal((await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/detect-schema`, { method: 'POST' })).status, 200);
+      const saved = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/spreadsheet-review`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          selectedSheetIds: ['sheet_1'],
+          sheetMappings: { sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } } },
+          sheetRoleOverrides: {},
+          sheetResolutions: { sheet_1: 'include_income' },
+          filingScope: ['2025-2026'],
+          excludedRowRefs: [],
+          preTradingStartMode: 'exclude',
+          outsideScopeMode: 'exclude',
+        }),
+      });
+      assert.equal(saved.status, 200);
+      const draft = saved.body.reviewDraft;
+      return {
+        confirmation: true as const,
+        reviewRevision: draft.mappingRevision,
+        semanticPlanIdentity: draft.semanticPlanIdentity,
+        selectedSheetIds: draft.selectedSheetIds,
+        sheetMappings: draft.sheetMappings,
+        sheetRoleOverrides: draft.sheetRoleOverrides,
+        sheetResolutions: draft.sheetResolutions,
+        filingScope: draft.filingScope,
+        excludedRowRefs: draft.excludedRowRefs,
+        preTradingStartMode: draft.preTradingStartMode,
+        outsideScopeMode: draft.outsideScopeMode,
+      };
     };
+    let duplicateConfirmation = await saveDuplicateReview(firstDuplicateEvidence.body.id);
     assert.equal((await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${firstDuplicateEvidence.body.id}/confirm-spreadsheet`, {
       method: 'POST', body: JSON.stringify(duplicateConfirmation),
     })).status, 200);
@@ -874,6 +931,7 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       method: 'POST',
       body: JSON.stringify({ filename: 'second-duplicate.csv', objectPath: secondDuplicateUpload.body.objectPath, mimeType: 'text/csv', evidenceType: 'ledger' }),
     });
+    duplicateConfirmation = await saveDuplicateReview(secondDuplicateEvidence.body.id);
     const secondDuplicateConfirmation = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${secondDuplicateEvidence.body.id}/confirm-spreadsheet`, {
       method: 'POST', body: JSON.stringify(duplicateConfirmation),
     });

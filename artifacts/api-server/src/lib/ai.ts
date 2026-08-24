@@ -163,54 +163,14 @@ function fallbackMapping(rows: string[][]): MappingSchema {
 
 export async function detectColumnSchema(
   rows: string[][],
-  filename: string,
-  mimeType: string,
+  _filename: string,
+  _mimeType: string,
 ): Promise<MappingSchema> {
-  if (!isConfigured()) return fallbackMapping(rows);
-  const client = getClient();
-  const response = await client.chat.completions.create({
-    model: FINANCE_COPILOT_MODEL,
-    max_completion_tokens: 900,
-    messages: [
-      {
-        role: 'system',
-        content: `You identify columns in UK financial CSV/XLSX files. Return ONLY valid JSON:
-{
-  "headerRow": number,
-  "columns": {"date": number|null, "amount": number|null, "debit": number|null, "credit": number|null, "description": number|null, "category": number|null, "balance": number|null},
-  "dateFormat": string|null,
-  "currency": string,
-  "confidence": number,
-  "notes": string[]
-}
-Column indexes are zero-based. Use null for absent columns. Prefer amount, or debit/credit when a split bank export is used. Do not treat a running balance as a transaction amount.`,
-      },
-      {
-        role: 'user',
-        content: `Filename: ${filename}\nMIME type: ${mimeType}\nRows:\n${JSON.stringify(rows.slice(0, 10))}`,
-      },
-    ],
-    response_format: { type: 'json_object' },
-  });
-  try {
-    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}') as Record<string, unknown>;
-    const rawColumns = (parsed.columns ?? {}) as Record<string, unknown>;
-    const index = (key: string) => typeof rawColumns[key] === 'number' ? rawColumns[key] as number : undefined;
-    return {
-      headerRow: typeof parsed.headerRow === 'number' ? parsed.headerRow : 0,
-      columns: {
-        date: index('date'), amount: index('amount'), debit: index('debit'),
-        credit: index('credit'), description: index('description'),
-        category: index('category'), balance: index('balance'),
-      },
-      dateFormat: typeof parsed.dateFormat === 'string' ? parsed.dateFormat : null,
-      currency: typeof parsed.currency === 'string' ? parsed.currency : 'GBP',
-      confidence: typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
-      notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note): note is string => typeof note === 'string') : [],
-    };
-  } catch {
-    return fallbackMapping(rows);
-  }
+  // Deprecated spreadsheet-specific path. Normal ingestion uses the v2
+  // privacy-bounded semantic protocol. Keep this exported compatibility helper
+  // deterministic so a caller can never accidentally disclose raw filename,
+  // MIME metadata, or spreadsheet rows to a looser AI endpoint.
+  return fallbackMapping(rows);
 }
 
 function proposalForDeterministicFallback(analysis: SpreadsheetAnalysis): SpreadsheetUnderstandingProposal {
@@ -416,6 +376,28 @@ export async function analyseSpreadsheetWithAI(
     || workbook.totalParserCells > SPREADSHEET_AI_LIMITS.largeWorkbookCells
     || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets
     || workbook.sourceByteLength > SPREADSHEET_AI_LIMITS.largeWorkbookBytes;
+  const persisted = testOptions?.session?.schemaVersion === SPREADSHEET_SEMANTIC_SCHEMA_VERSION
+    && testOptions.session.contentHash === (workbook.contentHash ?? null)
+    ? testOptions.session
+    : null;
+  if (persisted?.currentPlan && (persisted.stage === 'complete' || persisted.stage === 'incomplete')) {
+    const planError = validateSpreadsheetImportPlan(persisted.currentPlan, workbook);
+    if (!planError) {
+      const complete = persisted.stage === 'complete' && persisted.currentPlan.status === 'complete';
+      return {
+        status: complete ? 'success' : 'abstained',
+        proposal: null,
+        semanticPlan: persisted.currentPlan,
+        semanticOverview: buildSpreadsheetWorkbookOverview(workbook),
+        analysis: complete ? analysisFromSemanticPlan(workbook, persisted.currentPlan) : structuralAnalysis,
+        continuationToken: persisted.continuationToken,
+        reason: complete ? undefined : persisted.currentPlan.abstention?.detail ?? 'The review needs a targeted manual decision.',
+        sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId),
+        providerCalls: 0,
+        limits,
+      };
+    }
+  }
   if (!testOptions?.client && !isConfigured()) {
     return incomplete('incomplete', 'AI analysis is unavailable. Choose a specific sheet to review manually before importing.', {
       reason: 'provider_unavailable', detail: 'The semantic interpreter is unavailable.', manualRecoveryRequired: true,

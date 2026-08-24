@@ -43,8 +43,6 @@ const nullableRange = z.object({
 
 export const spreadsheetStructuralWorkbookSchema = z.object({
   schemaVersion: z.literal(SPREADSHEET_SEMANTIC_SCHEMA_VERSION),
-  contentHash: z.string().min(16).max(128).nullable(),
-  sourceByteLength: z.number().int().nonnegative(),
   fileType: z.enum(['csv', 'xls', 'xlsx']),
   sheets: z.array(z.object({
     sheetId,
@@ -235,7 +233,11 @@ export const spreadsheetAIResponseContract = {
   },
 } as const;
 
-/** Provider response-format schema. Server Zod validation remains authoritative. */
+/**
+ * Provider response-format schema. Every nested object is closed so providers
+ * supporting strict JSON Schema can reject surplus or partial structure before
+ * it reaches us. Zod below remains the authoritative semantic validator.
+ */
 export const spreadsheetAIResponseJsonSchema = {
   type: 'object',
   additionalProperties: false,
@@ -243,8 +245,74 @@ export const spreadsheetAIResponseJsonSchema = {
   properties: {
     schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
     stage: { enum: ['request_context', 'final_plan', 'abstain'] },
-    request: { type: ['object', 'null'], additionalProperties: true },
-    plan: { type: ['object', 'null'], additionalProperties: true },
+    request: { anyOf: [{ $ref: '#/$defs/request' }, { type: 'null' }] },
+    plan: { anyOf: [{ $ref: '#/$defs/plan' }, { type: 'null' }] },
+  },
+  $defs: {
+    request: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'continuationToken', 'allowedSheetIds', 'requests'],
+      properties: {
+        schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        continuationToken: { type: 'string', minLength: 8, maxLength: 128 },
+        allowedSheetIds: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' } },
+        requests: { type: 'array', minItems: 1, maxItems: 4, items: { $ref: '#/$defs/requestItem' } },
+      },
+    },
+    requestItem: {
+      type: 'object', additionalProperties: false,
+      required: ['sheetId', 'startRow', 'endRow', 'startColumn', 'endColumn', 'chunk', 'reason'],
+      properties: {
+        sheetId: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' },
+        startRow: { type: 'integer', minimum: 1, maximum: 1048576 },
+        endRow: { type: 'integer', minimum: 1, maximum: 1048576 },
+        startColumn: { type: 'integer', minimum: 1, maximum: 16384 },
+        endColumn: { type: 'integer', minimum: 1, maximum: 16384 },
+        chunk: { type: 'integer', minimum: 0, maximum: 99 },
+        reason: { type: 'string', minLength: 1, maxLength: 240 },
+      },
+    },
+    plan: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'status', 'continuationToken', 'sheets', 'unresolvedQuestions', 'abstention', 'summary'],
+      properties: {
+        schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        status: { enum: ['complete', 'incomplete'] },
+        continuationToken: { type: 'string', minLength: 8, maxLength: 128 },
+        sheets: { type: 'array', minItems: 1, maxItems: 100, items: { $ref: '#/$defs/sheetPlan' } },
+        unresolvedQuestions: { type: 'array', maxItems: 100, items: { $ref: '#/$defs/question' } },
+        abstention: { anyOf: [{ $ref: '#/$defs/abstention' }, { type: 'null' }] },
+        summary: { type: 'string', minLength: 1, maxLength: 240 },
+      },
+    },
+    sheetPlan: {
+      type: 'object', additionalProperties: false,
+      required: ['sheetId', 'disposition', 'decisionSource', 'validationReason', 'purpose', 'headerRow', 'dataRange', 'rowRules', 'fields', 'transactionSemantics', 'duplicateOrOverlap', 'unresolvedQuestionIds'],
+      properties: {
+        sheetId: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' },
+        disposition: { enum: ['transactional', 'summary', 'reference', 'duplicate', 'excluded', 'unresolved', 'not_analysed'] },
+        decisionSource: { enum: ['ai', 'user', 'manual_recovery'] },
+        validationReason: { type: 'string', minLength: 1, maxLength: 240 },
+        purpose: { type: 'string', minLength: 1, maxLength: 240 },
+        headerRow: { anyOf: [{ type: 'integer', minimum: 1, maximum: 1048576 }, { type: 'null' }] },
+        dataRange: { anyOf: [{ $ref: '#/$defs/dataRange' }, { type: 'null' }] },
+        rowRules: { $ref: '#/$defs/rowRules' },
+        fields: { $ref: '#/$defs/fields' },
+        transactionSemantics: { $ref: '#/$defs/transactionSemantics' },
+        duplicateOrOverlap: { type: 'array', maxItems: 20, items: { $ref: '#/$defs/overlap' } },
+        unresolvedQuestionIds: { type: 'array', maxItems: 20, items: { type: 'string', pattern: '^question_[A-Za-z0-9_-]{1,127}$' } },
+      },
+    },
+    dataRange: { type: 'object', additionalProperties: false, required: ['startRow', 'endRow'], properties: { startRow: { type: 'integer', minimum: 1, maximum: 1048576 }, endRow: { type: 'integer', minimum: 1, maximum: 1048576 } } },
+    rule: { type: 'object', additionalProperties: false, required: ['startRow', 'endRow', 'reason'], properties: { startRow: { type: 'integer', minimum: 1, maximum: 1048576 }, endRow: { type: 'integer', minimum: 1, maximum: 1048576 }, reason: { type: 'string', minLength: 1, maxLength: 240 } } },
+    rowRules: { type: 'object', additionalProperties: false, required: ['include', 'exclude'], properties: { include: { type: 'array', maxItems: 40, items: { $ref: '#/$defs/rule' } }, exclude: { type: 'array', maxItems: 80, items: { $ref: '#/$defs/rule' } } } },
+    field: { type: 'object', additionalProperties: false, required: ['columnId', 'confidence', 'rationale'], properties: { columnId: { anyOf: [{ type: 'string', pattern: '^col_[A-Za-z]{1,4}$' }, { type: 'null' }] }, confidence: { type: 'integer', minimum: 0, maximum: 100 }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
+    fields: { type: 'object', additionalProperties: false, required: ['date', 'description', 'signedAmount', 'debit', 'credit', 'category'], properties: { date: { $ref: '#/$defs/field' }, description: { $ref: '#/$defs/field' }, signedAmount: { $ref: '#/$defs/field' }, debit: { $ref: '#/$defs/field' }, credit: { $ref: '#/$defs/field' }, category: { $ref: '#/$defs/field' } } },
+    transactionSemantics: { type: 'object', additionalProperties: false, required: ['direction', 'rationale'], properties: { direction: { enum: ['income', 'expense', 'mixed', 'unknown'] }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
+    overlap: { type: 'object', additionalProperties: false, required: ['otherSheetId', 'confidence', 'rationale'], properties: { otherSheetId: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' }, confidence: { type: 'integer', minimum: 0, maximum: 100 }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
+    question: { type: 'object', additionalProperties: false, required: ['id', 'sheetId', 'question', 'whyNeeded', 'choices', 'blocking'], properties: { id: { type: 'string', pattern: '^question_[A-Za-z0-9_-]{1,127}$' }, sheetId: { anyOf: [{ type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' }, { type: 'null' }] }, question: { type: 'string', minLength: 1, maxLength: 240 }, whyNeeded: { type: 'string', minLength: 1, maxLength: 240 }, choices: { type: 'array', minItems: 1, maxItems: 5, items: { $ref: '#/$defs/choice' } }, blocking: { type: 'boolean' } } },
+    choice: { type: 'object', additionalProperties: false, required: ['id', 'label'], properties: { id: { type: 'string', minLength: 1, maxLength: 80 }, label: { type: 'string', minLength: 1, maxLength: 240 } } },
+    abstention: { type: 'object', additionalProperties: false, required: ['reason', 'detail', 'manualRecoveryRequired'], properties: { reason: { enum: ['insufficient_evidence', 'unsupported_layout', 'ambiguous_candidates', 'provider_unavailable', 'provider_timeout', 'provider_rate_limited', 'provider_schema_invalid', 'operational_limit'] }, detail: { type: 'string', minLength: 1, maxLength: 240 }, manualRecoveryRequired: { const: true } } },
   },
 } as const;
 
@@ -256,16 +324,19 @@ const multilingualHeaderAliases: Record<string, string> = {
   'カテゴリ': 'category', '类别': 'category', '分類': 'category', '分类': 'category',
 };
 
-function safeStructuralHeaderLabel(value: string): string | null {
+function safeStructuralLabel(value: string): string | null {
   const trimmed = value.trim().replace(/\s+/g, ' ');
-  if (!trimmed || trimmed.length > 32 || !/\p{L}/u.test(trimmed)) return null;
-  if (/@|https?:\/\/|www\.|\d|(?:iban|swift|account|invoice|address|street|road|email|phone)/i.test(trimmed)) return null;
+  if (!trimmed || trimmed.length > 40 || !/\p{L}/u.test(trimmed)) return null;
+  if (/@|https?:\/\/|www\.|\d|(?:iban|swift|account|invoice|address|street|road|email|phone|sort.?code)/i.test(trimmed)) return null;
   const words = trimmed.match(/\p{L}+/gu) ?? [];
-  if (words.length > 3 || /[,:;()[\]{}]/.test(trimmed)) return null;
+  if (words.length > 4 || /[,:;()[\]{}]/.test(trimmed)) return null;
+  // The most common Western name form is intentionally not preserved in a
+  // title/sheet label. This still permits non-Latin labels and finance terms.
+  if (/(?:^|\s)[A-Z][a-z]{1,20}\s+[A-Z][a-z]{1,20}(?:\s|$)/.test(trimmed)) return null;
   return trimmed;
 }
 
-export function redactSpreadsheetValue(value: string, options: { preserveStructuralHeader?: boolean } = {}): string {
+export function redactSpreadsheetValue(value: string, options: { preserveStructuralHeader?: boolean; preserveStructuralTitle?: boolean } = {}): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
   const lower = trimmed.toLowerCase();
@@ -274,8 +345,8 @@ export function redactSpreadsheetValue(value: string, options: { preserveStructu
   if (matchedHeaders.length) return `[header:${matchedHeaders.join('|')}]`;
   const multilingualHeader = multilingualHeaderAliases[trimmed];
   if (multilingualHeader) return `[header:${multilingualHeader}]`;
-  const safeHeader = options.preserveStructuralHeader ? safeStructuralHeaderLabel(trimmed) : null;
-  if (safeHeader) return `[header-label:${safeHeader}]`;
+  const safeLabel = options.preserveStructuralHeader || options.preserveStructuralTitle ? safeStructuralLabel(trimmed) : null;
+  if (safeLabel) return `[${options.preserveStructuralHeader ? 'header-label' : 'title-label'}:${safeLabel}]`;
   if (/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(trimmed) || /^\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}$/.test(trimmed)) return '[date]';
   if (/^[£$€]?\s*\(?-?\d[\d,]*(?:\.\d{1,4})?\)?(?:\s*(?:cr|dr))?$/i.test(trimmed)) {
     const numeric = Number(trimmed.replace(/[£$€,\s()]/g, '').replace(/(cr|dr)$/i, ''));
@@ -294,7 +365,12 @@ function overviewRowsFor(sheet: SpreadsheetWorkbook['sheets'][number]) {
     values: row.values.slice(0, 64).map((value) => {
       if (cells >= SPREADSHEET_SEMANTIC_LIMITS.maxOverviewCellsPerSheet) return '';
       cells += 1;
-       return redactSpreadsheetValue(value, { preserveStructuralHeader: row.rowNumber === sheet.inferredHeaderRow }).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters);
+      const isTitle = row.rowNumber < (sheet.inferredHeaderRow ?? 0)
+        && row.values.filter((cell) => cell.trim()).length === 1;
+      return redactSpreadsheetValue(value, {
+        preserveStructuralHeader: row.rowNumber === sheet.inferredHeaderRow,
+        preserveStructuralTitle: isTitle,
+      }).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters);
     }),
   }));
 }
@@ -303,13 +379,11 @@ function overviewRowsFor(sheet: SpreadsheetWorkbook['sheets'][number]) {
 export function buildSpreadsheetWorkbookOverview(workbook: SpreadsheetWorkbook): SpreadsheetStructuralWorkbook {
   return spreadsheetStructuralWorkbookSchema.parse({
     schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-    contentHash: workbook.contentHash ?? null,
-    sourceByteLength: workbook.sourceByteLength,
     fileType: workbook.fileType,
     sheets: workbook.sheets.map((sheet) => ({
       sheetId: sheet.sheetId,
       index: sheet.index,
-      displayName: `[sheet:${sheet.index + 1}]`,
+      displayName: safeStructuralLabel(sheet.displayName) ? `[sheet-label:${safeStructuralLabel(sheet.displayName)}]` : `[sheet:${sheet.index + 1}]`,
       dimensions: { rows: sheet.rowCount, columns: sheet.columnCount },
       parserRange: sheet.parserRange,
       populatedArea: sheet.structural.populatedArea,
@@ -378,6 +452,8 @@ export function buildRequestedSpreadsheetContext(
           values: Array.from({ length: requested.endColumn - requested.startColumn + 1 }, (_, columnOffset) =>
             redactSpreadsheetValue(row?.values[requested.startColumn - 1 + columnOffset] ?? '', {
               preserveStructuralHeader: (requested.startRow + offset) === sheet.inferredHeaderRow,
+              preserveStructuralTitle: (requested.startRow + offset) < (sheet.inferredHeaderRow ?? 0)
+                && (row?.values.filter((cell) => cell.trim()).length ?? 0) === 1,
             }).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters)),
         };
       }),
