@@ -216,6 +216,46 @@ test('a managed strict-schema alias rejection is safe, typed, and never selects 
   assert.equal(telemetry.every((attempt) => !/unsupported|private-123|workbook value|messages|content/i.test(JSON.stringify(attempt))), true);
 });
 
+test('a stale failed compatibility state cannot block the real workbook request', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,10\n'), 'text/csv', 'direct.csv');
+  let calls = 0;
+  const client = { chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+    calls += 1;
+    const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as { continuationToken?: string };
+    return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+  } } } } as unknown as OpenAI;
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    compatibilityState: { status: 'route_incompatible' } as never,
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.status, 'success');
+  assert.equal(result.diagnostic?.providerReached, true);
+});
+
+test('timeout diagnostic preserves the first failure and later retry outcomes', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Timeout sale,99\n'), 'text/csv', 'timeout.csv');
+  const client = failingClient([async () => new Promise<never>(() => undefined)]);
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, timeoutMs: 5, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.diagnostic?.category, 'timeout');
+  assert.equal(result.diagnostic?.providerReached, true);
+  assert.equal(result.diagnostic?.providerSucceeded, false);
+  assert.equal(result.diagnostic?.providerCalls, 2);
+  assert.equal(result.providerAttempts?.length, 2);
+});
+
+test('empty transactional include rules agree across JSON schema, Zod, prompt contract, and semantic validation', () => {
+  const defs = spreadsheetAIResponseJsonSchema.$defs as Record<string, any>;
+  assert.equal(defs.rowRules.properties.include.minItems, undefined);
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,10\n'), 'text/csv', 'include.csv');
+  const response = finalResponse('continuation-token', [semanticSheet('sheet_1', 'transactional')]);
+  const plan = response.plan;
+  plan.sheets[0]!.rowRules.include = [];
+  assert.equal(spreadsheetAIResponseSchema.safeParse(response).success, true);
+  assert.equal(validateSpreadsheetImportPlan(plan as SpreadsheetImportPlan, workbook), null);
+});
+
 test('JSON-object fallback is available only to an explicit non-managed compatibility caller', async () => {
   const attempted: Array<[string, string]> = [];
   let calls = 0;
@@ -681,7 +721,7 @@ test('AI can request bounded follow-up context and return an all-sheet semantic 
 });
 
 test('provider receives the complete nested strict JSON schema contract', async () => {
-  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,10\n'), 'text/csv', 'contract.csv');
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Contract-only sale,77\n'), 'text/csv', 'contract.csv');
   let request: Record<string, unknown> | undefined;
   const client = {
     chat: { completions: { create: async (input: Record<string, unknown>) => {
@@ -1202,7 +1242,7 @@ test('completed plans require terminal sheet dispositions and explicit in-range 
   const unbounded = structuredClone(valid);
   assert.ok(unbounded.sheets[0]);
   unbounded.sheets[0].rowRules.include = [];
-  assert.equal(validateSpreadsheetImportPlan(unbounded, workbook), 'transactional_sheet_requires_explicit_include_rules');
+  assert.equal(validateSpreadsheetImportPlan(unbounded, workbook), null, 'empty include means no rows are importable');
   const outsideRange = structuredClone(valid);
   assert.ok(outsideRange.sheets[0]?.rowRules.include[0]);
   outsideRange.sheets[0].rowRules.include[0].endRow = 3;
