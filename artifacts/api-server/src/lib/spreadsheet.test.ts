@@ -97,29 +97,45 @@ test('workbook understanding keeps reference tabs out of the default import and 
   assert.equal(analysis.sheets[2]?.reviewRequired, true);
 });
 
-test('a 17-sheet workbook keeps every sheet auditable while showing only high-confidence transaction tabs by default', () => {
+test('the exact 17-sheet Yatson workbook keeps references hidden and proposes only structured money sheets', () => {
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
-    ['Date', 'Description', 'Amount'],
-    ['06/04/2025', 'Opening sale', '125.00'],
-  ]), 'Transactions');
+  for (const name of ['Master data', 'Query', 'FS', 'TB', 'Queries']) {
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Label', 'Value'], ['Reference', '1']]), name);
+  }
+  for (const name of ['Bank C.A.', 'Bank S.A.', 'Staff cost v2', "Director's current", 'Revenue', 'Trade receivables', 'os inv', 'Staff cost', 'COS']) {
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ['Date', 'Description', 'Amount'],
+      ['06/04/2025', `${name} movement`, '125.00'],
+    ]), name);
+  }
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
     ['交易日期', '內容', '金額'],
     ['07/04/2025', 'Sale', '75.00'],
   ]), '生意記錄');
-  for (const name of ['Master Data', 'Query', 'Queries', 'FS', 'TB', 'Trial Balance', 'Financial Statements', 'Summary', 'Notes']) {
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Label', 'Value'], ['Reference', '1']]), name);
-  }
-  for (let index = 1; index <= 6; index += 1) {
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Unclear notes only']]), `Sheet${index}`);
-  }
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Unclear notes only']]), 'Sheet1');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Unclear notes only']]), 'Sheet1 (2)');
   const file = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
   const analysis = analyseSpreadsheet(inspectSpreadsheet(file, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'yatson-17.xlsx'));
 
   assert.equal(analysis.sheets.length, 17);
-  assert.deepEqual(analysis.sheets.filter((sheet) => sheet.selected).map((sheet) => sheet.displayName), ['Transactions', '生意記錄']);
-  assert.equal(analysis.sheets.filter((sheet) => sheet.auditVisibility === 'advanced').length, 9);
-  assert.equal(analysis.sheets.filter((sheet) => sheet.reviewRequired).length, 6);
+  const byName = new Map(analysis.sheets.map((sheet) => [sheet.displayName, sheet]));
+  for (const name of ['Master data', 'Query', 'FS', 'TB', 'Queries']) {
+    assert.equal(byName.get(name)?.role, 'non_transactional', `${name} is reference-only`);
+    assert.equal(byName.get(name)?.selected, false, `${name} is hidden from the default review`);
+    assert.equal(byName.get(name)?.auditVisibility, 'advanced', `${name} remains auditable`);
+  }
+  const expectedTransactional = ['Bank C.A.', 'Bank S.A.', 'Staff cost v2', "Director's current", 'Revenue', 'Trade receivables', 'os inv', 'Staff cost', 'COS', '生意記錄'];
+  assert.deepEqual(
+    analysis.sheets.filter((sheet) => sheet.selected).map((sheet) => sheet.displayName),
+    expectedTransactional,
+    'only dated, described monetary schedules are proposed by default',
+  );
+  for (const name of ['Sheet1', 'Sheet1 (2)']) {
+    assert.equal(byName.get(name)?.role, 'unknown', `${name} stays ambiguous`);
+    assert.equal(byName.get(name)?.reviewRequired, true, `${name} needs a targeted decision`);
+    assert.equal(byName.get(name)?.selected, false, `${name} cannot be silently imported`);
+  }
+  assert.equal(byName.get('生意記錄')?.role, 'transactional', 'Chinese sheet names are judged by their structure, not rejected by name');
 });
 
 test('CSV inspection preserves quoted multiline fields as one logical source row', () => {

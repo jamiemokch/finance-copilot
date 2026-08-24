@@ -150,6 +150,22 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     server = app.listen(0);
     await new Promise<void>((resolve) => server!.once('listening', resolve));
     testPort = (server.address() as AddressInfo).port;
+    const onboardingProfile = await request(aliceSession, '/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'No default tax year',
+        type: 'sole_trader',
+        accountingBasis: 'cash',
+        businessStartDate: '2025-04-06',
+      }),
+    });
+    assert.equal(onboardingProfile.status, 201);
+    profileIds.push(onboardingProfile.body.id as string);
+    assert.equal(onboardingProfile.body.taxYear, null, 'onboarding does not silently set a tax year');
+    const [storedOnboardingProfile] = await db.select().from(profilesTable)
+      .where(eq(profilesTable.id, onboardingProfile.body.id));
+    assert.equal(storedOnboardingProfile.taxYear, null, 'the no-tax-year onboarding contract persists to the database');
+    assert.equal(storedOnboardingProfile.businessStartDate, '2025-04-06', 'the business start date remains durable');
     const retiredPresigned = await request(aliceSession, '/api/storage/uploads/request-url', {
       method: 'POST',
       headers: { 'x-profile-id': alicePrimary },
@@ -487,6 +503,57 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     const primaryEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`);
     assert.equal(primaryEvidence.status, 200);
     assert.ok(primaryEvidence.body.some((item: { id: string }) => item.id === evidenceId));
+
+    const draftWorkbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(draftWorkbook, XLSX.utils.aoa_to_sheet([
+      ['Date', 'Description', 'Amount'],
+      ['06/04/2025', 'Known movement', '30.00'],
+    ]), 'Ledger');
+    XLSX.utils.book_append_sheet(draftWorkbook, XLSX.utils.aoa_to_sheet([
+      ['Unclear notes only'],
+    ]), 'Sheet1');
+    spreadsheetBuffer = XLSX.write(draftWorkbook, { type: 'buffer', bookType: 'xlsx' });
+    const reviewDraftUpload = await upload(aliceSession, alicePrimary, 'review draft workbook bytes');
+    const reviewDraftEvidence = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: 'saved-review.xlsx',
+        objectPath: reviewDraftUpload.body.objectPath,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        evidenceType: 'ledger',
+      }),
+    });
+    const reviewDraftEvidenceId = reviewDraftEvidence.body.id as string;
+    const firstInspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' });
+    assert.equal(firstInspection.status, 200);
+    const savedReview = {
+      selectedSheetIds: ['sheet_1', 'sheet_2'],
+      sheetMappings: {
+        sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } },
+        sheet_2: { headerRow: 0, columns: { date: 0, description: 0, amount: 0 } },
+      },
+      sheetRoleOverrides: { sheet_2: 'transactional' },
+      filingScope: ['2025-2026'],
+      excludedRowRefs: [],
+      preTradingStartMode: 'exclude',
+      outsideScopeMode: 'exclude',
+    };
+    const savedDraftResponse = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
+      method: 'PATCH',
+      body: JSON.stringify(savedReview),
+    });
+    assert.equal(savedDraftResponse.status, 200);
+    const reopenedInspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' });
+    assert.equal(reopenedInspection.status, 200);
+    assert.deepEqual(reopenedInspection.body.reviewDraft.selectedSheetIds, savedReview.selectedSheetIds, 'saved include decisions survive re-analysis');
+    assert.deepEqual(reopenedInspection.body.reviewDraft.sheetRoleOverrides, savedReview.sheetRoleOverrides, 'saved role corrections survive re-analysis');
+    assert.deepEqual(reopenedInspection.body.reviewDraft.sheetMappings, savedReview.sheetMappings, 'saved targeted column corrections survive re-analysis');
+    assert.deepEqual(reopenedInspection.body.reviewDraft.filingScope, savedReview.filingScope, 'saved tax-year choice survives re-analysis');
+    assert.equal(
+      reopenedInspection.body.analysis.sheets.find((sheet: { sheetId: string }) => sheet.sheetId === 'sheet_2')?.role,
+      'transactional',
+      're-analysis applies the durable user role instead of replacing it with a new suggestion',
+    );
 
     const maximumExcelRow = 1_048_576;
     const boundarySheet = {

@@ -286,13 +286,21 @@ function validateProposalSemantics(proposal: SpreadsheetUnderstandingProposal, a
   return null;
 }
 
-async function providerCallWithTimeout(
+export async function providerCallWithTimeout(
   client: OpenAI,
   payload: string,
+  options: {
+    timeoutMs?: number;
+    retryDelayMs?: number;
+    maxProviderCalls?: number;
+  } = {},
 ): Promise<{ content: string; providerCalls: number }> {
+  const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
+  const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
+  const maxProviderCalls = options.maxProviderCalls ?? SPREADSHEET_AI_LIMITS.maxProviderCalls;
   let providerCalls = 0;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < maxProviderCalls; attempt += 1) {
     providerCalls += 1;
     try {
       const response = await Promise.race([
@@ -308,14 +316,14 @@ async function providerCallWithTimeout(
           ],
           response_format: { type: 'json_object' },
         }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), SPREADSHEET_AI_LIMITS.timeoutMs)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
       ]);
       return { content: response.choices[0]?.message?.content ?? '', providerCalls };
     } catch (error) {
       lastError = error;
       const status = (error as { status?: number }).status;
-      if (attempt === 0 && (status === 429 || !status || status >= 500)) {
-        await new Promise((resolve) => setTimeout(resolve, SPREADSHEET_AI_LIMITS.retryDelayMs));
+      if (attempt < maxProviderCalls - 1 && (status === 429 || !status || status >= 500)) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         continue;
       }
       const failure = error instanceof Error ? error : new Error('provider failed');
@@ -331,6 +339,11 @@ async function providerCallWithTimeout(
 export async function analyseSpreadsheetWithAI(
   workbook: SpreadsheetWorkbook,
   analysis: SpreadsheetAnalysis,
+  testOptions?: {
+    client?: OpenAI;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+  },
 ): Promise<SpreadsheetAIEnvelope> {
   let providerCalls = 0;
   const limits = {
@@ -344,7 +357,7 @@ export async function analyseSpreadsheetWithAI(
     || workbook.totalParserCells > SPREADSHEET_AI_LIMITS.largeWorkbookCells
     || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets
     || workbook.sourceByteLength > SPREADSHEET_AI_LIMITS.largeWorkbookBytes;
-  if (!isConfigured()) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'AI provider is unavailable.', sampledSheetIds: [], providerCalls: 0, limits };
+  if (!testOptions?.client && !isConfigured()) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'AI provider is unavailable.', sampledSheetIds: [], providerCalls: 0, limits };
   if (tooLarge) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'This workbook is large for AI; deterministic/manual mapping remains available.', sampledSheetIds: [], providerCalls: 0, limits };
   const sample = aiSampleForWorkbook(workbook, analysis);
   const sampledSheetIds = sample.map((sheet) => sheet.sheetId);
@@ -363,7 +376,10 @@ export async function analyseSpreadsheetWithAI(
     return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'The bounded AI sample exceeded the request limit.', sampledSheetIds, providerCalls: 0, limits };
   }
   try {
-    const result = await providerCallWithTimeout(getClient(), JSON.stringify(request));
+    const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(request), {
+      timeoutMs: testOptions?.timeoutMs,
+      retryDelayMs: testOptions?.retryDelayMs,
+    });
     providerCalls = result.providerCalls;
     if (Buffer.byteLength(result.content) > SPREADSHEET_AI_LIMITS.maxResponseBytes) throw new Error('response_too_large');
     const parsedJson = JSON.parse(result.content) as unknown;
