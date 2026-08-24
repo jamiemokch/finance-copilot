@@ -16,3 +16,4 @@
 - [AI-first spreadsheet semantics](ai-first-spreadsheet-semantics.md) — semantic meaning must come from a validated AI contract; local code remains structural and safety-focused
 - [Replit spreadsheet provider compatibility](replit-spreadsheet-provider.md) — verified alias-only strict policy with a nested wire envelope for managed-route constraints
 - [Spreadsheet semantic execution epochs](spreadsheet-semantic-execution-epochs.md) — automatic retries must be fresh fenced executions, not resumed exhausted sessions
+- [OIDC auth cache safety](oidc-auth-cache-safety.md) — identity reads must bypass caches so a valid callback session cannot leave the client on Welcome

@@ -12,6 +12,7 @@
     "check:spreadsheet-provider": "node ./scripts/run-spreadsheet-provider-compatibility-check.mjs",
     "check:spreadsheet-provider-positive": "pnpm exec esbuild src/lib/spreadsheet-provider-positive-semantic-check-cli.ts --bundle --platform=node --format=cjs --outfile=dist/spreadsheet-provider-positive-semantic-check.cjs && node dist/spreadsheet-provider-positive-semantic-check.cjs",
     "test:guided-review-dom": "esbuild ../sme-finance-copilot/src/components/guided-spreadsheet-audit.test.tsx --bundle --platform=node --format=cjs --outfile=dist/guided-spreadsheet-audit.test.cjs && node --test dist/guided-spreadsheet-audit.test.cjs",
+    "test:auth-bootstrap": "esbuild ../sme-finance-copilot/src/lib/auth-bootstrap.test.ts --bundle --platform=node --format=cjs --outfile=dist/auth-bootstrap.test.cjs && node --test dist/auth-bootstrap.test.cjs",
     "test:spreadsheet-timeout-ui": "esbuild ../sme-finance-copilot/src/lib/spreadsheet-review-status.test.ts --bundle --platform=node --format=cjs --outfile=dist/spreadsheet-review-status.test.cjs && node --test dist/spreadsheet-review-status.test.cjs",
     "test:bank-csv": "esbuild src/lib/bank-csv.test.ts --bundle --platform=node --format=cjs --outfile=dist/bank-csv.test.cjs && node --test dist/bank-csv.test.cjs",
     "test:bank-import-safety": "node ./scripts/run-bank-import-safety-test.mjs",

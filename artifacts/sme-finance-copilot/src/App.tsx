@@ -7,6 +7,7 @@ import NotFound from '@/pages/not-found';
 import { Route, Switch, Redirect, useLocation, Router as WouterRouter } from 'wouter';
 
 import { StoreProvider, useStore } from '@/lib/store';
+import { getAuthSurface } from '@/lib/auth-routing';
 import { Layout } from '@/components/layout';
 
 import Welcome from '@/pages/welcome';
@@ -28,13 +29,20 @@ const queryClient = new QueryClient();
 function Router() {
   const [location] = useLocation();
   const { isAuthenticated, isLoading, profiles, profilesLoaded, profileLoadError } = useStore();
+  const authSurface = getAuthSurface({
+    location,
+    isLoading,
+    isAuthenticated,
+    profilesCount: profiles.length,
+    profilesLoaded,
+    profileLoadError,
+  });
 
   // Block while auth resolves
-  if (isLoading) return null;
+  if (authSurface === 'loading') return null;
 
   // Block while authenticated — profile list is still loading from API
-  if (isAuthenticated && !profilesLoaded) return null;
-  if (isAuthenticated && profileLoadError) {
+  if (authSurface === 'profile-error') {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-4 p-6">
         <h1 className="font-serif text-2xl text-foreground">We couldn’t load your businesses</h1>
@@ -49,7 +57,7 @@ function Router() {
   const isPublicRoute = location === '/' || location === '/welcome';
 
   // ── Unauthenticated ──────────────────────────────────────────────────────────
-  if (!isAuthenticated) {
+  if (authSurface === 'welcome') {
     // Lock all non-public routes to Welcome
     if (!isPublicRoute) return <Redirect to="/" />;
     return (
@@ -62,13 +70,13 @@ function Router() {
   }
 
   // ── Authenticated, no profile → onboarding ───────────────────────────────────
-  if (profiles.length === 0) {
+  if (authSurface === 'onboarding') {
     if (location !== '/onboarding') return <Redirect to="/onboarding" />;
     return <Onboarding />;
   }
 
   // ── Authenticated with profile, on a public/onboarding route → dashboard ─────
-  if (isPublicRoute || location === '/onboarding') {
+  if (authSurface === 'dashboard') {
     return <Redirect to="/dashboard" />;
   }
 

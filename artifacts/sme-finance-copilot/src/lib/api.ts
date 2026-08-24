@@ -99,7 +99,9 @@ export interface AuthUser {
 
 export async function getAuthUser(): Promise<AuthUser | null> {
   try {
-    const data = await apiFetch<{ user: AuthUser | null }>("/auth/user");
+    const data = await apiFetch<{ user: AuthUser | null }>("/auth/user", {
+      cache: "no-store",
+    });
     return data.user;
   } catch {
     return null;
