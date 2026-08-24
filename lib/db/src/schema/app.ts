@@ -392,6 +392,9 @@ export const spreadsheetSemanticProviderAttemptsTable = pgTable('spreadsheet_sem
   statusCode: integer('status_code'),
   retryable: boolean('retryable').notNull(),
   failurePhase: text('failure_phase'),
+  // This is a bounded response-shape diagnostic only. It must never contain
+  // provider response text, workbook values, prompts, or user identifiers.
+  diagnostic: jsonb('diagnostic'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex('spreadsheet_provider_attempt_work_number_unique').on(table.semanticSessionId, table.workIdentity, table.attemptNumber),

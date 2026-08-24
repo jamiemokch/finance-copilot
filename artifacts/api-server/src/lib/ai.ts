@@ -17,9 +17,11 @@ import { analyseSpreadsheetStructure, type SpreadsheetAnalysis, type Spreadsheet
 import {
   SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
   spreadsheetUnderstandingProposalSchema,
+  spreadsheetResponseShapeDiagnosticSchema,
   type SpreadsheetUnderstandingProposal,
   type SpreadsheetAIEnvelope,
   type SpreadsheetProviderAttempt,
+  type SpreadsheetResponseShapeDiagnostic,
 } from './spreadsheet-understanding.js';
 import {
   analysisFromSemanticPlan,
@@ -337,7 +339,7 @@ export async function providerCallWithTimeout(
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
     allowJsonObjectFallback?: boolean;
     timeoutReason?: 'timeout' | 'review_deadline';
-    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase'> | null;
+    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'diagnostic'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
 ): Promise<{
@@ -451,6 +453,7 @@ export async function providerCallWithTimeout(
         statusCode: null,
         retryable: false,
         failurePhase: responseFailure?.failurePhase ?? null,
+        diagnostic: responseFailure?.diagnostic,
       });
       return { content, providerCalls, resolvedModel, responseMode };
     } catch (caught) {
@@ -1003,6 +1006,266 @@ export function resetManagedSpreadsheetProviderPolicyForTests() {
   managedProviderPolicyCheck = null;
 }
 
+type ResponseDiagnosticStage = SpreadsheetResponseShapeDiagnostic['validationStage'];
+type ResponseDiagnosticRoot = 'wire' | 'legacy_response';
+type ResponseDiagnosticValueType = Exclude<SpreadsheetResponseShapeDiagnostic['rootType'], 'not_available'>;
+type ResponseDiagnosticIssueCode = SpreadsheetResponseShapeDiagnostic['issues'][number]['code'];
+
+const SAFE_DIAGNOSTIC_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+const SAFE_DIAGNOSTIC_CONTRACT_FIELD_NAMES = new Set([
+  'response', 'schemaVersion', 'stage', 'request', 'plan',
+  'continuationToken', 'allowedSheetIds', 'requests',
+  'sheetId', 'startRow', 'endRow', 'startColumn', 'endColumn', 'chunk', 'reason',
+  'status', 'sheets', 'unresolvedQuestions', 'abstention', 'summary',
+  'disposition', 'decisionSource', 'validationReason', 'purpose', 'headerRow',
+  'dataRange', 'rowRules', 'include', 'exclude', 'fields',
+  'date', 'description', 'signedAmount', 'debit', 'credit', 'category',
+  'columnId', 'confidence', 'rationale', 'transactionSemantics', 'direction',
+  'duplicateOrOverlap', 'otherSheetId', 'unresolvedQuestionIds',
+  'id', 'question', 'whyNeeded', 'choices', 'label', 'blocking',
+  'detail', 'manualRecoveryRequired',
+]);
+const MAX_DIAGNOSTIC_NODES = 256;
+const MAX_DIAGNOSTIC_DEPTH = 8;
+const MAX_DIAGNOSTIC_OBJECT_FIELDS = 64;
+const MAX_DIAGNOSTIC_ARRAY_ITEMS = 8;
+
+function isDiagnosticObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function diagnosticFieldName(value: string): string {
+  return SAFE_DIAGNOSTIC_FIELD_NAME.test(value) && SAFE_DIAGNOSTIC_CONTRACT_FIELD_NAMES.has(value)
+    ? value
+    : 'unexpected_field';
+}
+
+function diagnosticFieldPath(parent: string, field: string): string {
+  return `${parent}.${diagnosticFieldName(field)}`;
+}
+
+function diagnosticValueType(value: unknown): ResponseDiagnosticValueType {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'object') return 'object';
+  if (typeof value === 'boolean') return 'boolean';
+  if (typeof value === 'number') return 'number';
+  return 'string';
+}
+
+function responseStageForDiagnostic(raw: unknown, root: ResponseDiagnosticRoot): 'request_context' | 'final_plan' | 'abstain' | null {
+  const response = root === 'wire' && isDiagnosticObject(raw) ? raw.response : raw;
+  if (!isDiagnosticObject(response)) return null;
+  return response.stage === 'request_context' || response.stage === 'final_plan' || response.stage === 'abstain'
+    ? response.stage
+    : null;
+}
+
+function expectedDiagnosticFields(
+  path: string,
+  responsePath: string,
+  root: ResponseDiagnosticRoot,
+  stage: ReturnType<typeof responseStageForDiagnostic>,
+): readonly string[] | null {
+  if (root === 'wire' && path === '$') return ['response'];
+  if (path === responsePath) return ['schemaVersion', 'stage', 'request', 'plan'];
+  const requestPath = `${responsePath}.request`;
+  const planPath = `${responsePath}.plan`;
+  if (stage === 'request_context') {
+    if (path === requestPath) return ['schemaVersion', 'continuationToken', 'allowedSheetIds', 'requests'];
+    if (path === `${requestPath}.requests[*]`) return ['sheetId', 'startRow', 'endRow', 'startColumn', 'endColumn', 'chunk', 'reason'];
+    return null;
+  }
+  if (stage !== 'final_plan' && stage !== 'abstain') return null;
+  if (path === planPath) return ['schemaVersion', 'status', 'continuationToken', 'sheets', 'unresolvedQuestions', 'abstention', 'summary'];
+  if (path === `${planPath}.sheets[*]`) {
+    return ['sheetId', 'disposition', 'decisionSource', 'validationReason', 'purpose', 'headerRow', 'dataRange', 'rowRules', 'fields', 'transactionSemantics', 'duplicateOrOverlap', 'unresolvedQuestionIds'];
+  }
+  if (path === `${planPath}.sheets[*].dataRange`) return ['startRow', 'endRow'];
+  if (path === `${planPath}.sheets[*].rowRules`) return ['include', 'exclude'];
+  if (path === `${planPath}.sheets[*].rowRules.include[*]` || path === `${planPath}.sheets[*].rowRules.exclude[*]`) {
+    return ['startRow', 'endRow', 'reason'];
+  }
+  if (path === `${planPath}.sheets[*].fields`) return ['date', 'description', 'signedAmount', 'debit', 'credit', 'category'];
+  if (path.startsWith(`${planPath}.sheets[*].fields.`)) return ['columnId', 'confidence', 'rationale'];
+  if (path === `${planPath}.sheets[*].transactionSemantics`) return ['direction', 'rationale'];
+  if (path === `${planPath}.sheets[*].duplicateOrOverlap[*]`) return ['otherSheetId', 'confidence', 'rationale'];
+  if (path === `${planPath}.unresolvedQuestions[*]`) return ['id', 'sheetId', 'question', 'whyNeeded', 'choices', 'blocking'];
+  if (path === `${planPath}.unresolvedQuestions[*].choices[*]`) return ['id', 'label'];
+  if (path === `${planPath}.abstention`) return ['reason', 'detail', 'manualRecoveryRequired'];
+  return null;
+}
+
+function safeDiagnosticIssueCode(issue: z.ZodIssue): ResponseDiagnosticIssueCode {
+  switch (issue.code) {
+    case 'invalid_type':
+    case 'invalid_literal':
+    case 'invalid_enum_value':
+    case 'unrecognized_keys':
+    case 'invalid_union':
+    case 'too_small':
+    case 'too_big':
+    case 'custom':
+      return issue.code;
+    default:
+      return 'unknown';
+  }
+}
+
+function safeDiagnosticIssueSummary(code: ResponseDiagnosticIssueCode): SpreadsheetResponseShapeDiagnostic['issues'][number]['summary'] {
+  switch (code) {
+    case 'invalid_json': return 'response_is_not_json';
+    case 'response_too_large': return 'response_exceeds_limit';
+    case 'invalid_type': return 'value_has_wrong_type';
+    case 'invalid_literal': return 'value_does_not_match_literal';
+    case 'invalid_enum_value': return 'value_is_outside_allowed_set';
+    case 'unrecognized_keys': return 'object_has_unexpected_fields';
+    case 'invalid_union':
+    case 'contract_invalid': return 'response_does_not_match_contract';
+    case 'too_small': return 'value_is_below_bound';
+    case 'too_big': return 'value_exceeds_bound';
+    case 'custom': return 'cross_field_rule_failed';
+    case 'continuation_invalid': return 'continuation_does_not_match';
+    case 'parser_bounds_invalid': return 'requested_context_is_outside_bounds';
+    case 'semantic_plan_invalid': return 'semantic_plan_is_invalid';
+    default: return 'validation_failed';
+  }
+}
+
+function diagnosticIssuePath(path: z.ZodIssue['path']): string {
+  return path.reduce<string>((result, part) => (
+    typeof part === 'number' ? `${result}[*]` : diagnosticFieldPath(result, String(part))
+  ), '$');
+}
+
+/**
+ * Builds a bounded, privacy-safe response shape diagnostic. Values are never
+ * read into the output: this returns field paths, JSON types, array counts, and
+ * fixed validation classifications only.
+ */
+export function buildSpreadsheetResponseShapeDiagnostic(
+  raw: unknown,
+  validationStage: ResponseDiagnosticStage,
+  options: {
+    root?: ResponseDiagnosticRoot;
+    zodIssues?: readonly z.ZodIssue[];
+    contractIssue?: ResponseDiagnosticIssueCode;
+  } = {},
+): SpreadsheetResponseShapeDiagnostic {
+  const root = options.root ?? 'wire';
+  const responsePath = root === 'wire' ? '$.response' : '$';
+  const stage = responseStageForDiagnostic(raw, root);
+  const fieldPaths: string[] = [];
+  const valueTypes: SpreadsheetResponseShapeDiagnostic['valueTypes'] = [];
+  const arrayLengths: SpreadsheetResponseShapeDiagnostic['arrayLengths'] = [];
+  const missingRequiredFields: string[] = [];
+  const unexpectedFields: string[] = [];
+  const issues: SpreadsheetResponseShapeDiagnostic['issues'] = [];
+  const seen = new Set<string>();
+  let truncated = false;
+  let nodes = 0;
+  const addString = (target: string[], value: string, limit: number) => {
+    const key = `${target === fieldPaths ? 'field' : target === missingRequiredFields ? 'missing' : 'unexpected'}:${value}`;
+    if (seen.has(key)) return;
+    if (target.length >= limit) {
+      truncated = true;
+      return;
+    }
+    seen.add(key);
+    target.push(value);
+  };
+  const addValueType = (path: string, type: ResponseDiagnosticValueType) => {
+    const key = `type:${path}:${type}`;
+    if (seen.has(key)) return;
+    if (valueTypes.length >= 96) {
+      truncated = true;
+      return;
+    }
+    seen.add(key);
+    valueTypes.push({ path, type });
+  };
+  const addArrayLength = (path: string, length: number) => {
+    const key = `array:${path}`;
+    if (seen.has(key)) return;
+    if (arrayLengths.length >= 48) {
+      truncated = true;
+      return;
+    }
+    seen.add(key);
+    arrayLengths.push({ path, length: Math.min(length, 10_000), truncated: length > 10_000 });
+    if (length > 10_000) truncated = true;
+  };
+  const addIssue = (path: string, code: ResponseDiagnosticIssueCode) => {
+    const key = `issue:${path}:${code}`;
+    if (seen.has(key)) return;
+    if (issues.length >= 32) {
+      truncated = true;
+      return;
+    }
+    seen.add(key);
+    issues.push({ path, code, summary: safeDiagnosticIssueSummary(code) });
+  };
+  const collect = (value: unknown, path: string, depth: number) => {
+    if (nodes >= MAX_DIAGNOSTIC_NODES || depth > MAX_DIAGNOSTIC_DEPTH) {
+      truncated = true;
+      return;
+    }
+    nodes += 1;
+    const type = diagnosticValueType(value);
+    addValueType(path, type);
+    if (Array.isArray(value)) {
+      addArrayLength(path, value.length);
+      for (const item of value.slice(0, MAX_DIAGNOSTIC_ARRAY_ITEMS)) collect(item, `${path}[*]`, depth + 1);
+      if (value.length > MAX_DIAGNOSTIC_ARRAY_ITEMS) truncated = true;
+      return;
+    }
+    if (!isDiagnosticObject(value)) return;
+    const expected = expectedDiagnosticFields(path, responsePath, root, stage);
+    for (const field of expected ?? []) {
+      if (!Object.hasOwn(value, field)) addString(missingRequiredFields, diagnosticFieldPath(path, field), 64);
+    }
+    const keys = Object.keys(value).sort();
+    for (const field of keys.slice(0, MAX_DIAGNOSTIC_OBJECT_FIELDS)) {
+      const childPath = diagnosticFieldPath(path, field);
+      addString(fieldPaths, childPath, 96);
+      if (expected && !expected.includes(field)) addString(unexpectedFields, childPath, 64);
+      collect(value[field], childPath, depth + 1);
+    }
+    if (keys.length > MAX_DIAGNOSTIC_OBJECT_FIELDS) truncated = true;
+  };
+
+  if (raw === undefined) {
+    addIssue('$', options.contractIssue ?? 'invalid_json');
+  } else {
+    collect(raw, '$', 0);
+  }
+  for (const issue of options.zodIssues ?? []) {
+    const path = diagnosticIssuePath(issue.path);
+    const code = safeDiagnosticIssueCode(issue);
+    addIssue(path, code);
+    const candidate = issue as z.ZodIssue & { received?: unknown; keys?: unknown };
+    if (candidate.received === 'undefined') addString(missingRequiredFields, path, 64);
+    if (Array.isArray(candidate.keys)) {
+      for (const key of candidate.keys) {
+        if (typeof key === 'string') addString(unexpectedFields, diagnosticFieldPath(path, key), 64);
+      }
+    }
+  }
+  if (options.contractIssue && raw !== undefined) addIssue('$', options.contractIssue);
+  return spreadsheetResponseShapeDiagnosticSchema.parse({
+    version: 'spreadsheet-response-shape-diagnostic.v1',
+    validationStage,
+    rootType: raw === undefined ? 'not_available' : diagnosticValueType(raw),
+    fieldPaths,
+    valueTypes,
+    arrayLengths,
+    missingRequiredFields,
+    unexpectedFields,
+    issues,
+    truncated,
+  });
+}
+
 function parseSpreadsheetProviderResponse(content: string) {
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) throw new Error('response_too_large');
   let raw: unknown;
@@ -1020,23 +1283,123 @@ function parseSpreadsheetProviderResponse(content: string) {
   return legacy.data;
 }
 
-function responseContractFailure(content: string, workbook: SpreadsheetWorkbook): string | null {
-  let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
-  try {
-    parsed = parseSpreadsheetProviderResponse(content);
-  } catch (error) {
-    return error instanceof Error ? error.message : 'schema_invalid';
+type ResponseContractFailure = {
+  reason: string;
+  diagnostic: SpreadsheetResponseShapeDiagnostic;
+};
+
+function responseContractFailure(
+  content: string,
+  workbook: SpreadsheetWorkbook,
+  expectedContinuationToken?: string,
+): ResponseContractFailure | null {
+  if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
+    return {
+      reason: 'response_too_large',
+      diagnostic: buildSpreadsheetResponseShapeDiagnostic(undefined, 'transport_envelope', { contractIssue: 'response_too_large' }),
+    };
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    return {
+      reason: 'schema_invalid',
+      diagnostic: buildSpreadsheetResponseShapeDiagnostic(undefined, 'json_parse', { contractIssue: 'invalid_json' }),
+    };
+  }
+  const wire = spreadsheetAIProviderWireResponseSchema.safeParse(raw);
+  const legacy = wire.success ? null : spreadsheetAIResponseSchema.safeParse(raw);
+  const diagnosticRoot: ResponseDiagnosticRoot = !wire.success && legacy && !legacy.success
+    && isDiagnosticObject(raw) && (Object.hasOwn(raw, 'stage') || Object.hasOwn(raw, 'schemaVersion'))
+    ? 'legacy_response'
+    : 'wire';
+  if (!wire.success && (!legacy || !legacy.success)) {
+    const failedSchema = diagnosticRoot === 'legacy_response' && legacy ? legacy : wire;
+    return {
+      reason: 'schema_invalid',
+      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+        root: diagnosticRoot,
+        zodIssues: failedSchema.error.issues,
+        contractIssue: 'contract_invalid',
+      }),
+    };
+  }
+  const parsed = wire.success
+    ? wire.data.response
+    : legacy?.success
+      ? legacy.data
+      : null;
+  if (!parsed) {
+    return {
+      reason: 'schema_invalid',
+      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+        root: diagnosticRoot,
+        contractIssue: 'contract_invalid',
+      }),
+    };
+  }
+  const rootForParsed: ResponseDiagnosticRoot = wire.success ? 'wire' : 'legacy_response';
   try {
     if (parsed.stage === 'request_context') {
+      if (!parsed.request) {
+        return {
+          reason: 'schema_invalid',
+          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+            root: rootForParsed,
+            contractIssue: 'contract_invalid',
+          }),
+        };
+      }
+      if (expectedContinuationToken && parsed.request.continuationToken !== expectedContinuationToken) {
+        return {
+          reason: 'continuation_invalid',
+          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'continuation', {
+            root: rootForParsed,
+            contractIssue: 'continuation_invalid',
+          }),
+        };
+      }
       buildRequestedSpreadsheetContext(workbook, parsed.request);
     } else {
+      if (!parsed.plan) {
+        return {
+          reason: 'schema_invalid',
+          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+            root: rootForParsed,
+            contractIssue: 'contract_invalid',
+          }),
+        };
+      }
+      if (expectedContinuationToken && parsed.plan.continuationToken !== expectedContinuationToken) {
+        return {
+          reason: 'continuation_invalid',
+          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'continuation', {
+            root: rootForParsed,
+            contractIssue: 'continuation_invalid',
+          }),
+        };
+      }
       const planError = validateSpreadsheetImportPlan(parsed.plan, workbook);
-      if (planError) return planError;
+      if (planError) {
+        return {
+          reason: planError,
+          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'semantic_plan', {
+            root: rootForParsed,
+            contractIssue: 'semantic_plan_invalid',
+          }),
+        };
+      }
     }
     return null;
   } catch {
-    return 'contract_invalid';
+    return {
+      reason: 'contract_invalid',
+      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'parser_bounds', {
+        root: rootForParsed,
+        contractIssue: 'parser_bounds_invalid',
+      }),
+    };
   }
 }
 
@@ -1266,13 +1629,17 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => responseContractFailure(content, workbook)
-            ? {
-              outcomeCategory: 'contract_invalid',
-              safeStatus: 'contract_invalid',
-              failurePhase: 'response_validation',
-            }
-            : null,
+          classifyResponse: (content) => {
+            const failure = responseContractFailure(content, workbook, token);
+            return failure
+              ? {
+                outcomeCategory: 'contract_invalid',
+                safeStatus: 'contract_invalid',
+                failurePhase: 'response_validation',
+                diagnostic: failure.diagnostic,
+              }
+              : null;
+          },
           onAttempt: async (attempt) => {
             providerAttempts = [...providerAttempts, attempt];
             await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1287,7 +1654,8 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        if (responseContractFailure(responseContent, workbook)) {
+        const initialFailure = responseContractFailure(responseContent, workbook, token);
+        if (initialFailure) {
           const repairPayload = repairPayloadForContract(responseContent);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
@@ -1297,13 +1665,17 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => responseContractFailure(content, workbook)
-              ? {
-                outcomeCategory: 'contract_invalid',
-                safeStatus: 'contract_invalid',
-                failurePhase: 'repair_validation',
-              }
-              : null,
+            classifyResponse: (content) => {
+              const failure = responseContractFailure(content, workbook, token);
+              return failure
+                ? {
+                  outcomeCategory: 'contract_invalid',
+                  safeStatus: 'contract_invalid',
+                  failurePhase: 'repair_validation',
+                  diagnostic: failure.diagnostic,
+                }
+                : null;
+            },
             onAttempt: async (attempt) => {
               providerAttempts = [...providerAttempts, attempt];
               await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1312,8 +1684,8 @@ export async function analyseSpreadsheetWithAI(
           providerCalls += repaired.providerCalls;
           resolvedModel = repaired.resolvedModel;
           responseMode = repaired.responseMode;
-          if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls
-            || responseContractFailure(repaired.content, workbook)) throw new Error('schema_invalid');
+          const repairedFailure = responseContractFailure(repaired.content, workbook, token);
+          if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls || repairedFailure) throw new Error('schema_invalid');
           responseContent = repaired.content;
         }
         const parsed = parseSpreadsheetProviderResponse(responseContent);

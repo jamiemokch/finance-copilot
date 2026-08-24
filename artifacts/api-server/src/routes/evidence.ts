@@ -1569,6 +1569,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
           statusCode: attempt.statusCode,
           retryable: attempt.retryable,
           failurePhase: attempt.failurePhase,
+          diagnostic: attempt.diagnostic ?? null,
         }).onConflictDoNothing();
         await tx.insert(evidenceAuditEventsTable).values({
           profileId: profile.id,

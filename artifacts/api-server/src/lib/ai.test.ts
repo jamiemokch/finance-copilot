@@ -748,6 +748,71 @@ test('a provider-success contract-invalid response gets one bounded repair pass 
   assert.doesNotMatch(JSON.stringify(repairPayload), /Private consulting payment/);
 });
 
+test('contract-invalid responses retain a bounded shape diagnostic without persisting provider values', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'diagnostic.csv');
+  const sensitiveName = 'PRIVATE_CUSTOMER_NAME_DO_NOT_PERSIST';
+  const sensitiveDescription = 'PRIVATE_DESCRIPTION_DO_NOT_PERSIST';
+  const sensitiveToken = 'PRIVATE_PROVIDER_TOKEN_DO_NOT_PERSIST';
+  const sensitiveAmount = '917.23';
+  const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as { continuationToken?: string };
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              response: {
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                stage: 'final_plan',
+                request: null,
+                plan: {
+                  schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                  status: 'complete',
+                  continuationToken: payload.continuationToken ?? 'token_missing',
+                  sheets: [],
+                  unresolvedQuestions: [],
+                  abstention: null,
+                  summary: sensitiveDescription,
+                  [sensitiveToken]: {
+                    counterparty: sensitiveName,
+                    amount: sensitiveAmount,
+                  },
+                },
+              },
+            }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    retryDelayMs: 0,
+    persistProviderAttempts: async (attempts) => {
+      persistedAttempts.push(JSON.parse(JSON.stringify(attempts)) as SpreadsheetProviderAttempt[]);
+    },
+  });
+
+  const diagnostic = result.providerAttempts?.find((attempt) => attempt.outcomeCategory === 'contract_invalid')?.diagnostic;
+  assert.equal(result.status, 'failed');
+  assert.ok(diagnostic);
+  assert.equal(diagnostic?.validationStage, 'transport_envelope');
+  assert.ok(diagnostic?.unexpectedFields.includes('$.response.plan.unexpected_field'));
+  assert.deepEqual(diagnostic?.arrayLengths.find((entry) => entry.path === '$.response.plan.sheets'), {
+    path: '$.response.plan.sheets',
+    length: 0,
+    truncated: false,
+  });
+  assert.ok(diagnostic?.issues.some((issue) => issue.code === 'unrecognized_keys' || issue.code === 'too_small'));
+
+  const persisted = JSON.stringify({ attempts: result.providerAttempts, checkpointAttempts: persistedAttempts });
+  for (const sensitiveValue of [sensitiveName, sensitiveDescription, sensitiveToken, sensitiveAmount]) {
+    assert.doesNotMatch(persisted, new RegExp(sensitiveValue.replace('.', '\\.')));
+  }
+});
+
 test('repair remains on the verified strict policy even when historical attempts used object mode', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Strict repair,13\n'), 'text/csv', 'strict-repair.csv');
   const requests: Array<{ model?: string; mode?: string }> = [];

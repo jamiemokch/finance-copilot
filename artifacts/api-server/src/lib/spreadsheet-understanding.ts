@@ -130,6 +130,48 @@ export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderst
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
 /**
+ * A deliberately data-free description of an invalid structured-provider
+ * response. It records only JSON shape and fixed validation classifications;
+ * no provider text, workbook data, prompts, identifiers, or values belong here.
+ */
+export const spreadsheetResponseShapeDiagnosticSchema = z.object({
+  version: z.literal('spreadsheet-response-shape-diagnostic.v1'),
+  validationStage: z.enum(['json_parse', 'transport_envelope', 'continuation', 'parser_bounds', 'semantic_plan']),
+  rootType: z.enum(['not_available', 'null', 'boolean', 'number', 'string', 'array', 'object']),
+  fieldPaths: z.array(z.string().max(512)).max(96),
+  valueTypes: z.array(z.object({
+    path: z.string().max(512),
+    type: z.enum(['null', 'boolean', 'number', 'string', 'array', 'object']),
+  }).strict()).max(96),
+  arrayLengths: z.array(z.object({
+    path: z.string().max(512),
+    length: z.number().int().min(0).max(10_000),
+    truncated: z.boolean(),
+  }).strict()).max(48),
+  missingRequiredFields: z.array(z.string().max(512)).max(64),
+  unexpectedFields: z.array(z.string().max(512)).max(64),
+  issues: z.array(z.object({
+    path: z.string().max(512),
+    code: z.enum([
+      'invalid_json', 'response_too_large', 'invalid_type', 'invalid_literal',
+      'invalid_enum_value', 'unrecognized_keys', 'invalid_union', 'too_small',
+      'too_big', 'custom', 'contract_invalid', 'continuation_invalid',
+      'parser_bounds_invalid', 'semantic_plan_invalid', 'unknown',
+    ]),
+    summary: z.enum([
+      'response_is_not_json', 'response_exceeds_limit', 'value_has_wrong_type',
+      'value_does_not_match_literal', 'value_is_outside_allowed_set',
+      'object_has_unexpected_fields', 'response_does_not_match_contract',
+      'value_is_below_bound', 'value_exceeds_bound', 'cross_field_rule_failed',
+      'continuation_does_not_match', 'requested_context_is_outside_bounds',
+      'semantic_plan_is_invalid', 'validation_failed',
+    ]),
+  }).strict()).max(32),
+  truncated: z.boolean(),
+}).strict();
+export type SpreadsheetResponseShapeDiagnostic = z.infer<typeof spreadsheetResponseShapeDiagnosticSchema>;
+
+/**
  * This contains operational metadata only. It deliberately excludes workbook
  * values, request payloads, response text, provider headers, and raw errors.
  */
@@ -151,6 +193,7 @@ export type SpreadsheetProviderAttempt = {
   statusCode: number | null;
   retryable: boolean;
   failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
+  diagnostic?: SpreadsheetResponseShapeDiagnostic;
 };
 
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */
