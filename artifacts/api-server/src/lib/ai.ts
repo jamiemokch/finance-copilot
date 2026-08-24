@@ -33,6 +33,9 @@ import {
   spreadsheetAIResponseJsonSchema,
   spreadsheetImportPlanSchema,
   validateSpreadsheetImportPlan,
+  buildSpreadsheetProviderCompatibilityPayload,
+  buildSpreadsheetProviderCompatibilityWorkbook,
+  SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
   type SpreadsheetImportPlan,
 } from './spreadsheet-semantic-contract.js';
 
@@ -436,6 +439,166 @@ export async function providerCallWithTimeout(
   const failure = lastError instanceof Error ? lastError : new Error('provider failed');
   (failure as Error & { providerCalls?: number }).providerCalls = (options.attemptOffset ?? 0) + providerCalls;
   throw failure;
+}
+
+export type SpreadsheetProviderCompatibilityCheckResult = {
+  status: 'compatible' | 'compatible_with_json_object_fallback' | 'contract_invalid' | 'route_incompatible' | 'route_unavailable' | 'not_configured' | 'blocked_non_production_environment';
+  routeClass: 'replit_ai_integrations';
+  payload: {
+    kind: 'synthetic_semantic_v2';
+    containsWorkbookData: false;
+    createsRecords: false;
+  };
+  checks: {
+    strictSchemaAlias: 'accepted' | 'rejected' | 'not_reached';
+    datedModelResolution: 'accepted' | 'rejected' | 'not_needed' | 'not_reached';
+    explicitFormatFallback: 'not_used' | 'used_after_strict_compatibility_rejections' | 'boundary_violation';
+    responseContract: 'valid' | 'invalid' | 'not_received';
+  };
+  attempts: Array<Pick<SpreadsheetProviderAttempt, 'attemptNumber' | 'requestedModel' | 'resolvedModel' | 'responseMode' | 'outcomeCategory' | 'safeStatus' | 'statusCode' | 'retryable' | 'failurePhase'>>;
+};
+
+type CompatibilityCheckState = SpreadsheetProviderCompatibilityCheckResult['checks'];
+const COMPATIBILITY_CHECK_ALLOWED_ENVIRONMENTS = new Set(['development', 'test']);
+
+function compatibilityResponseFailure(content: string): 'invalid' | null {
+  if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) return 'invalid';
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    return 'invalid';
+  }
+  const parsed = spreadsheetAIResponseSchema.safeParse(raw);
+  if (!parsed.success) return 'invalid';
+  const workbook = buildSpreadsheetProviderCompatibilityWorkbook();
+  try {
+    if (parsed.data.stage === 'request_context') {
+      if (parsed.data.request.continuationToken !== SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN) return 'invalid';
+      buildRequestedSpreadsheetContext(workbook, parsed.data.request);
+    } else {
+      if (parsed.data.plan.continuationToken !== SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN) return 'invalid';
+      if (validateSpreadsheetImportPlan(parsed.data.plan, workbook)) return 'invalid';
+    }
+    return null;
+  } catch {
+    return 'invalid';
+  }
+}
+
+function compatibilityChecksFromAttempts(attempts: SpreadsheetProviderAttempt[]): CompatibilityCheckState {
+  const aliasAttempts = attempts.filter((attempt) => attempt.resolvedModel === SPREADSHEET_PROVIDER_MODEL && attempt.responseMode === 'json_schema');
+  const datedAttempts = attempts.filter((attempt) => attempt.resolvedModel === SPREADSHEET_PROVIDER_DATED_MODEL && attempt.responseMode === 'json_schema');
+  const fallbackAttempts = attempts.filter((attempt) => attempt.responseMode === 'json_object');
+  const strictAttempts = attempts.filter((attempt) => attempt.responseMode === 'json_schema');
+  const strictCompatibilityRejections = strictAttempts.length > 0
+    && strictAttempts.every((attempt) => attempt.outcomeCategory === 'compatibility');
+
+  return {
+    strictSchemaAlias: aliasAttempts[0]?.outcomeCategory === 'success' ? 'accepted'
+      : aliasAttempts[0]?.outcomeCategory === 'compatibility' ? 'rejected'
+        : 'not_reached',
+    datedModelResolution: datedAttempts[0]?.outcomeCategory === 'success' ? 'accepted'
+      : datedAttempts[0]?.outcomeCategory === 'compatibility' ? 'rejected'
+        : aliasAttempts[0]?.outcomeCategory === 'success' ? 'not_needed'
+          : 'not_reached',
+    explicitFormatFallback: fallbackAttempts.length === 0 ? 'not_used'
+      : strictCompatibilityRejections ? 'used_after_strict_compatibility_rejections' : 'boundary_violation',
+    responseContract: 'not_received',
+  };
+}
+
+/**
+ * Runs the manually-triggered, non-production provider probe. This function
+ * deliberately does not accept a workbook, user, session, or persistence
+ * callback, and it returns only bounded provider-attempt metadata.
+ */
+export async function runSpreadsheetProviderCompatibilityCheck(options: {
+  client?: OpenAI;
+  timeoutMs?: number;
+  retryDelayMs?: number;
+  environment?: string;
+  managedRouteConfigured?: boolean;
+} = {}): Promise<SpreadsheetProviderCompatibilityCheckResult> {
+  const payloadMetadata = {
+    kind: 'synthetic_semantic_v2' as const,
+    containsWorkbookData: false as const,
+    createsRecords: false as const,
+  };
+  const emptyAttempts = (): SpreadsheetProviderCompatibilityCheckResult => ({
+    status: 'not_configured',
+    routeClass: 'replit_ai_integrations',
+    payload: payloadMetadata,
+    checks: {
+      strictSchemaAlias: 'not_reached',
+      datedModelResolution: 'not_reached',
+      explicitFormatFallback: 'not_used',
+      responseContract: 'not_received',
+    },
+    attempts: [],
+  });
+
+  const environment = options.environment ?? process.env.NODE_ENV;
+  if (!environment || !COMPATIBILITY_CHECK_ALLOWED_ENVIRONMENTS.has(environment)) {
+    return { ...emptyAttempts(), status: 'blocked_non_production_environment' };
+  }
+  const managedRouteConfigured = options.managedRouteConfigured
+    ?? Boolean(process.env.AI_INTEGRATIONS_OPENAI_BASE_URL);
+  if (!managedRouteConfigured) return emptyAttempts();
+  if (!options.client && !isConfigured()) return emptyAttempts();
+
+  const attempts: SpreadsheetProviderAttempt[] = [];
+  const payload = JSON.stringify(buildSpreadsheetProviderCompatibilityPayload());
+  let result: Awaited<ReturnType<typeof providerCallWithTimeout>> | null = null;
+  let providerError = false;
+  try {
+    result = await providerCallWithTimeout(options.client ?? getClient(), payload, {
+      timeoutMs: options.timeoutMs,
+      retryDelayMs: options.retryDelayMs,
+      maxProviderCalls: 3,
+      routeClass: 'replit_ai_integrations',
+      classifyResponse: (content) => compatibilityResponseFailure(content)
+        ? { outcomeCategory: 'contract_invalid', safeStatus: 'contract_invalid', failurePhase: 'response_validation' }
+        : null,
+      onAttempt: async (attempt) => { attempts.push(attempt); },
+    });
+  } catch {
+    // Raw provider errors are intentionally not returned by the probe.
+    providerError = true;
+  }
+
+  const checks = compatibilityChecksFromAttempts(attempts);
+  if (result) {
+    checks.responseContract = compatibilityResponseFailure(result.content) ? 'invalid' : 'valid';
+  }
+  const fallbackWasValid = checks.explicitFormatFallback === 'used_after_strict_compatibility_rejections'
+    && checks.responseContract === 'valid';
+  const terminalAttempt = attempts.at(-1);
+  const status: SpreadsheetProviderCompatibilityCheckResult['status'] = checks.responseContract === 'invalid'
+    ? 'contract_invalid'
+    : fallbackWasValid
+      ? 'compatible_with_json_object_fallback'
+      : providerError
+        ? terminalAttempt?.outcomeCategory === 'compatibility' ? 'route_incompatible' : 'route_unavailable'
+        : 'compatible';
+
+  return {
+    status,
+    routeClass: 'replit_ai_integrations',
+    payload: payloadMetadata,
+    checks,
+    attempts: attempts.map((attempt) => ({
+      attemptNumber: attempt.attemptNumber,
+      requestedModel: attempt.requestedModel,
+      resolvedModel: attempt.resolvedModel,
+      responseMode: attempt.responseMode,
+      outcomeCategory: attempt.outcomeCategory,
+      safeStatus: attempt.safeStatus,
+      statusCode: attempt.statusCode,
+      retryable: attempt.retryable,
+      failurePhase: attempt.failurePhase,
+    })),
+  };
 }
 
 function parseSpreadsheetProviderResponse(content: string) {

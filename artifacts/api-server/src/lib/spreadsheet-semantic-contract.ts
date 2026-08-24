@@ -236,6 +236,84 @@ export const spreadsheetAIResponseContract = {
 } as const;
 
 /**
+ * A deliberately synthetic, data-free request used by the manual provider
+ * compatibility check. Keep this separate from workbook construction so the
+ * check can never accidentally receive an uploaded file or an evidence record.
+ */
+export const SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN = 'provider-compatibility-check-v1';
+export const SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID = 'sheet_compatibility_probe';
+
+export function buildSpreadsheetProviderCompatibilityWorkbook(): SpreadsheetWorkbook {
+  return {
+    sourceByteLength: 0,
+    fileType: 'csv',
+    totalParserRows: 1,
+    totalParserCells: 3,
+    sheets: [{
+      sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+      displayName: 'synthetic',
+      index: 0,
+      rowCount: 1,
+      columnCount: 3,
+      parserRange: { startRow: 1, endRow: 1, startColumn: 1, endColumn: 3 },
+      rows: [{
+        rowNumber: 1,
+        cells: [],
+        values: ['Date', 'Description', 'Amount'],
+        hidden: false,
+        hasFormula: false,
+        hasStyle: false,
+        merged: false,
+      }],
+      headers: ['Date', 'Description', 'Amount'],
+      inferredHeaderRow: 1,
+      isEmpty: false,
+      structural: {
+        populatedArea: { startRow: 1, endRow: 1, startColumn: 1, endColumn: 3 },
+        nonEmptyCellCount: 3,
+        formulaCount: 0,
+        mergedCellCount: 0,
+        mergedRangeCount: 0,
+        styledCellCount: 0,
+        hiddenRowCount: 0,
+      },
+    }],
+  };
+}
+
+export function buildSpreadsheetProviderCompatibilityPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'workbook_overview',
+    continuationToken: SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+    overview: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      fileType: 'csv',
+      sheets: [{
+        sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+        index: 0,
+        displayName: '[sheet:synthetic]',
+        dimensions: { rows: 1, columns: 3 },
+        parserRange: { startRow: 1, endRow: 1, startColumn: 1, endColumn: 3 },
+        populatedArea: { startRow: 1, endRow: 1, startColumn: 1, endColumn: 3 },
+        structuralSignals: {
+          nonEmptyCellCount: 3,
+          formulaCount: 0,
+          mergedCellCount: 0,
+          mergedRangeCount: 0,
+          styledCellCount: 0,
+          hiddenRowCount: 0,
+        },
+        availableColumnIds: ['col_A', 'col_B', 'col_C'],
+        overviewRows: [{ rowNumber: 1, values: ['[header:date]', '[header:description]', '[header:amount]'] }],
+      }],
+    },
+    responseContract: spreadsheetAIResponseContract,
+    instruction: 'This is a provider compatibility probe. Return only an abstain response using the supplied synthetic sheet and continuation token. Use no workbook facts, and do not write records or request real workbook context.',
+  };
+}
+
+/**
  * Provider response-format schema. Every nested object is closed so providers
  * supporting strict JSON Schema can reject surplus or partial structure before
  * it reaches us. Zod below remains the authoritative semantic validator.

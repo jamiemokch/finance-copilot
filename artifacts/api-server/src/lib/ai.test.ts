@@ -7,6 +7,7 @@ import {
   analyseSpreadsheetWithAI,
   detectColumnSchema,
   providerCallWithTimeout,
+  runSpreadsheetProviderCompatibilityCheck,
   SPREADSHEET_PROVIDER_DATED_MODEL,
   SPREADSHEET_PROVIDER_MODEL,
   type SpreadsheetSemanticSession,
@@ -17,6 +18,11 @@ import {
   SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
   validateSpreadsheetImportPlan,
   type SpreadsheetImportPlan,
+} from './spreadsheet-semantic-contract.js';
+import {
+  buildSpreadsheetProviderCompatibilityPayload,
+  SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+  SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
 } from './spreadsheet-semantic-contract.js';
 
 function failingClient(responses: Array<() => Promise<never>>): OpenAI {
@@ -162,6 +168,253 @@ test('JSON-object fallback is reserved for an explicit strict-format rejection a
     [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema'],
     [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_object'],
   ]);
+});
+
+test('the manual compatibility probe sends only a synthetic semantic payload and validates the response contract', async () => {
+  let request: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: Record<string, unknown>) => {
+      request = input;
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+              stage: 'abstain',
+              request: null,
+              plan: {
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                status: 'incomplete',
+                continuationToken: SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+                sheets: [{
+                  sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+                  disposition: 'not_analysed',
+                  decisionSource: 'manual_recovery',
+                  validationReason: 'Synthetic compatibility probe.',
+                  purpose: 'Synthetic probe',
+                  headerRow: null,
+                  dataRange: null,
+                  rowRules: { include: [], exclude: [] },
+                  fields: {
+                    date: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                    description: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                    signedAmount: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                    debit: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                    credit: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                    category: { columnId: null, confidence: 0, rationale: 'Not applicable.' },
+                  },
+                  transactionSemantics: { direction: 'unknown', rationale: 'Not applicable.' },
+                  duplicateOrOverlap: [],
+                  unresolvedQuestionIds: [],
+                }],
+                unresolvedQuestions: [],
+                abstention: { reason: 'insufficient_evidence', detail: 'Synthetic compatibility probe.', manualRecoveryRequired: true },
+                summary: 'Synthetic compatibility probe.',
+              },
+            }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await runSpreadsheetProviderCompatibilityCheck({
+    client,
+    environment: 'test',
+    managedRouteConfigured: true,
+    retryDelayMs: 0,
+  });
+  assert.equal(result.status, 'compatible');
+  assert.deepEqual(result.checks, {
+    strictSchemaAlias: 'accepted',
+    datedModelResolution: 'not_needed',
+    explicitFormatFallback: 'not_used',
+    responseContract: 'valid',
+  });
+  const payload = JSON.parse(String((request?.messages as Array<{ content: string }>).at(-1)?.content)) as Record<string, unknown>;
+  assert.equal(payload.stage, 'workbook_overview');
+  assert.equal(payload.continuationToken, SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN);
+  assert.deepEqual(payload.overview, buildSpreadsheetProviderCompatibilityPayload().overview);
+  assert.doesNotMatch(JSON.stringify(payload.overview), /Jane|email|private/i);
+  assert.equal(result.payload.containsWorkbookData, false);
+  assert.equal(result.payload.createsRecords, false);
+});
+
+test('the manual compatibility probe reports dated resolution and the permitted fallback separately', async () => {
+  const requests: Array<{ model?: string; mode?: string }> = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string } }) => {
+      calls += 1;
+      requests.push({ model: input.model, mode: input.response_format?.type });
+      if (calls < 3) {
+        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
+        error.status = 400;
+        throw error;
+      }
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+              stage: 'request_context',
+              request: {
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                continuationToken: SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+                allowedSheetIds: [SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID],
+                requests: [{
+                  sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+                  startRow: 1,
+                  endRow: 1,
+                  startColumn: 1,
+                  endColumn: 1,
+                  chunk: 0,
+                  reason: 'Synthetic compatibility probe.',
+                }],
+              },
+              plan: null,
+            }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await runSpreadsheetProviderCompatibilityCheck({
+    client,
+    environment: 'test',
+    managedRouteConfigured: true,
+    retryDelayMs: 0,
+  });
+  assert.equal(result.status, 'compatible_with_json_object_fallback');
+  assert.deepEqual(result.checks, {
+    strictSchemaAlias: 'rejected',
+    datedModelResolution: 'rejected',
+    explicitFormatFallback: 'used_after_strict_compatibility_rejections',
+    responseContract: 'valid',
+  });
+  assert.deepEqual(requests, [
+    { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
+    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_schema' },
+    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
+  ]);
+});
+
+test('a malformed probe response is a contract failure, not a route compatibility failure', async () => {
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: '{"unexpected":true}' } }] }) } },
+  } as unknown as OpenAI;
+  const result = await runSpreadsheetProviderCompatibilityCheck({
+    client,
+    environment: 'test',
+    managedRouteConfigured: true,
+    retryDelayMs: 0,
+  });
+  assert.equal(result.status, 'contract_invalid');
+  assert.equal(result.checks.responseContract, 'invalid');
+  assert.equal(result.checks.explicitFormatFallback, 'not_used');
+  assert.equal(result.attempts[0]?.outcomeCategory, 'contract_invalid');
+});
+
+test('schema-valid probe responses with unknown sheets or out-of-range context are contract failures', async () => {
+  const invalidRequests = [
+    {
+      allowedSheetIds: ['sheet_unknown'],
+      requests: [{
+        sheetId: 'sheet_unknown',
+        startRow: 1,
+        endRow: 1,
+        startColumn: 1,
+        endColumn: 1,
+        chunk: 0,
+        reason: 'Synthetic compatibility probe.',
+      }],
+    },
+    {
+      allowedSheetIds: [SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID],
+      requests: [{
+        sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
+        startRow: 1,
+        endRow: 2,
+        startColumn: 1,
+        endColumn: 1,
+        chunk: 0,
+        reason: 'Synthetic compatibility probe.',
+      }],
+    },
+  ];
+  for (const request of invalidRequests) {
+    const client = {
+      chat: { completions: { create: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+              stage: 'request_context',
+              request: {
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                continuationToken: SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
+                ...request,
+              },
+              plan: null,
+            }),
+          },
+        }],
+      }) } },
+    } as unknown as OpenAI;
+    const result = await runSpreadsheetProviderCompatibilityCheck({
+      client,
+      environment: 'test',
+      managedRouteConfigured: true,
+      retryDelayMs: 0,
+    });
+    assert.equal(result.status, 'contract_invalid');
+    assert.equal(result.checks.responseContract, 'invalid');
+    assert.equal(result.attempts[0]?.outcomeCategory, 'contract_invalid');
+  }
+});
+
+test('the manual compatibility probe refuses production and unknown environments without making a provider request', async () => {
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: '{}' } }] };
+    } } },
+  } as unknown as OpenAI;
+  for (const environment of ['production', 'preview', '']) {
+    const result = await runSpreadsheetProviderCompatibilityCheck({
+      client,
+      environment,
+      managedRouteConfigured: true,
+    });
+    assert.equal(result.status, 'blocked_non_production_environment');
+  }
+  assert.equal(calls, 0);
+});
+
+test('the manual compatibility probe refuses an unset environment without making a provider request', async () => {
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: '{}' } }] };
+    } } },
+  } as unknown as OpenAI;
+  const originalEnvironment = process.env.NODE_ENV;
+  delete process.env.NODE_ENV;
+  try {
+    const result = await runSpreadsheetProviderCompatibilityCheck({
+      client,
+      managedRouteConfigured: true,
+    });
+    assert.equal(result.status, 'blocked_non_production_environment');
+    assert.deepEqual(result.attempts, []);
+  } finally {
+    if (originalEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalEnvironment;
+  }
+  assert.equal(calls, 0);
 });
 
 test('AI fallback telemetry reports both retry and timeout attempts', async () => {
