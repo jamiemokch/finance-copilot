@@ -422,8 +422,11 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     const nextSelected = overrides.selectedSheetIds ?? selectedSheetIds;
     const nextScope = overrides.filingScope ?? filingScope;
     const shouldExcludeUnresolved = overrides.acknowledgeUnresolved ?? acknowledgeUnresolved;
+    const selectedMappings = Object.fromEntries(nextSelected
+      .filter((sheetId) => Boolean(nextMappings[sheetId]))
+      .map((sheetId) => [sheetId, nextMappings[sheetId]!]));
     await evidenceApi.saveSpreadsheetReview(profileId, evidenceId, {
-      selectedSheetIds: nextSelected, sheetMappings: nextMappings, sheetRoleOverrides: overrides.sheetRoleOverrides ?? sheetRoleOverrides, filingScope: nextScope,
+      selectedSheetIds: nextSelected, sheetMappings: selectedMappings, sheetRoleOverrides: overrides.sheetRoleOverrides ?? sheetRoleOverrides, filingScope: nextScope,
       sheetResolutions: overrides.sheetResolutions ?? sheetResolutions,
       excludedRowRefs: shouldExcludeUnresolved ? unresolvedRows : [],
       preTradingStartMode: overrides.preTradingStartMode ?? preTradingStartMode,
@@ -530,8 +533,11 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     setStage('confirming'); setError(''); setImportError(null);
     try {
       await persistReviewDecision();
+      const selectedMappings = Object.fromEntries(selectedSheetIds
+        .filter((sheetId) => Boolean(sheetMappings[sheetId]))
+        .map((sheetId) => [sheetId, sheetMappings[sheetId]!]));
       const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
-        confirmation: true, selectedSheetIds, sheetMappings, sheetRoleOverrides, sheetResolutions, filingScope,
+        confirmation: true, selectedSheetIds, sheetMappings: selectedMappings, sheetRoleOverrides, sheetResolutions, filingScope,
         excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
         preTradingStartMode, outsideScopeMode,
       });
@@ -644,8 +650,13 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
         </div>}
       </div>}
       {saveFailure && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 space-y-2"><p><strong>Your last choice was not saved.</strong> {saveFailure} Try again before leaving this review.</p><SpreadsheetServerIssues issues={reviewSaveIssues} onShowSheet={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }} /></div>}
-      <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' || aiStatus?.status === 'partial' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
-        <strong>{aiStatus?.status === 'success' ? 'Suggestions are ready to check.' : 'We used safe local checks instead.'}</strong> Nothing has been added to your records.
+      <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
+        <strong>{aiStatus?.status === 'success'
+          ? 'We understood the workbook and prepared a review summary.'
+          : 'Automatic understanding is incomplete.'}</strong>{' '}
+        {aiStatus?.status === 'success'
+          ? 'Check the summary below before you confirm.'
+          : 'Nothing can be imported automatically. If you want to continue, choose one specific sheet in Advanced audit details and tell us its date, money, and description columns.'}
       </div>
        <GuidedSpreadsheetReview
          sheets={analysis.sheets}

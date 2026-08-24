@@ -41,6 +41,21 @@ test('opening Advanced audit details mounts the auditable worksheet inventory', 
   assert.match(html, /Suggestion detail: AI analysis timed out/);
 });
 
+test('reference and reporting tabs never require transaction mappings to save the selected ledger', () => {
+  const selectedLedger = {
+    sheetId: 'ledger', displayName: '生意記錄', selected: true, role: 'transactional' as const, reviewRequired: false,
+    dimensions: { rows: 3, columns: 3 }, mapping: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } }, previewRows: [], rows: [],
+  };
+  const excludedReferenceTabs = ['Master data', 'Query', 'FS '].map((displayName, index) => ({
+    sheetId: `reference_${index}`, displayName, selected: false, role: 'non_transactional' as const, reviewRequired: false,
+    dimensions: { rows: 2, columns: 2 }, mapping: { headerRow: 0, columns: {} }, previewRows: [], rows: [],
+  }));
+  assert.deepEqual(unresolvedReviewSheets([selectedLedger, ...excludedReferenceTabs], {}), []);
+  assert.deepEqual(confirmationBlockersForReview({
+    unresolvedSheetNames: [], selectedSheetCount: 1, taxYearCount: 1, incompleteRowCount: 0, incompleteRowsAcknowledged: false,
+  }), []);
+});
+
 const yatsonReviewSheets = [
   {
     sheetId: 'sheet_staff', displayName: 'Staff cost v2', selected: false, role: 'transactional' as const, reviewRequired: true,

@@ -19,8 +19,9 @@ import {
   analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
   type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
+import { spreadsheetImportPlanSchema } from "../lib/spreadsheet-semantic-contract.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { analyseSpreadsheet, inspectSpreadsheet, parseSpreadsheet, normaliseCell, mapSpreadsheetRow, ukTaxYear, looksLikeBalanceRow, type RowDisposition } from "../lib/spreadsheet.js";
+import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet, parseSpreadsheet, normaliseCell, mapSpreadsheetRow, ukTaxYear, looksLikeBalanceRow, type RowDisposition } from "../lib/spreadsheet.js";
 
 const router = Router();
 const storageService = new ObjectStorageService();
@@ -60,13 +61,7 @@ const mappingSchemaInput = z.object({
   currency: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
   notes: z.array(z.string()).optional(),
-}).strict().superRefine((mapping, context) => {
-  if (mapping.columns.date === undefined) context.addIssue({ code: "custom", message: "A date column is required" });
-  if (mapping.columns.description === undefined) context.addIssue({ code: "custom", message: "A description column is required" });
-  if (mapping.columns.amount === undefined && mapping.columns.debit === undefined && mapping.columns.credit === undefined) {
-    context.addIssue({ code: "custom", message: "An amount, debit, or credit column is required" });
-  }
-});
+}).strict();
 
 const confirmedSpreadsheetInput = z.object({
   confirmation: z.literal(true),
@@ -127,6 +122,16 @@ function inputReviewIssues(issues: Array<{ path: PropertyKey[]; message: string 
     }
   }
   return [...result.values()];
+}
+
+function requiredMappingIssues(mapping: z.infer<typeof mappingSchemaInput>, sheetId: string, worksheet?: string): SpreadsheetReviewIssue[] {
+  const result: SpreadsheetReviewIssue[] = [];
+  if (mapping.columns.date === undefined) result.push({ sheetId, worksheet, field: "date", message: "Tell us which column is the date for this sheet." });
+  if (mapping.columns.description === undefined && mapping.columns.category === undefined) result.push({ sheetId, worksheet, field: "description", message: "Tell us which column says what each entry is for." });
+  if (mapping.columns.amount === undefined && mapping.columns.debit === undefined && mapping.columns.credit === undefined) {
+    result.push({ sheetId, worksheet, field: "amount", message: "Tell us which column contains the money amount for this sheet." });
+  }
+  return result;
 }
 
 function spreadsheetSourceRowIndex(sheetIndex: number, rowNumber: number) {
@@ -783,6 +788,11 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         });
         return;
       }
+        const missing = requiredMappingIssues(mapping, sheetId);
+        if (missing.length) {
+          res.status(400).json({ error: "We need one more choice before saving.", issues: missing });
+          return;
+        }
       const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
       if (mapping.headerRow >= sheet.rowCount || indices.some((index) => index >= sheet.columnCount)) {
         res.status(400).json({
@@ -792,11 +802,22 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         return;
       }
     }
+    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const savedPlan = spreadsheetImportPlanSchema.safeParse(state.aiProposal);
+    const semanticRoleOverrides: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown"> = Object.fromEntries((savedPlan.success ? savedPlan.data.sheets : []).map((sheet) => [
+      sheet.sheetId,
+      sheet.disposition === "transactional" ? "transactional"
+        : sheet.disposition === "unresolved" || sheet.disposition === "not_analysed" ? "unknown" : "non_transactional",
+    ]));
+    const semanticDispositions = Object.fromEntries((savedPlan.success ? savedPlan.data.sheets : []).map((sheet) => [sheet.sheetId, sheet.disposition]));
     const effectiveAnalysis = analyseSpreadsheet(workbook, {
       selectedSheetIds: body.data.selectedSheetIds,
-      roleOverrides: body.data.sheetRoleOverrides,
+      roleOverrides: { ...semanticRoleOverrides, ...body.data.sheetRoleOverrides },
       sheetMappings: body.data.sheetMappings,
       tradingStartDate: profile.businessStartDate ?? null,
+      decisionSource: "user",
+      finalDispositions: semanticDispositions,
+      semanticMode: "structural",
     });
     const effectiveInvalidRows = new Set(
       effectiveAnalysis.sheets
@@ -810,7 +831,6 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
       filingScope: body.data.filingScope.length ? body.data.filingScope : effectiveAnalysis.taxYears,
       excludedRowRefs: body.data.excludedRowRefs.filter((row) => effectiveInvalidRows.has(`${row.sheetId}:${row.rowNumber}`)),
     };
-    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
     const revision = createHash("sha256").update(JSON.stringify({
       ...effectiveDraft, businessStartDate: profile.businessStartDate ?? null,
     })).digest("hex");
@@ -904,21 +924,39 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     const savedDraft = savedState?.reviewDraft as {
       selectedSheetIds?: string[];
       sheetRoleOverrides?: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown">;
+      sheetMappings?: Record<string, MappingSchema>;
     } | null | undefined;
-    const analysis = analyseSpreadsheet(workbook, {
-      selectedSheetIds: savedDraft?.selectedSheetIds,
-      roleOverrides: savedDraft?.sheetRoleOverrides,
-    });
+    // No local heuristic is allowed to select a sheet or establish its role in
+    // the normal path. This is a complete, all-sheet structural audit only.
+    const structuralAnalysis = analyseSpreadsheetStructure(workbook);
     if (workbook.totalParserRows === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
-    const ai = await analyseSpreadsheetWithAI(workbook, analysis);
-    const primarySheet = analysis.sheets.find((sheet) => sheet.role === "transactional") ?? analysis.sheets[0];
+    const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis);
+    // A saved explicit user choice is durable recovery input. It must win over
+    // a later provider outage, but we never manufacture a replacement choice
+    // from worksheet-name/header heuristics.
+    const savedRoleOverrides: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown"> = Object.fromEntries(
+      (savedDraft?.selectedSheetIds ?? []).map((sheetId) => [sheetId, "transactional"]),
+    );
+    const analysis = savedDraft?.selectedSheetIds?.length
+      ? analyseSpreadsheet(workbook, {
+        selectedSheetIds: savedDraft.selectedSheetIds,
+        roleOverrides: { ...savedRoleOverrides, ...(savedDraft.sheetRoleOverrides ?? {}) },
+        sheetMappings: savedDraft.sheetMappings,
+        tradingStartDate: profile.businessStartDate ?? null,
+        decisionSource: "user",
+        semanticMode: "structural",
+      })
+      : (ai.analysis ?? structuralAnalysis);
+    const primarySheet = analysis.sheets.find((sheet) => sheet.selected) ?? analysis.sheets[0];
     const mappingSchema: MappingSchema = primarySheet ? {
       headerRow: primarySheet.mapping.headerRow ?? 0,
       columns: primarySheet.mapping.columns,
       dateFormat: null,
       currency: "GBP",
       confidence: 0.35,
-      notes: ["Rule-based mapping; confirm the selected sheet and columns before import."],
+      notes: ai.status === "success"
+        ? ["AI semantic plan; confirm the selected sheet and columns before import."]
+        : ["Automatic understanding is incomplete. Choose a specific sheet and its columns before import."],
     } : {
       headerRow: 0, columns: {}, dateFormat: null, currency: "GBP", confidence: 0, notes: ["No transaction sheet was inferred."],
     };
@@ -927,8 +965,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       schemaVersion: "spreadsheet-review.v1",
       mappingSchema,
       deterministicFindings: analysis,
-      aiProposal: ai.proposal,
-      aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits },
+      semanticWorkbookOverview: ai.semanticOverview ?? null,
+      aiProposal: ai.semanticPlan ?? null,
+      aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits, continuationToken: ai.continuationToken ?? null },
       userDecision: savedState?.userDecision ?? null,
       reviewDraft: savedState?.reviewDraft ?? null,
       reviewRevisionHistory: savedState?.reviewRevisionHistory ?? [],
@@ -957,7 +996,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       totalParserRows: workbook.totalParserRows, aiStatus: ai.status, fallbackReason: ai.reason ?? null,
     });
     res.json({
-      mappingSchema, previewRows, analysis, aiProposal: ai.proposal,
+      mappingSchema, previewRows, analysis, semanticWorkbookOverview: state.semanticWorkbookOverview, aiProposal: ai.semanticPlan,
       aiStatus: state.aiStatus, userDecision: state.userDecision, reviewDraft: state.reviewDraft,
       reviewRevisionHistory: state.reviewRevisionHistory, lastImportError: state.lastImportError,
     });
@@ -997,6 +1036,12 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     const [buffer] = await file.download();
     const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
     const selected = new Set(body.data.selectedSheetIds);
+    const importState = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const persistedPlan = spreadsheetImportPlanSchema.safeParse(importState.aiProposal);
+    const semanticPlan = persistedPlan.success && persistedPlan.data.status === "complete"
+      ? persistedPlan.data
+      : null;
+    const semanticRules = new Map(semanticPlan?.sheets.map((sheet) => [sheet.sheetId, sheet.rowRules]) ?? []);
     const knownSheetIds = new Set(workbook.sheets.map((sheet) => sheet.sheetId));
     if ([...selected].some((sheetId) => !knownSheetIds.has(sheetId))) {
       res.status(400).json({
@@ -1032,12 +1077,12 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       .filter((transaction) => transaction.evidenceId !== confirmedEvidence.id)
       .map((transaction) => spreadsheetMovementFingerprint(transaction.date, transaction.amount, transaction.description)));
     const businessStartDate = profile.businessStartDate ?? null;
-    const scopedAnalysis = analyseSpreadsheet(workbook, {
-      selectedSheetIds: body.data.selectedSheetIds,
-      tradingStartDate: businessStartDate,
-      roleOverrides: body.data.sheetRoleOverrides,
-    });
-    const sheetRoles = new Map(scopedAnalysis.sheets.map((sheet) => [sheet.sheetId, sheet.role]));
+    // Selection is an AI-plan or explicit user/manual-recovery decision. Do
+    // not re-classify it through local worksheet-name or header heuristics.
+    const sheetRoles = new Map(workbook.sheets.map((sheet) => [
+      sheet.sheetId,
+      body.data.sheetRoleOverrides[sheet.sheetId] ?? (selected.has(sheet.sheetId) ? "transactional" : "non_transactional"),
+    ]));
     const unresolvedRows: Array<{ sheetId: string; worksheet: string; rowNumber: number }> = [];
 
     for (const sheet of workbook.sheets) {
@@ -1075,6 +1120,11 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         });
         return;
       }
+      const missing = requiredMappingIssues(mapping, sheet.sheetId);
+      if (missing.length) {
+        res.status(400).json({ error: "We still need to know how to read one sheet.", issues: missing });
+        return;
+      }
       mappingsForAudit[sheet.sheetId] = mapping;
       const maxColumn = sheet.columnCount;
       const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
@@ -1110,10 +1160,23 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         if (excluded.has(rowKey)) {
           saveOutcome("excluded_by_user", "Explicitly excluded by the reviewer.", { date: null, amount: null, description: null }, { secondaryFindings: ["explicit_user_exclusion"], decisionSource: "user_exclusion" }); continue;
         }
+        const planRules = semanticRules.get(sheet.sheetId);
+        if (planRules) {
+          const explicitlyExcluded = planRules.exclude.some((rule) => source.rowNumber >= rule.startRow && source.rowNumber <= rule.endRow);
+          const included = planRules.include.some((rule) => source.rowNumber >= rule.startRow && source.rowNumber <= rule.endRow);
+          if (explicitlyExcluded || !included) {
+            saveOutcome("excluded_by_rule", "Excluded by the validated AI semantic plan.", { date: null, amount: null, description: null }, { secondaryFindings: ["semantic_plan_exclusion"], decisionSource: "ai_semantic_plan" });
+            continue;
+          }
+        }
         const mapped = mapSpreadsheetRow(source.values, mapping);
         const normalized = { date: mapped.date, amount: mapped.amount, description: mapped.description };
         if (looksLikeBalanceRow(source.values)) {
-          saveOutcome("balance_total", "Balance, subtotal, opening, closing, or total row is not a transaction.", normalized, { secondaryFindings: ["balance_total"] }); continue;
+          saveOutcome("balance_total", "A balance, subtotal, opening, closing, or total row cannot be imported as a transaction.", normalized, {
+            secondaryFindings: ["balance_total"],
+            decisionSource: semanticPlan ? "deterministic_safety" : "manual_recovery_safety",
+          });
+          continue;
         }
         if (!mapped.date || mapped.amount === null || !mapped.description) {
           saveOutcome("invalid", "Required date, amount, or description could not be normalized.", normalized, { secondaryFindings: ["unresolved_value"] });
@@ -1185,7 +1248,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode, outsideScopeMode: body.data.outsideScopeMode,
       businessStartDate,
     })).digest("hex");
-    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const state = importState;
     if (evidenceItem.importStatus === "done") {
       if (state.confirmedMappingRevision === mappingRevision) {
         res.json({ evidence: evidenceItem, dispositionCounts: state.finalDispositions ?? counts, taxYears: [...new Set(rowsToWrite.map((row) => row.taxYear))], importedRows: rowsToWrite.length });

@@ -127,7 +127,7 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 }).strict();
 
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
-export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed';
+export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */
 export const spreadsheetUnderstandingJsonSchema = {
@@ -142,6 +142,11 @@ export const spreadsheetUnderstandingJsonSchema = {
 export type SpreadsheetAIEnvelope = {
   status: SpreadsheetAIStatus;
   proposal: SpreadsheetUnderstandingProposal | null;
+  /** v2 semantic plan; proposal is retained only for legacy readers. */
+  semanticPlan?: unknown | null;
+  semanticOverview?: unknown;
+  analysis?: SpreadsheetAnalysis;
+  continuationToken?: string;
   reason?: string;
   sampledSheetIds: string[];
   providerCalls: number;

@@ -375,7 +375,8 @@ export type SpreadsheetReviewAnalysis = {
     confidence: number;
     reviewRequired: boolean;
     auditVisibility: 'default' | 'advanced';
-    decisionSource: 'deterministic' | 'ai' | 'user';
+    decisionSource: 'structural' | 'deterministic' | 'ai' | 'user' | 'manual_recovery';
+    finalDisposition?: 'transactional' | 'summary' | 'reference' | 'duplicate' | 'excluded' | 'unresolved' | 'not_analysed';
     mapping: { headerRow?: number; columns: Record<string, number | undefined> };
     previewRows: Array<{ rowNumber: number; values: string[] }>;
     warnings: string[];
@@ -388,7 +389,7 @@ export type SpreadsheetInspectionResponse = {
   previewRows: string[][];
   analysis?: SpreadsheetReviewAnalysis;
   aiProposal?: unknown;
-  aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[] };
+  aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[]; continuationToken?: string | null };
   userDecision?: unknown;
   reviewDraft?: {
     selectedSheetIds: string[];

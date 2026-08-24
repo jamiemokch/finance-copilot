@@ -31,7 +31,8 @@ export type RowDisposition =
 
 export type SheetDisposition =
   | 'processed' | 'unselected_sheet' | 'empty_sheet' | 'non_transactional'
-  | 'excluded_by_user' | 'excluded_by_rule' | 'blocked_invalid_mapping';
+  | 'excluded_by_user' | 'excluded_by_rule' | 'blocked_invalid_mapping'
+  | 'not_analysed';
 
 export type SpreadsheetCell = {
   columnId: string;
@@ -67,6 +68,15 @@ export type SpreadsheetSheet = {
   headers: string[];
   inferredHeaderRow: number | null;
   isEmpty: boolean;
+  structural: {
+    populatedArea: { startRow: number; endRow: number; startColumn: number; endColumn: number } | null;
+    nonEmptyCellCount: number;
+    formulaCount: number;
+    mergedCellCount: number;
+    mergedRangeCount: number;
+    styledCellCount: number;
+    hiddenRowCount: number;
+  };
 };
 
 export type SpreadsheetWorkbook = {
@@ -104,7 +114,8 @@ export type SpreadsheetSheetAnalysis = {
   confidence: number;
   reviewRequired: boolean;
   auditVisibility: 'default' | 'advanced';
-  decisionSource: 'deterministic';
+  decisionSource: 'structural' | 'deterministic' | 'ai' | 'user' | 'manual_recovery';
+  finalDisposition: 'transactional' | 'summary' | 'reference' | 'duplicate' | 'excluded' | 'unresolved' | 'not_analysed';
   mapping: SpreadsheetMapping;
   columnIds: string[];
   previewRows: SpreadsheetSourceRow[];
@@ -274,13 +285,29 @@ function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
         hasStyle: cells.some((cell) => cell.hasStyle), merged: cells.some((cell) => cell.merged),
       });
     }
-    const headers = rows.map((row) => row.values).find((row) => looksLikeHeader(row)) ?? [];
-    const inferredHeaderRow = rows.find((row) => looksLikeHeader(row.values))?.rowNumber ?? null;
+    const inferredHeader = inferHeaderRow(rows);
+    const headers = inferredHeader?.values ?? [];
+    const inferredHeaderRow = inferredHeader?.rowNumber ?? null;
+    const populatedRows = rows.filter((row) => row.values.some((value) => normaliseCell(value)));
     return {
       sheetId: `sheet_${index + 1}`, displayName, index,
       rowCount: parserRange ? parserRange.endRow - parserRange.startRow + 1 : 0,
       columnCount: parserRange ? parserRange.endColumn - parserRange.startColumn + 1 : 0,
       parserRange, rows, headers, inferredHeaderRow, isEmpty: rows.length === 0 || rows.every((row) => row.values.every((value) => !normaliseCell(value)) && !row.hasStyle && !row.hasFormula && !row.merged),
+      structural: {
+        populatedArea: populatedRows.length ? {
+          startRow: Math.min(...populatedRows.map((row) => row.rowNumber)),
+          endRow: Math.max(...populatedRows.map((row) => row.rowNumber)),
+          startColumn,
+          endColumn,
+        } : null,
+        nonEmptyCellCount: rows.reduce((sum, row) => sum + row.cells.filter((cell) => Boolean(normaliseCell(cell.value))).length, 0),
+        formulaCount: rows.reduce((sum, row) => sum + row.cells.filter((cell) => Boolean(cell.formula)).length, 0),
+        mergedCellCount: rows.reduce((sum, row) => sum + row.cells.filter((cell) => cell.merged).length, 0),
+        mergedRangeCount: merges.length,
+        styledCellCount: rows.reduce((sum, row) => sum + row.cells.filter((cell) => cell.hasStyle).length, 0),
+        hiddenRowCount: rows.filter((row) => row.hidden).length,
+      },
     };
   });
   return {
@@ -321,6 +348,15 @@ function inspectCsv(buffer: Buffer, filename: string): SpreadsheetWorkbook {
     rows: sourceRows, headers: sourceRows.map((row) => row.values).find((row) => looksLikeHeader(row)) ?? [],
     inferredHeaderRow: sourceRows.find((row) => looksLikeHeader(row.values))?.rowNumber ?? null,
     isEmpty: sourceRows.length === 0,
+    structural: {
+      populatedArea: sourceRows.length && width ? { startRow: 1, endRow: sourceRows.length, startColumn: 1, endColumn: width } : null,
+      nonEmptyCellCount: sourceRows.reduce((sum, row) => sum + row.cells.filter((cell) => Boolean(normaliseCell(cell.value))).length, 0),
+      formulaCount: 0,
+      mergedCellCount: 0,
+      mergedRangeCount: 0,
+      styledCellCount: 0,
+      hiddenRowCount: 0,
+    },
   };
   return {
     contentHash: createHash('sha256').update(buffer).digest('hex'),
@@ -462,20 +498,29 @@ export function analyseSpreadsheet(
     tradingStartDate?: string | null;
     roleOverrides?: Record<string, SpreadsheetSheetAnalysis['role']>;
     sheetMappings?: Record<string, SpreadsheetMapping>;
+    decisionSource?: SpreadsheetSheetAnalysis['decisionSource'];
+    finalDispositions?: Record<string, SpreadsheetSheetAnalysis['finalDisposition']>;
+    semanticMode?: 'deterministic' | 'structural';
   } = {},
 ): SpreadsheetAnalysis {
   const explicitlySelected = options.selectedSheetIds ? new Set(options.selectedSheetIds) : null;
   const roleOverrides = options.roleOverrides ?? {};
   const seenFingerprints = new Set<string>();
   const sheetAnalyses: SpreadsheetSheetAnalysis[] = workbook.sheets.map((sheet) => {
-    const mapping = options.sheetMappings?.[sheet.sheetId] ?? inferredMapping(sheet);
-    const classification = classifySheet(sheet, mapping);
+    // Structural mode is used before completed semantic interpretation and
+    // must never surface locally inferred columns as import-ready defaults.
+    const mapping = options.sheetMappings?.[sheet.sheetId]
+      ?? (options.semanticMode === 'structural' ? { columns: {} } : inferredMapping(sheet));
+    const classification = options.semanticMode === 'structural'
+      ? { role: 'unknown' as const, confidence: 0, reviewRequired: false, auditVisibility: 'advanced' as const }
+      : classifySheet(sheet, mapping);
     const isSelected = explicitlySelected ? explicitlySelected.has(sheet.sheetId) : classification.role === 'transactional' && !classification.reviewRequired;
     const hasRequired = mapping.columns.date !== undefined &&
       (mapping.columns.amount !== undefined || (mapping.columns.debit !== undefined && mapping.columns.credit !== undefined)) &&
       (mapping.columns.description !== undefined || mapping.columns.category !== undefined);
     const role = roleOverrides[sheet.sheetId] ?? classification.role;
-    const disposition: SheetDisposition = sheet.isEmpty ? 'empty_sheet' :
+    const disposition: SheetDisposition = options.semanticMode === 'structural' ? 'not_analysed' :
+      sheet.isEmpty ? 'empty_sheet' :
       !isSelected ? 'unselected_sheet' : role === 'non_transactional' ? 'non_transactional' :
         hasRequired ? 'processed' : 'blocked_invalid_mapping';
     const rows = sheet.rows.map((sourceRow) => {
@@ -503,7 +548,9 @@ export function analyseSpreadsheet(
       dimensions: { rows: sheet.rowCount, columns: sheet.columnCount }, parserRange: sheet.parserRange,
       disposition, selected: isSelected, role, confidence: classification.confidence,
       reviewRequired: classification.reviewRequired, auditVisibility: classification.auditVisibility,
-      decisionSource: 'deterministic',
+      decisionSource: options.decisionSource ?? 'deterministic',
+      finalDisposition: options.finalDispositions?.[sheet.sheetId]
+        ?? (options.semanticMode === 'structural' ? 'not_analysed' : role === 'transactional' ? 'transactional' : 'reference'),
       mapping, columnIds: Array.from({ length: sheet.columnCount }, (_, index) => cellId(index)),
       previewRows: sheet.rows.filter((row) => row.values.some((value) => normaliseCell(value))).slice(0, 8),
       rows, coverage: {
@@ -534,6 +581,20 @@ export function analyseSpreadsheet(
     dispositionCounts: counts,
     warnings: [...new Set(sheetAnalyses.flatMap((sheet) => sheet.warnings))],
   };
+}
+
+/**
+ * The normal ingestion path begins with this semantic-free audit. It records
+ * every parser-visible worksheet and its source rows, but makes no local claim
+ * about what a worksheet means or whether it can be imported.
+ */
+export function analyseSpreadsheetStructure(workbook: SpreadsheetWorkbook): SpreadsheetAnalysis {
+  return analyseSpreadsheet(workbook, {
+    semanticMode: 'structural',
+    decisionSource: 'structural',
+    selectedSheetIds: [],
+    roleOverrides: Object.fromEntries(workbook.sheets.map((sheet) => [sheet.sheetId, 'unknown'])),
+  });
 }
 
 export function normaliseCell(value: unknown): string {
@@ -595,6 +656,37 @@ export function normaliseImportedDate(value: string): string | null {
 export function looksLikeHeader(row: string[]): boolean {
   const text = row.join(' ').toLowerCase();
   return /(date|amount|description|reference|debit|credit|balance|category|memo)/.test(text);
+}
+
+function isDateOrNumberCell(value: string) {
+  const trimmed = value.trim();
+  return /^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(trimmed)
+    || /^[£$€]?\s*\(?-?\d[\d,]*(?:\.\d{1,4})?\)?(?:\s*(?:cr|dr))?$/i.test(trimmed);
+}
+
+/**
+ * Parser-level, language-agnostic header detection. It only recognises an
+ * all-text row before repeated dated/amount-like records; it never considers
+ * an ordinary record (which contains a date or number) to be a header.
+ */
+function inferHeaderRow(rows: SpreadsheetSourceRow[]): SpreadsheetSourceRow | undefined {
+  const named = rows.slice(0, 3).find((row) => {
+    const cells = row.values.filter((value) => normaliseCell(value));
+    return cells.length >= 3 && !cells.some(isDateOrNumberCell) && looksLikeHeader(cells);
+  });
+  if (named) return named;
+  for (let index = 0; index < Math.min(rows.length, 3); index += 1) {
+    const candidate = rows[index];
+    if (!candidate) continue;
+    const cells = candidate.values.filter((value) => normaliseCell(value));
+    if (cells.length < 3 || cells.some(isDateOrNumberCell)) continue;
+    const followups = rows.slice(index + 1, index + 4).filter((row) => {
+      const values = row.values.filter((value) => normaliseCell(value));
+      return values.length === cells.length && values.some(isDateOrNumberCell);
+    });
+    if (followups.length >= 1) return candidate;
+  }
+  return undefined;
 }
 
 export function looksLikeBalanceRow(row: string[]): boolean {

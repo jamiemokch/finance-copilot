@@ -11,31 +11,44 @@
 
 import OpenAI from 'openai';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { FinancialPosition } from './finance.js';
-import type { SpreadsheetAnalysis, SpreadsheetWorkbook } from './spreadsheet.js';
+import { analyseSpreadsheetStructure, type SpreadsheetAnalysis, type SpreadsheetWorkbook } from './spreadsheet.js';
 import {
-  aiSampleForWorkbook,
   SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
   spreadsheetUnderstandingProposalSchema,
-  type SpreadsheetAIEnvelope,
   type SpreadsheetUnderstandingProposal,
+  type SpreadsheetAIEnvelope,
 } from './spreadsheet-understanding.js';
+import {
+  analysisFromSemanticPlan,
+  buildRequestedSpreadsheetContext,
+  buildSpreadsheetWorkbookOverview,
+  incompletePlanForWorkbook,
+  SPREADSHEET_SEMANTIC_LIMITS,
+  SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+  spreadsheetAIResponseSchema,
+  spreadsheetAIResponseContract,
+  validateSpreadsheetImportPlan,
+  type SpreadsheetImportPlan,
+} from './spreadsheet-semantic-contract.js';
 
 const FINANCE_COPILOT_MODEL = 'gpt-5.4-mini';
 export const SPREADSHEET_AI_LIMITS = {
   maxLocalSheets: 100,
-  maxSheets: 20,
-  maxRowsPerSheet: 30,
-  maxCellsPerSheet: 600,
-  maxCellCharacters: 160,
-  maxRequestBytes: 65_536,
-  maxResponseBytes: 65_536,
-  maxOutputTokens: 4_000,
-  maxDepth: 8,
-  timeoutMs: 20_000,
-  retryDelayMs: 250,
-  maxProviderCalls: 2,
-  cacheTtlMs: 24 * 60 * 60 * 1000,
+  maxSheets: 100,
+  maxRowsPerSheet: SPREADSHEET_SEMANTIC_LIMITS.maxRowsPerRequestedRange,
+  maxCellsPerSheet: SPREADSHEET_SEMANTIC_LIMITS.maxCellsPerRequestedRange,
+  maxCellCharacters: SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters,
+  maxRequestBytes: SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes,
+  maxResponseBytes: SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes,
+  maxOutputTokens: SPREADSHEET_SEMANTIC_LIMITS.maxOutputTokens,
+  maxDepth: SPREADSHEET_SEMANTIC_LIMITS.maxHierarchyDepth,
+  timeoutMs: SPREADSHEET_SEMANTIC_LIMITS.timeoutMs,
+  retryDelayMs: SPREADSHEET_SEMANTIC_LIMITS.retryDelayMs,
+  maxProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage,
+  maxTotalProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls,
+  cacheTtlMs: SPREADSHEET_SEMANTIC_LIMITS.cacheTtlMs,
   largeWorkbookBytes: 25 * 1024 * 1024,
   largeWorkbookSheets: 50,
   largeWorkbookRows: 250_000,
@@ -44,6 +57,13 @@ export const SPREADSHEET_AI_LIMITS = {
 
 let _client: OpenAI | null = null;
 const spreadsheetAICache = new Map<string, { expiresAt: number; envelope: SpreadsheetAIEnvelope }>();
+const spreadsheetAIInFlight = new Map<string, Promise<SpreadsheetAIEnvelope>>();
+
+export function invalidateSpreadsheetAICache(contentHash?: string) {
+  for (const key of spreadsheetAICache.keys()) {
+    if (!contentHash || key.startsWith(`${contentHash}:`)) spreadsheetAICache.delete(key);
+  }
+}
 
 function getClient(): OpenAI {
   if (!_client) {
@@ -338,82 +358,155 @@ export async function providerCallWithTimeout(
 
 export async function analyseSpreadsheetWithAI(
   workbook: SpreadsheetWorkbook,
-  analysis: SpreadsheetAnalysis,
+  _legacyAnalysis: SpreadsheetAnalysis,
   testOptions?: {
     client?: OpenAI;
     timeoutMs?: number;
     retryDelayMs?: number;
   },
 ): Promise<SpreadsheetAIEnvelope> {
-  let providerCalls = 0;
+  const structuralAnalysis = analyseSpreadsheetStructure(workbook);
   const limits = {
     maxSheets: SPREADSHEET_AI_LIMITS.maxSheets, maxRowsPerSheet: SPREADSHEET_AI_LIMITS.maxRowsPerSheet,
     maxCellsPerSheet: SPREADSHEET_AI_LIMITS.maxCellsPerSheet, maxCellCharacters: SPREADSHEET_AI_LIMITS.maxCellCharacters,
     maxRequestBytes: SPREADSHEET_AI_LIMITS.maxRequestBytes, maxResponseBytes: SPREADSHEET_AI_LIMITS.maxResponseBytes,
     maxOutputTokens: SPREADSHEET_AI_LIMITS.maxOutputTokens, timeoutMs: SPREADSHEET_AI_LIMITS.timeoutMs,
   };
-  const candidates = analysis.sheets.filter((sheet) => sheet.selected && sheet.role !== 'non_transactional');
+  const initialToken = createHash('sha256')
+    .update(`${workbook.contentHash ?? 'no-hash'}:${SPREADSHEET_SEMANTIC_SCHEMA_VERSION}`).digest('hex').slice(0, 32);
+  const incomplete = (
+    status: 'failed' | 'incomplete' | 'abstained',
+    reason: string,
+    abstention: Parameters<typeof incompletePlanForWorkbook>[2],
+    providerCalls = 0,
+    continuationToken = initialToken,
+  ): SpreadsheetAIEnvelope => ({
+    status,
+    proposal: null,
+    semanticPlan: incompletePlanForWorkbook(workbook, continuationToken, abstention),
+    analysis: structuralAnalysis,
+    continuationToken,
+    reason,
+    sampledSheetIds: [],
+    providerCalls,
+    limits,
+  });
   const tooLarge = workbook.totalParserRows > SPREADSHEET_AI_LIMITS.largeWorkbookRows
     || workbook.totalParserCells > SPREADSHEET_AI_LIMITS.largeWorkbookCells
     || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets
     || workbook.sourceByteLength > SPREADSHEET_AI_LIMITS.largeWorkbookBytes;
-  if (!testOptions?.client && !isConfigured()) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'AI provider is unavailable.', sampledSheetIds: [], providerCalls: 0, limits };
-  if (tooLarge) return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'This workbook is large for AI; deterministic/manual mapping remains available.', sampledSheetIds: [], providerCalls: 0, limits };
-  const sample = aiSampleForWorkbook(workbook, analysis);
-  const sampledSheetIds = sample.map((sheet) => sheet.sheetId);
-  const cacheKey = `${workbook.contentHash ?? 'no-hash'}:${analysis.parserVersion}:${sampledSheetIds.join(',')}`;
+  if (!testOptions?.client && !isConfigured()) {
+    return incomplete('incomplete', 'AI analysis is unavailable. Choose a specific sheet to review manually before importing.', {
+      reason: 'provider_unavailable', detail: 'The semantic interpreter is unavailable.', manualRecoveryRequired: true,
+    });
+  }
+  if (tooLarge) {
+    return incomplete('incomplete', 'This workbook exceeds the safe AI review limit. Choose a specific sheet to review manually.', {
+      reason: 'operational_limit', detail: 'The workbook exceeds the bounded interpretation limit.', manualRecoveryRequired: true,
+    });
+  }
+  const overview = buildSpreadsheetWorkbookOverview(workbook);
+  const cacheKey = `${workbook.contentHash ?? 'no-hash'}:${SPREADSHEET_SEMANTIC_SCHEMA_VERSION}:${JSON.stringify(SPREADSHEET_SEMANTIC_LIMITS)}`;
   const cached = spreadsheetAICache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return { ...cached.envelope, providerCalls: 0 };
   }
   if (cached) spreadsheetAICache.delete(cacheKey);
-  const request = {
-    schemaVersion: SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
-    instruction: 'Propose mappings and review warnings only. Use exact stable identifiers from the sample. Do not make financial decisions or write records.',
-    sheets: sample,
-  };
-  if (safeJsonSize(request) > SPREADSHEET_AI_LIMITS.maxRequestBytes) {
-    return { status: 'fallback', proposal: proposalForDeterministicFallback(analysis), reason: 'The bounded AI sample exceeded the request limit.', sampledSheetIds, providerCalls: 0, limits };
-  }
-  try {
-    const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(request), {
-      timeoutMs: testOptions?.timeoutMs,
-      retryDelayMs: testOptions?.retryDelayMs,
-    });
-    providerCalls = result.providerCalls;
-    if (Buffer.byteLength(result.content) > SPREADSHEET_AI_LIMITS.maxResponseBytes) throw new Error('response_too_large');
-    const parsedJson = JSON.parse(result.content) as unknown;
-    const parsed = spreadsheetUnderstandingProposalSchema.safeParse(parsedJson);
-    if (!parsed.success) throw new Error('schema_invalid');
-     const referenceError = validateProposalReferences(parsed.data, analysis);
-    if (referenceError) throw new Error('reference_invalid');
-     const semanticError = validateProposalSemantics(parsed.data, analysis);
-     if (semanticError) throw new Error(semanticError);
-    if (parsed.data.analysisStatus === 'cannot_analyze' || parsed.data.overallConfidence < 60 ||
-      !parsed.data.sheets.some((sheet) => sheet.role === 'transactional' && sheet.fields.date.state === 'mapped')) {
-      return { status: 'fallback', proposal: parsed.data, reason: 'AI returned a low-confidence or incomplete mapping.', sampledSheetIds, providerCalls: result.providerCalls, limits };
-    }
-    const envelope: SpreadsheetAIEnvelope = {
-      status: parsed.data.analysisStatus === 'partial' ? 'partial' : 'success',
-      proposal: parsed.data, sampledSheetIds, providerCalls: result.providerCalls, limits,
+  const active = spreadsheetAIInFlight.get(cacheKey);
+  if (active) return active;
+  const run = (async (): Promise<SpreadsheetAIEnvelope> => {
+    let providerCalls = 0;
+    let token = initialToken;
+    let payload: unknown = {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      stage: 'workbook_overview',
+      continuationToken: token,
+      overview,
+        responseContract: spreadsheetAIResponseContract,
+      instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient.',
     };
-    spreadsheetAICache.set(cacheKey, {
-      expiresAt: Date.now() + SPREADSHEET_AI_LIMITS.cacheTtlMs,
-      envelope,
-    });
-    if (spreadsheetAICache.size > 100) {
-      const oldestKey = spreadsheetAICache.keys().next().value;
-      if (oldestKey) spreadsheetAICache.delete(oldestKey);
+    try {
+      for (let depth = 0; depth < SPREADSHEET_SEMANTIC_LIMITS.maxHierarchyDepth; depth += 1) {
+        if (safeJsonSize(payload) > SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes) {
+          return incomplete('incomplete', 'The requested review context exceeded the privacy-safe limit.', {
+            reason: 'operational_limit', detail: 'A bounded request exceeded the byte limit.', manualRecoveryRequired: true,
+          }, providerCalls, token);
+        }
+        if (providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) {
+          return incomplete('incomplete', 'The review reached its safe step limit before it could finish.', {
+            reason: 'operational_limit', detail: 'The hierarchy reached the maximum provider-call limit.', manualRecoveryRequired: true,
+          }, providerCalls, token);
+        }
+        const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(payload), {
+          timeoutMs: testOptions?.timeoutMs,
+          retryDelayMs: testOptions?.retryDelayMs,
+          maxProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage,
+        });
+        providerCalls += result.providerCalls;
+        if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) {
+          return incomplete('incomplete', 'The review reached its safe provider-call limit.', {
+            reason: 'operational_limit', detail: 'The provider-call budget was exhausted.', manualRecoveryRequired: true,
+          }, providerCalls, token);
+        }
+        if (Buffer.byteLength(result.content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) throw new Error('response_too_large');
+        const parsed = spreadsheetAIResponseSchema.safeParse(JSON.parse(result.content) as unknown);
+        if (!parsed.success) throw new Error('schema_invalid');
+        if (parsed.data.stage === 'request_context') {
+          if (parsed.data.request.continuationToken !== token) throw new Error('continuation_invalid');
+          const context = buildRequestedSpreadsheetContext(workbook, parsed.data.request);
+          token = createHash('sha256').update(`${token}:${JSON.stringify(context.ranges.map((range) => [range.sheetId, range.range, range.chunk]))}`).digest('hex').slice(0, 32);
+          payload = {
+            schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+            stage: 'requested_context',
+            continuationToken: token,
+            previousContinuationToken: parsed.data.request.continuationToken,
+            context,
+            responseContract: spreadsheetAIResponseContract,
+          };
+          continue;
+        }
+        const plan: SpreadsheetImportPlan = parsed.data.plan;
+        if (plan.continuationToken !== token) throw new Error('continuation_invalid');
+        const planError = validateSpreadsheetImportPlan(plan, workbook);
+        if (planError) throw new Error(planError);
+        if (plan.status !== 'complete' || parsed.data.stage === 'abstain') {
+          return {
+            status: 'abstained', proposal: null, semanticPlan: plan, semanticOverview: overview,
+            analysis: structuralAnalysis, continuationToken: token,
+            reason: plan.abstention?.detail ?? 'The review needs a targeted manual decision.',
+            sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, limits,
+          };
+        }
+        const envelope: SpreadsheetAIEnvelope = {
+          status: 'success', proposal: null, semanticPlan: plan, semanticOverview: overview,
+          analysis: analysisFromSemanticPlan(workbook, plan), continuationToken: token,
+          sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, limits,
+        };
+        spreadsheetAICache.set(cacheKey, { expiresAt: Date.now() + SPREADSHEET_SEMANTIC_LIMITS.cacheTtlMs, envelope });
+        if (spreadsheetAICache.size > SPREADSHEET_SEMANTIC_LIMITS.maxCacheEntries) spreadsheetAICache.delete(spreadsheetAICache.keys().next().value!);
+        return envelope;
+      }
+      return incomplete('incomplete', 'The review needs more steps than we allow for financial data.', {
+        reason: 'operational_limit', detail: 'The maximum hierarchy depth was reached.', manualRecoveryRequired: true,
+      }, providerCalls, token);
+    } catch (error) {
+      const calls = (error as { providerCalls?: number }).providerCalls ?? providerCalls;
+      const message = error instanceof Error ? error.message : 'provider_error';
+      const reason = message === 'timeout' ? 'AI analysis timed out.'
+        : message === 'schema_invalid' ? 'AI returned a malformed response.'
+          : message.includes('context_request') || message === 'response_too_large' ? 'AI requested context outside the safe limits.'
+            : 'AI analysis could not complete.';
+      const abstentionReason = message === 'timeout' ? 'provider_timeout'
+        : message === 'schema_invalid' || message === 'continuation_invalid' ? 'provider_schema_invalid'
+          : message.includes('limit') || message === 'response_too_large' ? 'operational_limit'
+            : 'provider_unavailable';
+      return incomplete('failed', reason, {
+        reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
+      }, calls, token);
     }
-    return envelope;
-  } catch (error) {
-    providerCalls = (error as { providerCalls?: number }).providerCalls ?? providerCalls;
-    const reason = error instanceof Error && error.message === 'timeout' ? 'AI analysis timed out.' :
-      error instanceof Error && error.message === 'schema_invalid' ? 'AI returned a malformed proposal.' :
-        error instanceof Error && error.message === 'reference_invalid' ? 'AI returned an invalid source reference.' :
-          'AI analysis failed; deterministic/manual mapping is available.';
-    return { status: 'failed', proposal: proposalForDeterministicFallback(analysis), reason, sampledSheetIds, providerCalls, limits };
-  }
+  })();
+  spreadsheetAIInFlight.set(cacheKey, run);
+  try { return await run; } finally { spreadsheetAIInFlight.delete(cacheKey); }
 }
 
 function buildExtractionPrompt(context: ExtractionContext): string {
