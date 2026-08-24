@@ -844,6 +844,64 @@ test('a five-call execution permits exactly one remaining provider request and n
   assert.equal(result.providerAttempts?.at(-1)?.attemptNumber, 6);
 });
 
+test('a retryable failure with one call remaining cannot overshoot the execution budget', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retryable boundary sale,13\n'), 'text/csv', 'retryable-boundary.csv');
+  const token = 'retryable-boundary-token';
+  const historicalAttempts: SpreadsheetProviderAttempt[] = Array.from({ length: 5 }, (_, index) => ({
+    telemetryVersion: 'spreadsheet-provider-attempt.v1',
+    attemptNumber: index + 1,
+    routeClass: 'replit_ai_integrations',
+    requestedModel: SPREADSHEET_PROVIDER_MODEL,
+    resolvedModel: SPREADSHEET_PROVIDER_MODEL,
+    model: SPREADSHEET_PROVIDER_MODEL,
+    responseMode: 'json_schema',
+    startedAt: '2026-08-24T12:48:28.303Z',
+    durationMs: 10,
+    outcomeCategory: 'success',
+    safeStatus: 'ok',
+    statusCode: null,
+    retryable: false,
+    failurePhase: null,
+  }));
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      const error = new Error('synthetic upstream failure') as Error & { status?: number };
+      error.status = 500;
+      throw error;
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    retryDelayMs: 0,
+    session: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      contentHash: workbook.contentHash ?? null,
+      stage: 'workbook_overview',
+      continuationToken: token,
+      payload: { continuationToken: token, stage: 'workbook_overview' },
+      contextHistory: [],
+      providerCalls: 5,
+      providerAttempts: historicalAttempts,
+      currentPlan: null,
+      executionId: '00000000-0000-4000-8000-000000000003',
+      executionNumber: 3,
+      attemptOffset: 0,
+    },
+  });
+
+  assert.equal(calls, 1, 'a retryable failure cannot issue a seventh provider request');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 6, 'the execution stops at its six-call budget');
+  assert.equal(result.providerAttempts?.length, 6);
+  assert.equal(result.providerAttempts?.at(-1)?.attemptNumber, 6);
+  assert.equal(result.providerAttempts?.at(-1)?.retryable, true);
+  assert.equal(result.providerAttempts?.at(-1)?.failurePhase, 'provider_request');
+  assert.equal(result.providerAttempts?.some((attempt) => attempt.failurePhase === 'repair_validation'), false, 'no repair call starts after the retryable boundary failure');
+});
+
 test('an explicit retry replaces inherited object mode with alias-only strict policy while preserving historical attempts', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry state sale,17\n'), 'text/csv', 'retry-state.csv');
   const token = 'retry-state-token';
