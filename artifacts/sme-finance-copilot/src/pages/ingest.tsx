@@ -340,7 +340,11 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const resumed = useRef(false);
 
   const applyInspection = (detected: Awaited<ReturnType<typeof evidenceApi.detectSchema>>) => {
-    const nextAnalysis = detected.analysis ?? null;
+    const automaticUnavailable = detected.aiStatus?.recoveryState === 'automatic_unavailable';
+    // An automatic retry result must replace—not sit behind—any older review.
+    // Structural findings are retained server-side for manual recovery, but are
+    // deliberately not mounted as worksheet questions until the user opts in.
+    const nextAnalysis = automaticUnavailable ? null : detected.analysis ?? null;
     setAnalysis(nextAnalysis);
     setAiStatus(detected.aiStatus ?? null);
     setImportError(detected.lastImportError ?? null);
@@ -364,13 +368,43 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     setReviewRevision(draft?.mappingRevision ?? '');
     setSemanticPlanIdentity(draft?.semanticPlanIdentity ?? '');
   };
+  const replaceWithAutomaticUnavailable = (
+    message: string,
+    failureCategory: NonNullable<NonNullable<Awaited<ReturnType<typeof evidenceApi.detectSchema>>['aiStatus']>['failureCategory']> = 'provider_unavailable',
+  ) => {
+    setAnalysis(null);
+    setAiStatus({
+      status: 'failed',
+      reason: message,
+      failureCategory,
+      recoveryState: 'automatic_unavailable',
+      providerCalls: 0,
+      providerAttempts: [],
+    });
+    setSheetMappings({});
+    setSelectedSheetIds([]);
+    setSheetRoleOverrides({});
+    setSheetResolutions({});
+    setActiveSheetId('');
+    setEditingSheetId('');
+    setCheckingSheetId('');
+    setImportError(null);
+    setReviewSaveIssues([]);
+  };
   const inspect = async (id: string) => {
     setStage('inspecting'); setError('');
     try {
       const detected = await evidenceApi.detectSchema(profileId, id);
       setEvidenceId(id); applyInspection(detected); setStage('review');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'We could not inspect this spreadsheet.'); setStage('error');
+      const message = err instanceof Error ? err.message : 'Automatic review could not start. No records were imported.';
+      if (id) {
+        setEvidenceId(id);
+        replaceWithAutomaticUnavailable(message);
+        setStage('review');
+      } else {
+        setError(message); setStage('error');
+      }
     }
   };
   useEffect(() => {
@@ -586,7 +620,9 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       applyInspection(detected);
       setStage('review');
     } catch (err) {
-      setSaveFailure(err instanceof Error ? err.message : 'Automatic review could not be retried. No records were added.');
+      replaceWithAutomaticUnavailable(
+        err instanceof Error ? err.message : 'Automatic review could not be retried. No records were imported.',
+      );
       setStage('review');
     }
   };
@@ -640,6 +676,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const automaticReviewReady = aiStatus?.recoveryState === 'automatic_ready' || aiStatus?.status === 'success';
   const manualRecoveryEnabled = aiStatus?.recoveryState === 'manual_recovery';
   const reviewEnabled = automaticReviewReady || manualRecoveryEnabled;
+  const unavailableReason = aiStatus?.failureCategory === 'model_unavailable'
+    ? 'The automatic review model is unavailable right now.'
+    : aiStatus?.failureCategory === 'provider_schema_invalid'
+      ? 'The automatic review service could not accept the protected review format.'
+      : aiStatus?.failureCategory === 'response_contract_invalid'
+        ? 'The automatic review response did not pass the protected spreadsheet checks.'
+        : aiStatus?.failureCategory === 'transport_failure'
+          ? 'The automatic review service could not be reached.'
+          : 'We could not automatically review this workbook.';
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
   const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
   const confirmationBlockers = confirmationBlockersForReview({
@@ -656,6 +701,14 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     <div><h2 className="text-xl font-serif">Review a spreadsheet or CSV</h2><p className="text-sm text-muted-foreground mt-1">We check every sheet first. Suggestions are only a guide; nothing reaches Financial Memory until you confirm what to bring in.</p></div>
     {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a CSV or Excel workbook</p><p className="text-xs text-muted-foreground">We will check every worksheet and show only the records that are likely to be money in or out.</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Upload a file" /></div>}
     {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…</div>}
+    {stage === 'review' && !analysis && !reviewEnabled && <div data-testid="spreadsheet-automatic-review-unavailable" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 space-y-3">
+      <div className="flex gap-2"><AlertCircle className="w-5 h-5 shrink-0 mt-0.5" /><div><p className="font-semibold">{unavailableReason}</p><p className="mt-1">Nothing was imported. Automatic review is unavailable for this workbook until a new attempt succeeds.</p></div></div>
+      <p className="text-xs">You can retry automatic review, or explicitly choose manual recovery to select sheets and columns yourself.</p>
+      <div className="flex flex-wrap gap-2">
+        <Button data-testid="retry-automatic-spreadsheet-review" size="sm" disabled={savingReview} onClick={() => void retryAutomaticReview()}>Retry automatic review</Button>
+        <Button data-testid="start-manual-spreadsheet-recovery" size="sm" variant="outline" disabled={savingReview} onClick={() => void startManualRecovery()}>Start manual recovery</Button>
+      </div>
+    </div>}
     {stage === 'review' && analysis && <div className="space-y-5">
        {importError && <div role="alert" className={cn(
         "rounded-xl border p-4 space-y-3 text-sm",
@@ -699,7 +752,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
            ? 'Check the summary below before you confirm.'
            : manualRecoveryEnabled
              ? 'Choose each sheet and its columns yourself. Nothing is added until the final confirmation.'
-             : 'No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.'}
+              : `${unavailableReason} No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.`}
          {!reviewEnabled && <div className="mt-3 flex flex-wrap gap-2">
            <Button data-testid="retry-automatic-spreadsheet-review" size="sm" disabled={savingReview} onClick={() => void retryAutomaticReview()}>Retry automatic review</Button>
            <Button data-testid="start-manual-spreadsheet-recovery" size="sm" variant="outline" disabled={savingReview} onClick={() => void startManualRecovery()}>Start manual recovery</Button>

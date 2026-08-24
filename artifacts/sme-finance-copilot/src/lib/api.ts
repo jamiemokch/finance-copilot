@@ -392,6 +392,7 @@ export type SpreadsheetInspectionResponse = {
   aiStatus?: {
     status: string;
     reason?: string | null;
+    failureCategory?: 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'response_contract_invalid' | 'provider_unavailable' | null;
     sampledSheetIds?: string[];
     continuationToken?: string | null;
     recoveryState?: 'automatic_ready' | 'automatic_unavailable' | 'manual_recovery';
@@ -400,6 +401,8 @@ export type SpreadsheetInspectionResponse = {
       telemetryVersion: 'spreadsheet-provider-attempt.v1';
       attemptNumber: number;
       routeClass: 'replit_ai_integrations' | 'direct_openai';
+      requestedModel: string;
+      resolvedModel: string;
       model: string;
       responseMode: 'json_schema' | 'json_object';
       startedAt: string;
@@ -408,7 +411,7 @@ export type SpreadsheetInspectionResponse = {
       safeStatus: string;
       statusCode: number | null;
       retryable: boolean;
-      failurePhase: 'provider_request' | null;
+      failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
     }>;
   };
   userDecision?: unknown;

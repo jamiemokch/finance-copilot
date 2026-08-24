@@ -15,9 +15,9 @@ export const SPREADSHEET_SEMANTIC_SCHEMA_VERSION = 'spreadsheet-semantic.v2' as 
 export const SPREADSHEET_SEMANTIC_LIMITS = {
   maxHierarchyDepth: 4,
   maxProviderCalls: 6,
-  // Alias resolution may require alias strict → dated strict → the narrowly
-  // permitted JSON-object compatibility fallback.
-  maxCallsPerStage: 3,
+  // Normal spreadsheet semantics use one verified strict-schema policy. A
+  // separate bounded repair may consume one additional provider call.
+  maxCallsPerStage: 2,
   maxOverviewRowsPerSheet: 8,
   maxOverviewCellsPerSheet: 96,
   maxRequestedRanges: 4,
@@ -203,6 +203,9 @@ export const spreadsheetAIResponseSchema = z.union([
 ]);
 
 export type SpreadsheetAIResponse = z.infer<typeof spreadsheetAIResponseSchema>;
+export const spreadsheetAIProviderWireResponseSchema = z.object({
+  response: spreadsheetAIResponseSchema,
+}).strict();
 
 /** Compact JSON-schema-like contract sent with every provider request. */
 export const spreadsheetAIResponseContract = {
@@ -319,21 +322,81 @@ export function buildSpreadsheetProviderCompatibilityPayload(): Record<string, u
  * it reaches us. Zod below remains the authoritative semantic validator.
  */
 export const spreadsheetAIResponseJsonSchema = {
+  // The managed route forbids anyOf/enum/const at the root. Keep the root as a
+  // plain closed envelope and place the exact semantic union below `response`.
   type: 'object',
   additionalProperties: false,
-  required: ['schemaVersion', 'stage', 'request', 'plan'],
+  required: ['response'],
   properties: {
-    schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
-    stage: { enum: ['request_context', 'final_plan', 'abstain'] },
-    request: { anyOf: [{ $ref: '#/$defs/request' }, { type: 'null' }] },
-    plan: { anyOf: [{ $ref: '#/$defs/plan' }, { type: 'null' }] },
+    response: { anyOf: [
+    {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'request_context' },
+        request: { $ref: '#/$defs/request' },
+        plan: { type: 'null' },
+      },
+    },
+    {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'final_plan' },
+        request: { type: 'null' },
+        plan: { $ref: '#/$defs/plan' },
+      },
+    },
+    {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'abstain' },
+        request: { type: 'null' },
+        plan: { $ref: '#/$defs/abstainPlan' },
+      },
+    },
+    ] },
   },
   $defs: {
+    requestContextResponse: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'request_context' },
+        request: { $ref: '#/$defs/request' },
+        plan: { type: 'null' },
+      },
+    },
+    finalPlanResponse: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'final_plan' },
+        request: { type: 'null' },
+        plan: { $ref: '#/$defs/plan' },
+      },
+    },
+    abstainResponse: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'stage', 'request', 'plan'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        stage: { type: 'string', const: 'abstain' },
+        request: { type: 'null' },
+        plan: { $ref: '#/$defs/abstainPlan' },
+      },
+    },
     request: {
       type: 'object', additionalProperties: false,
       required: ['schemaVersion', 'continuationToken', 'allowedSheetIds', 'requests'],
       properties: {
-        schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
         continuationToken: { type: 'string', minLength: 8, maxLength: 128 },
         allowedSheetIds: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' } },
         requests: { type: 'array', minItems: 1, maxItems: 4, items: { $ref: '#/$defs/requestItem' } },
@@ -356,12 +419,25 @@ export const spreadsheetAIResponseJsonSchema = {
       type: 'object', additionalProperties: false,
       required: ['schemaVersion', 'status', 'continuationToken', 'sheets', 'unresolvedQuestions', 'abstention', 'summary'],
       properties: {
-        schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
-        status: { enum: ['complete', 'incomplete'] },
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        status: { type: 'string', enum: ['complete', 'incomplete'] },
         continuationToken: { type: 'string', minLength: 8, maxLength: 128 },
         sheets: { type: 'array', minItems: 1, maxItems: 100, items: { $ref: '#/$defs/sheetPlan' } },
         unresolvedQuestions: { type: 'array', maxItems: 100, items: { $ref: '#/$defs/question' } },
         abstention: { anyOf: [{ $ref: '#/$defs/abstention' }, { type: 'null' }] },
+        summary: { type: 'string', minLength: 1, maxLength: 240 },
+      },
+    },
+    abstainPlan: {
+      type: 'object', additionalProperties: false,
+      required: ['schemaVersion', 'status', 'continuationToken', 'sheets', 'unresolvedQuestions', 'abstention', 'summary'],
+      properties: {
+        schemaVersion: { type: 'string', const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+        status: { type: 'string', const: 'incomplete' },
+        continuationToken: { type: 'string', minLength: 8, maxLength: 128 },
+        sheets: { type: 'array', minItems: 1, maxItems: 100, items: { $ref: '#/$defs/sheetPlan' } },
+        unresolvedQuestions: { type: 'array', maxItems: 100, items: { $ref: '#/$defs/question' } },
+        abstention: { $ref: '#/$defs/abstention' },
         summary: { type: 'string', minLength: 1, maxLength: 240 },
       },
     },
@@ -370,8 +446,8 @@ export const spreadsheetAIResponseJsonSchema = {
       required: ['sheetId', 'disposition', 'decisionSource', 'validationReason', 'purpose', 'headerRow', 'dataRange', 'rowRules', 'fields', 'transactionSemantics', 'duplicateOrOverlap', 'unresolvedQuestionIds'],
       properties: {
         sheetId: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' },
-        disposition: { enum: ['transactional', 'summary', 'reference', 'duplicate', 'excluded', 'unresolved', 'not_analysed'] },
-        decisionSource: { enum: ['ai', 'user', 'manual_recovery'] },
+        disposition: { type: 'string', enum: ['transactional', 'summary', 'reference', 'duplicate', 'excluded', 'unresolved', 'not_analysed'] },
+        decisionSource: { type: 'string', enum: ['ai', 'user', 'manual_recovery'] },
         validationReason: { type: 'string', minLength: 1, maxLength: 240 },
         purpose: { type: 'string', minLength: 1, maxLength: 240 },
         headerRow: { anyOf: [{ type: 'integer', minimum: 1, maximum: 1048576 }, { type: 'null' }] },
@@ -388,11 +464,11 @@ export const spreadsheetAIResponseJsonSchema = {
     rowRules: { type: 'object', additionalProperties: false, required: ['include', 'exclude'], properties: { include: { type: 'array', maxItems: 40, items: { $ref: '#/$defs/rule' } }, exclude: { type: 'array', maxItems: 80, items: { $ref: '#/$defs/rule' } } } },
     field: { type: 'object', additionalProperties: false, required: ['columnId', 'confidence', 'rationale'], properties: { columnId: { anyOf: [{ type: 'string', pattern: '^col_[A-Za-z]{1,4}$' }, { type: 'null' }] }, confidence: { type: 'integer', minimum: 0, maximum: 100 }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
     fields: { type: 'object', additionalProperties: false, required: ['date', 'description', 'signedAmount', 'debit', 'credit', 'category'], properties: { date: { $ref: '#/$defs/field' }, description: { $ref: '#/$defs/field' }, signedAmount: { $ref: '#/$defs/field' }, debit: { $ref: '#/$defs/field' }, credit: { $ref: '#/$defs/field' }, category: { $ref: '#/$defs/field' } } },
-    transactionSemantics: { type: 'object', additionalProperties: false, required: ['direction', 'rationale'], properties: { direction: { enum: ['income', 'expense', 'mixed', 'unknown'] }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
+    transactionSemantics: { type: 'object', additionalProperties: false, required: ['direction', 'rationale'], properties: { direction: { type: 'string', enum: ['income', 'expense', 'mixed', 'unknown'] }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
     overlap: { type: 'object', additionalProperties: false, required: ['otherSheetId', 'confidence', 'rationale'], properties: { otherSheetId: { type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' }, confidence: { type: 'integer', minimum: 0, maximum: 100 }, rationale: { type: 'string', minLength: 1, maxLength: 240 } } },
     question: { type: 'object', additionalProperties: false, required: ['id', 'sheetId', 'question', 'whyNeeded', 'choices', 'blocking'], properties: { id: { type: 'string', pattern: '^question_[A-Za-z0-9_-]{1,127}$' }, sheetId: { anyOf: [{ type: 'string', pattern: '^sheet_[A-Za-z0-9_-]{1,127}$' }, { type: 'null' }] }, question: { type: 'string', minLength: 1, maxLength: 240 }, whyNeeded: { type: 'string', minLength: 1, maxLength: 240 }, choices: { type: 'array', minItems: 1, maxItems: 5, items: { $ref: '#/$defs/choice' } }, blocking: { type: 'boolean' } } },
     choice: { type: 'object', additionalProperties: false, required: ['id', 'label'], properties: { id: { type: 'string', minLength: 1, maxLength: 80 }, label: { type: 'string', minLength: 1, maxLength: 240 } } },
-    abstention: { type: 'object', additionalProperties: false, required: ['reason', 'detail', 'manualRecoveryRequired'], properties: { reason: { enum: ['insufficient_evidence', 'unsupported_layout', 'ambiguous_candidates', 'provider_unavailable', 'provider_timeout', 'provider_rate_limited', 'provider_schema_invalid', 'operational_limit'] }, detail: { type: 'string', minLength: 1, maxLength: 240 }, manualRecoveryRequired: { const: true } } },
+    abstention: { type: 'object', additionalProperties: false, required: ['reason', 'detail', 'manualRecoveryRequired'], properties: { reason: { type: 'string', enum: ['insufficient_evidence', 'unsupported_layout', 'ambiguous_candidates', 'provider_unavailable', 'provider_timeout', 'provider_rate_limited', 'provider_schema_invalid', 'operational_limit'] }, detail: { type: 'string', minLength: 1, maxLength: 240 }, manualRecoveryRequired: { type: 'boolean', const: true } } },
   },
 } as const;
 

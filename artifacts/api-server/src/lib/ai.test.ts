@@ -7,8 +7,8 @@ import {
   analyseSpreadsheetWithAI,
   detectColumnSchema,
   providerCallWithTimeout,
+  resetManagedSpreadsheetProviderPolicyForTests,
   runSpreadsheetProviderCompatibilityCheck,
-  SPREADSHEET_PROVIDER_DATED_MODEL,
   SPREADSHEET_PROVIDER_MODEL,
   type SpreadsheetSemanticSession,
 } from './ai.js';
@@ -17,6 +17,9 @@ import {
   buildRequestedSpreadsheetContext,
   buildSpreadsheetWorkbookOverview,
   SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+  spreadsheetAIResponseJsonSchema,
+  spreadsheetAIResponseSchema,
+  spreadsheetAIProviderWireResponseSchema,
   validateSpreadsheetImportPlan,
   type SpreadsheetImportPlan,
 } from './spreadsheet-semantic-contract.js';
@@ -103,14 +106,14 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   await assert.rejects(
     () => providerCallWithTimeout(client, '{}', { timeoutMs: 5, retryDelayMs: 0, maxProviderCalls: 2 }),
     (error: unknown) => {
-      assert.equal((error as { message?: string }).message, 'timeout');
+      assert.equal((error as { message?: string }).message, 'transport_failure');
       assert.equal((error as { providerCalls?: number }).providerCalls, 2);
       return true;
     },
   );
 });
 
-test('a managed strict-schema alias rejection resolves to the dated strict-schema model', async () => {
+test('a managed strict-schema alias rejection is safe, typed, and never selects another model or object mode', async () => {
   const attemptedModes: string[] = [];
   const attemptedModels: string[] = [];
   const telemetry: Array<{ telemetryVersion: string; requestedModel: string; resolvedModel: string; responseMode: string; outcomeCategory: string; safeStatus: string }> = [];
@@ -129,31 +132,32 @@ test('a managed strict-schema alias rejection resolves to the dated strict-schem
     } } },
   } as unknown as OpenAI;
 
-  const result = await providerCallWithTimeout(client, '{}', {
+  await assert.rejects(() => providerCallWithTimeout(client, '{}', {
     retryDelayMs: 0,
     routeClass: 'replit_ai_integrations',
     onAttempt: async (attempt) => { telemetry.push(attempt); },
+  }), (error: unknown) => {
+    assert.equal((error as Error).message, 'provider_schema_invalid');
+    assert.equal((error as { providerCalls?: number }).providerCalls, 1);
+    return true;
   });
-
-  assert.equal(result.providerCalls, 2);
-  assert.deepEqual(attemptedModes, ['json_schema', 'json_schema']);
-  assert.deepEqual(attemptedModels, [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_DATED_MODEL]);
+  assert.deepEqual(attemptedModes, ['json_schema']);
+  assert.deepEqual(attemptedModels, [SPREADSHEET_PROVIDER_MODEL]);
   assert.deepEqual(telemetry.map((attempt) => [attempt.requestedModel, attempt.resolvedModel, attempt.responseMode, attempt.outcomeCategory, attempt.safeStatus]), [
-    [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_MODEL, 'json_schema', 'compatibility', 'compatibility'],
-    [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema', 'success', 'ok'],
+    [SPREADSHEET_PROVIDER_MODEL, SPREADSHEET_PROVIDER_MODEL, 'json_schema', 'provider_schema_invalid', 'provider_schema_invalid'],
   ]);
   assert.equal(telemetry.every((attempt) => attempt.telemetryVersion === 'spreadsheet-provider-attempt.v1'), true);
   assert.equal(telemetry.every((attempt) => !/unsupported|private-123|workbook value|messages|content/i.test(JSON.stringify(attempt))), true);
 });
 
-test('JSON-object fallback is reserved for an explicit strict-format rejection after dated-model resolution', async () => {
+test('JSON-object fallback is available only to an explicit non-managed compatibility caller', async () => {
   const attempted: Array<[string, string]> = [];
   let calls = 0;
   const client = {
     chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string } }) => {
       calls += 1;
       attempted.push([input.model ?? 'missing', input.response_format?.type ?? 'missing']);
-      if (calls < 3) {
+      if (calls < 2) {
         const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
         error.status = 400;
         throw error;
@@ -162,12 +166,13 @@ test('JSON-object fallback is reserved for an explicit strict-format rejection a
     } } },
   } as unknown as OpenAI;
 
-  const result = await providerCallWithTimeout(client, '{}', { retryDelayMs: 0, routeClass: 'direct_openai' });
-  assert.equal(result.providerCalls, 3);
+  const result = await providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0, routeClass: 'direct_openai', allowJsonObjectFallback: true,
+  });
+  assert.equal(result.providerCalls, 2);
   assert.deepEqual(attempted, [
     [SPREADSHEET_PROVIDER_MODEL, 'json_schema'],
-    [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema'],
-    [SPREADSHEET_PROVIDER_DATED_MODEL, 'json_object'],
+    [SPREADSHEET_PROVIDER_MODEL, 'json_object'],
   ]);
 });
 
@@ -179,7 +184,7 @@ test('the manual compatibility probe sends only a synthetic semantic payload and
       return {
         choices: [{
           message: {
-            content: JSON.stringify({
+            content: JSON.stringify({ response: {
               schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
               stage: 'abstain',
               request: null,
@@ -212,7 +217,7 @@ test('the manual compatibility probe sends only a synthetic semantic payload and
                 abstention: { reason: 'insufficient_evidence', detail: 'Synthetic compatibility probe.', manualRecoveryRequired: true },
                 summary: 'Synthetic compatibility probe.',
               },
-            }),
+            } }),
           },
         }],
       };
@@ -228,8 +233,11 @@ test('the manual compatibility probe sends only a synthetic semantic payload and
   assert.equal(result.status, 'compatible');
   assert.deepEqual(result.checks, {
     strictSchemaAlias: 'accepted',
-    datedModelResolution: 'not_needed',
-    explicitFormatFallback: 'not_used',
+    json: 'valid',
+    zod: 'valid',
+    continuation: 'valid',
+    parserBounds: 'valid',
+    semanticPlan: 'valid',
     responseContract: 'valid',
   });
   const payload = JSON.parse(String((request?.messages as Array<{ content: string }>).at(-1)?.content)) as Record<string, unknown>;
@@ -241,43 +249,54 @@ test('the manual compatibility probe sends only a synthetic semantic payload and
   assert.equal(result.payload.createsRecords, false);
 });
 
-test('the manual compatibility probe reports dated resolution and the permitted fallback separately', async () => {
+test('the strict provider wire schema is a closed discriminated union with explicit primitive const and enum types', () => {
+  const schema = spreadsheetAIResponseJsonSchema as unknown as {
+    anyOf?: ReadonlyArray<Record<string, unknown>>;
+    properties?: Record<string, unknown>;
+  };
+  assert.equal(Array.isArray(schema.anyOf), false, 'the managed route requires a plain object root');
+  assert.equal(typeof schema.properties, 'object');
+  const responseSchema = schema.properties?.response as { anyOf?: ReadonlyArray<Record<string, unknown>> };
+  assert.equal(Array.isArray(responseSchema.anyOf), true);
+  assert.equal(responseSchema.anyOf?.length, 3);
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') {
+      const node = value as Record<string, unknown>;
+      if (Object.hasOwn(node, 'const')) assert.equal(typeof node.type, 'string');
+      if (Object.hasOwn(node, 'enum')) assert.equal(typeof node.type, 'string');
+      Object.values(node).forEach(visit);
+    }
+  };
+  visit(schema);
+  assert.equal(spreadsheetAIProviderWireResponseSchema.safeParse({
+    response: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      stage: 'request_context',
+      request: {
+        schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+        continuationToken: 'valid-token',
+        allowedSheetIds: ['sheet_1'],
+        requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 1, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Need safe context.' }],
+      },
+      plan: null,
+    },
+  }).success, true);
+});
+
+test('the manual compatibility probe rejects a strict-schema route without trying fallback modes', async () => {
   const requests: Array<{ model?: string; mode?: string }> = [];
   let calls = 0;
   const client = {
     chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string } }) => {
       calls += 1;
       requests.push({ model: input.model, mode: input.response_format?.type });
-      if (calls < 3) {
+      if (calls === 1) {
         const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
         error.status = 400;
         throw error;
       }
-      return {
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-              stage: 'request_context',
-              request: {
-                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-                continuationToken: SPREADSHEET_PROVIDER_COMPATIBILITY_TOKEN,
-                allowedSheetIds: [SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID],
-                requests: [{
-                  sheetId: SPREADSHEET_PROVIDER_COMPATIBILITY_SHEET_ID,
-                  startRow: 1,
-                  endRow: 1,
-                  startColumn: 1,
-                  endColumn: 1,
-                  chunk: 0,
-                  reason: 'Synthetic compatibility probe.',
-                }],
-              },
-              plan: null,
-            }),
-          },
-        }],
-      };
+      throw new Error('compatibility check must not make a fallback request');
     } } },
   } as unknown as OpenAI;
 
@@ -287,17 +306,18 @@ test('the manual compatibility probe reports dated resolution and the permitted 
     managedRouteConfigured: true,
     retryDelayMs: 0,
   });
-  assert.equal(result.status, 'compatible_with_json_object_fallback');
+  assert.equal(result.status, 'route_incompatible');
   assert.deepEqual(result.checks, {
     strictSchemaAlias: 'rejected',
-    datedModelResolution: 'rejected',
-    explicitFormatFallback: 'used_after_strict_compatibility_rejections',
-    responseContract: 'valid',
+    json: 'not_received',
+    zod: 'not_received',
+    continuation: 'not_received',
+    parserBounds: 'not_received',
+    semanticPlan: 'not_received',
+    responseContract: 'not_received',
   });
   assert.deepEqual(requests, [
     { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
-    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_schema' },
-    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
   ]);
 });
 
@@ -313,7 +333,8 @@ test('a malformed probe response is a contract failure, not a route compatibilit
   });
   assert.equal(result.status, 'contract_invalid');
   assert.equal(result.checks.responseContract, 'invalid');
-  assert.equal(result.checks.explicitFormatFallback, 'not_used');
+  assert.equal(result.checks.json, 'valid');
+  assert.equal(result.checks.zod, 'invalid');
   assert.equal(result.attempts[0]?.outcomeCategory, 'contract_invalid');
 });
 
@@ -440,9 +461,9 @@ test('AI fallback telemetry reports both retry and timeout attempts', async () =
   });
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.reason, 'AI analysis timed out.');
-  assert.equal(result.providerCalls, 3);
-  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout', 'timeout']);
+  assert.equal(result.reason, 'Automatic review is temporarily unavailable because the provider could not be reached.');
+  assert.equal(result.providerCalls, 2);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout']);
   assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'replit_ai_integrations' || attempt.routeClass === 'direct_openai'), true);
   assert.equal(result.analysis?.sheets.every((sheet) => !sheet.selected), true, 'a provider failure is never an import plan');
   assert.deepEqual(result.analysis?.sheets.map((sheet) => sheet.mapping.columns), [{}], 'manual recovery must not receive locally inferred column defaults');
@@ -562,8 +583,13 @@ test('provider receives the complete nested strict JSON schema contract', async 
   const responseFormat = request?.response_format as { type?: string; json_schema?: { strict?: boolean; schema?: Record<string, unknown> } };
   assert.equal(responseFormat.type, 'json_schema');
   assert.equal(responseFormat.json_schema?.strict, true);
-  assert.equal(responseFormat.json_schema?.schema?.additionalProperties, false);
+  assert.equal(Array.isArray(responseFormat.json_schema?.schema?.anyOf), false);
+  const responseSchema = (responseFormat.json_schema?.schema?.properties as Record<string, { anyOf?: unknown }> | undefined)?.response;
+  assert.equal(Array.isArray(responseSchema?.anyOf), true);
   const defs = responseFormat.json_schema?.schema?.$defs as Record<string, Record<string, unknown>>;
+  assert.equal(defs.requestContextResponse?.additionalProperties, false);
+  assert.equal(defs.finalPlanResponse?.additionalProperties, false);
+  assert.equal(defs.abstainResponse?.additionalProperties, false);
   assert.equal(defs.plan?.additionalProperties, false);
   assert.equal(defs.sheetPlan?.additionalProperties, false);
   assert.equal(defs.fields?.additionalProperties, false);
@@ -611,21 +637,16 @@ test('a provider-success contract-invalid response gets one bounded repair pass 
   assert.doesNotMatch(JSON.stringify(repairPayload), /Private consulting payment/);
 });
 
-test('repair preserves a previously proven JSON-object compatibility mode', async () => {
-  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,JSON-object repair,13\n'), 'text/csv', 'json-object-repair.csv');
+test('repair remains on the verified strict policy even when historical attempts used object mode', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Strict repair,13\n'), 'text/csv', 'strict-repair.csv');
   const requests: Array<{ model?: string; mode?: string }> = [];
   let calls = 0;
   const client = {
     chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
       calls += 1;
       requests.push({ model: input.model, mode: input.response_format?.type });
-      if (calls < 3) {
-        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
-        error.status = 400;
-        throw error;
-      }
       const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-      if (calls === 3) {
+       if (calls === 1) {
         return {
           choices: [{
             message: {
@@ -646,15 +667,11 @@ test('repair preserves a previously proven JSON-object compatibility mode', asyn
   assert.equal(result.status, 'success');
   assert.deepEqual(requests, [
     { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
-    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_schema' },
-    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
-    { model: SPREADSHEET_PROVIDER_DATED_MODEL, mode: 'json_object' },
+    { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
   ]);
   assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.responseMode, attempt.outcomeCategory, attempt.failurePhase]), [
-    ['json_schema', 'compatibility', 'provider_request'],
-    ['json_schema', 'compatibility', 'provider_request'],
-    ['json_object', 'contract_invalid', 'response_validation'],
-    ['json_object', 'success', null],
+    ['json_schema', 'contract_invalid', 'response_validation'],
+    ['json_schema', 'success', null],
   ]);
 });
 
@@ -670,7 +687,7 @@ test('a contract-invalid repair result remains unavailable and cannot become an 
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
   assert.equal(result.status, 'failed');
-  assert.equal(result.reason, 'AI returned a malformed response.');
+  assert.equal(result.reason, 'AI returned a response that did not pass the protected spreadsheet contract.');
   assert.equal(result.providerCalls, 2);
   assert.equal((result.semanticPlan as { status?: string }).status, 'incomplete');
   assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
@@ -719,7 +736,7 @@ test('a failed semantic session retries to success without replaying prior provi
   assert.equal(retried.providerAttempts?.length, 3, 'prior attempts are retained rather than duplicated');
 });
 
-test('an explicit retry resets inherited object mode to dated strict mode while preserving historical attempts', async () => {
+test('an explicit retry replaces inherited object mode with alias-only strict policy while preserving historical attempts', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry state sale,17\n'), 'text/csv', 'retry-state.csv');
   const token = 'retry-state-token';
   const historicalAttempts: SpreadsheetProviderAttempt[] = [{
@@ -749,40 +766,33 @@ test('an explicit retry resets inherited object mode to dated strict mode while 
     providerAttempts: historicalAttempts,
     currentPlan: null,
   };
-  const originalBaseUrl = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
-  process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = 'https://replit-ai-integrations.test/v1';
-  try {
-    const requests: Array<{ model?: string; mode?: string }> = [];
-    const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
-    const client = {
+  const requests: Array<{ model?: string; mode?: string }> = [];
+  const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
+  const client = {
       chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
         requests.push({ model: input.model, mode: input.response_format?.type });
         const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
         return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
       } } },
-    } as unknown as OpenAI;
-    const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheet(workbook), {
-      client,
-      session,
-      resetProviderState: true,
-      retryDelayMs: 0,
-      persistProviderAttempts: async (attempts) => { persistedAttempts.push(structuredClone(attempts)); },
-    });
-    assert.equal(result.status, 'success');
-    assert.deepEqual(requests, [{
-      model: SPREADSHEET_PROVIDER_DATED_MODEL,
-      mode: 'json_schema',
-    }]);
-    assert.deepEqual(result.providerAttempts?.slice(0, 1), historicalAttempts);
-    assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.attemptNumber, attempt.model, attempt.responseMode]), [
-      [1, SPREADSHEET_PROVIDER_MODEL, 'json_object'],
-      [2, SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema'],
-    ]);
-    assert.deepEqual(persistedAttempts.at(-1)?.slice(0, 1), historicalAttempts);
-  } finally {
-    if (originalBaseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
-    else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = originalBaseUrl;
-  }
+  } as unknown as OpenAI;
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheet(workbook), {
+    client,
+    session,
+    resetProviderState: true,
+    retryDelayMs: 0,
+    persistProviderAttempts: async (attempts) => { persistedAttempts.push(structuredClone(attempts)); },
+  });
+  assert.equal(result.status, 'success');
+  assert.deepEqual(requests, [{
+    model: SPREADSHEET_PROVIDER_MODEL,
+    mode: 'json_schema',
+  }]);
+  assert.deepEqual(result.providerAttempts?.slice(0, 1), historicalAttempts);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.attemptNumber, attempt.model, attempt.responseMode]), [
+    [1, SPREADSHEET_PROVIDER_MODEL, 'json_object'],
+    [2, SPREADSHEET_PROVIDER_MODEL, 'json_schema'],
+  ]);
+  assert.deepEqual(persistedAttempts.at(-1)?.slice(0, 1), historicalAttempts);
 });
 
 test('a persisted pending continuation resumes after an interrupted worker without repeating its overview call', async () => {

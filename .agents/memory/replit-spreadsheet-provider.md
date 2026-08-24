@@ -3,8 +3,8 @@ name: Replit spreadsheet provider compatibility
 description: Verified compatibility requirements for the privacy-safe spreadsheet semantic provider route.
 ---
 
-Use strict `json_schema` for Spreadsheet AI v2. Start with the `gpt-5.4-mini` alias, but after an explicit strict-format compatibility rejection resolve to `gpt-5.4-mini-2026-03-17` before considering the narrow object-mode fallback.
+Use the `gpt-5.4-mini` alias with strict `json_schema` only. Before managed Replit-route spreadsheet review, run a synthetic, non-importing compatibility gate; select the alias only after strict schema acceptance, JSON parsing, Zod validation, continuation identity, parser bounds, and a non-importing semantic plan all pass.
 
-**Why:** The managed Replit route can reject the floating alias for strict structured output even though the dated model accepts the same contract. The spreadsheet protocol still depends on strict, server-validated semantics; broad fallbacks would conceal configuration failures or weaken provenance guarantees.
+**Why:** The managed route supports the alias but rejects dated-model fallback and forbids `anyOf`, `enum`, and `const` at the schema root. A closed provider-only `{ response: ... }` envelope keeps the exact semantic union nested while server Zod remains authoritative. Any gate failure must leave review incomplete rather than fall back to object mode.
 
-**How to apply:** Preserve strict server-side Zod and semantic-plan validation. A `json_object` request is only an operational fallback after explicit strict-format compatibility failures for both alias and dated strict attempts; it is not a replacement semantic path. Preserve the working model and response mode through bounded contract repair and ordinary continuation/reclaim retries, but an explicit retry of an incomplete/failed session must reset to the dated strict path while retaining historical attempts as audit history.
+**How to apply:** Never use a dated spreadsheet model or `json_object` fallback on the managed route. Every new call and explicit retry starts from the verified alias strict policy; historical attempts remain immutable audit history only. Keep parser-bound validation, fencing, idempotency, provenance, and confirmation gates unchanged.

@@ -1421,6 +1421,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       aiStatus: {
         status: ai.status,
         reason: ai.reason ?? null,
+        failureCategory: ai.failureCategory ?? null,
         sampledSheetIds: ai.sampledSheetIds,
         providerCalls: ai.providerCalls,
         providerAttempts: ai.providerAttempts ?? [],

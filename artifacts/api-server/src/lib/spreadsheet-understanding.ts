@@ -144,8 +144,10 @@ export type SpreadsheetProviderAttempt = {
   responseMode: 'json_schema' | 'json_object';
   startedAt: string;
   durationMs: number;
-  outcomeCategory: 'success' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid' | 'unavailable';
-  safeStatus: 'ok' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid' | 'network' | 'http_error';
+  outcomeCategory: 'success' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid'
+    | 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'unavailable';
+  safeStatus: 'ok' | 'timeout' | 'rate_limited' | 'compatibility' | 'contract_invalid'
+    | 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'network' | 'http_error';
   statusCode: number | null;
   retryable: boolean;
   failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
@@ -170,6 +172,7 @@ export type SpreadsheetAIEnvelope = {
   analysis?: SpreadsheetAnalysis;
   continuationToken?: string;
   reason?: string;
+  failureCategory?: 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'response_contract_invalid' | 'provider_unavailable';
   sampledSheetIds: string[];
   providerCalls: number;
   providerAttempts?: SpreadsheetProviderAttempt[];
