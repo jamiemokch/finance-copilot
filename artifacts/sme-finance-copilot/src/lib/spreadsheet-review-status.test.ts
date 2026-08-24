@@ -29,3 +29,14 @@ test('a non-timeout transport failure keeps its distinct explanation', () => {
     'The automatic review service could not be reached.',
   );
 });
+
+test('safe diagnostic categories map without inspecting raw provider errors', () => {
+  assert.equal(automaticReviewUnavailableReason({
+    failureCategory: 'provider_schema_invalid',
+    diagnostic: { category: 'provider_schema_invalid', safeStatus: 'provider_schema_invalid', httpStatus: 400 },
+  }), 'The automatic review service could not accept the protected review format.');
+  assert.equal(automaticReviewUnavailableReason({
+    failureCategory: 'semantic_validation',
+    diagnostic: { category: 'semantic_validation', safeStatus: 'semantic_validation', httpStatus: null },
+  }), 'The automatic review plan did not pass spreadsheet semantic checks.');
+});
