@@ -16,7 +16,8 @@ import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import { scanProfile } from "./reconciliation.js";
 import {
-  analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, detectColumnSchema,
+  analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, detectColumnSchema, invalidateSpreadsheetAICache,
+  type SpreadsheetSemanticSession,
   type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
 import { spreadsheetImportPlanSchema } from "../lib/spreadsheet-semantic-contract.js";
@@ -65,6 +66,8 @@ const mappingSchemaInput = z.object({
 
 const confirmedSpreadsheetInput = z.object({
   confirmation: z.literal(true),
+  reviewRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  semanticPlanIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   selectedSheetIds: z.array(z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/)).min(1).max(100),
   sheetMappings: z.record(mappingSchemaInput),
   sheetRoleOverrides: z.record(z.enum(["transactional", "non_transactional", "mixed", "unknown"])).default({}),
@@ -78,7 +81,11 @@ const confirmedSpreadsheetInput = z.object({
   outsideScopeMode: z.enum(["retain", "exclude"]).default("exclude"),
 }).strict();
 
-const spreadsheetDraftInput = confirmedSpreadsheetInput.omit({ confirmation: true });
+const spreadsheetDraftInput = confirmedSpreadsheetInput.omit({
+  confirmation: true,
+  reviewRevision: true,
+  semanticPlanIdentity: true,
+});
 
 type SpreadsheetReviewDraft = z.infer<typeof spreadsheetDraftInput>;
 
@@ -140,6 +147,40 @@ function spreadsheetSourceRowIndex(sheetIndex: number, rowNumber: number) {
 
 function spreadsheetMovementFingerprint(date: string, amount: number, description: string) {
   return `${date}|${Math.round(amount * 100)}|${normaliseCell(description).toLowerCase()}`;
+}
+
+function semanticPlanIdentity(contentHash: string | null | undefined, plan: unknown) {
+  return createHash("sha256").update(JSON.stringify({
+    contentHash: contentHash ?? "no-hash",
+    plan: plan ?? null,
+  })).digest("hex");
+}
+
+function sameConfirmedReview(
+  draft: Record<string, unknown>,
+  submitted: z.infer<typeof confirmedSpreadsheetInput>,
+) {
+  const actual = {
+    selectedSheetIds: draft.selectedSheetIds,
+    sheetMappings: draft.sheetMappings,
+    sheetRoleOverrides: draft.sheetRoleOverrides ?? {},
+    sheetResolutions: draft.sheetResolutions ?? {},
+    filingScope: draft.filingScope,
+    excludedRowRefs: draft.excludedRowRefs ?? [],
+    preTradingStartMode: draft.preTradingStartMode ?? "exclude",
+    outsideScopeMode: draft.outsideScopeMode ?? "exclude",
+  };
+  const expected = {
+    selectedSheetIds: submitted.selectedSheetIds,
+    sheetMappings: submitted.sheetMappings,
+    sheetRoleOverrides: submitted.sheetRoleOverrides,
+    sheetResolutions: submitted.sheetResolutions,
+    filingScope: submitted.filingScope,
+    excludedRowRefs: submitted.excludedRowRefs,
+    preTradingStartMode: submitted.preTradingStartMode,
+    outsideScopeMode: submitted.outsideScopeMode,
+  };
+  return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
 // GET /profiles/:profileId/evidence
@@ -804,6 +845,21 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     }
     const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
     const savedPlan = spreadsheetImportPlanSchema.safeParse(state.aiProposal);
+    const plannedSheets = new Map((savedPlan.success ? savedPlan.data.sheets : []).map((sheet) => [sheet.sheetId, sheet]));
+    for (const sheetId of body.data.selectedSheetIds) {
+      const planned = plannedSheets.get(sheetId);
+      const resolution = body.data.sheetResolutions[sheetId];
+      const mapping = body.data.sheetMappings[sheetId];
+      if (planned && ['reference', 'summary', 'duplicate', 'excluded'].includes(planned.disposition)
+        && mapping && requiredMappingIssues(mapping, sheetId).length === 0
+        && resolution !== 'include_income' && resolution !== 'include_expense') {
+        res.status(400).json({
+          error: "This sheet was not identified as individual money records.",
+          issues: [{ sheetId, field: "selection", message: "Choose “include as income” or “include as expense” as an explicit manual recovery decision before assigning transaction columns." }],
+        });
+        return;
+      }
+    }
     const semanticRoleOverrides: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown"> = Object.fromEntries((savedPlan.success ? savedPlan.data.sheets : []).map((sheet) => [
       sheet.sheetId,
       sheet.disposition === "transactional" ? "transactional"
@@ -844,7 +900,19 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         selectedSheetIds: "user",
         sheetMappings: "user",
         filingScope: "user",
+        sheetResolutions: "user",
+        manualOverrides: Object.fromEntries(body.data.selectedSheetIds
+          .filter((sheetId) => {
+            const disposition = plannedSheets.get(sheetId)?.disposition;
+            return disposition && ['reference', 'summary', 'duplicate', 'excluded'].includes(disposition);
+          })
+          .map((sheetId) => [sheetId, {
+            source: "manual_recovery",
+            acknowledgement: body.data.sheetResolutions[sheetId],
+            reason: "The reviewer explicitly included a sheet outside the AI transaction plan.",
+          }])),
       },
+      semanticPlanIdentity: semanticPlanIdentity(evidenceItem.contentHash, savedPlan.success ? savedPlan.data : null),
       mappingRevision: revision,
       savedAt: new Date().toISOString(),
       actorUserId: req.user.id,
@@ -855,6 +923,7 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         deterministicFindings: effectiveAnalysis,
         reviewDraft,
         reviewRevisionHistory: [...history, { mappingRevision: revision, savedAt: reviewDraft.savedAt, actorUserId: req.user.id }],
+        semanticSession: null,
       } as Record<string, unknown>,
       importStatus: "mapping",
     }).where(and(
@@ -863,6 +932,7 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
       inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "error"]),
     )).returning();
     if (!saved) { res.status(409).json({ error: "This spreadsheet is currently being processed. Reload before editing." }); return; }
+    invalidateSpreadsheetAICache(workbook.contentHash);
     await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_review_saved", { mappingRevision: revision });
     res.json({
       reviewDraft,
@@ -903,6 +973,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       reviewDraft?: unknown;
       reviewRevisionHistory?: unknown;
       lastImportError?: unknown;
+      semanticSession?: SpreadsheetSemanticSession;
     } | null;
     // A user decision is durable and must never be overwritten by a later
     // analysis request. Return the persisted review state instead.
@@ -930,7 +1001,26 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     // the normal path. This is a complete, all-sheet structural audit only.
     const structuralAnalysis = analyseSpreadsheetStructure(workbook);
     if (workbook.totalParserRows === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
-    const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis);
+    let persistedSemanticSession: SpreadsheetSemanticSession | null = savedState?.userDecision
+      ? null
+      : savedState?.semanticSession ?? null;
+    const persistSemanticSession = async (session: SpreadsheetSemanticSession) => {
+      persistedSemanticSession = session;
+      await db.update(evidenceItemsTable).set({
+        mappingSchema: {
+          ...(savedState ?? {}),
+          semanticSession: session,
+        } as Record<string, unknown>,
+      }).where(and(
+        eq(evidenceItemsTable.id, evidenceItem.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        eq(evidenceItemsTable.objectPath, evidenceItem.objectPath),
+      ));
+    };
+    const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis, {
+      session: persistedSemanticSession,
+      persistSession: persistSemanticSession,
+    });
     // A saved explicit user choice is durable recovery input. It must win over
     // a later provider outage, but we never manufacture a replacement choice
     // from worksheet-name/header heuristics.
@@ -967,6 +1057,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       deterministicFindings: analysis,
       semanticWorkbookOverview: ai.semanticOverview ?? null,
       aiProposal: ai.semanticPlan ?? null,
+      semanticSession: persistedSemanticSession,
+      semanticPlanIdentity: semanticPlanIdentity(workbook.contentHash, ai.semanticPlan),
       aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits, continuationToken: ai.continuationToken ?? null },
       userDecision: savedState?.userDecision ?? null,
       reviewDraft: savedState?.reviewDraft ?? null,
@@ -1037,11 +1129,42 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
     const selected = new Set(body.data.selectedSheetIds);
     const importState = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const persistedDraft = (importState.reviewDraft as Record<string, unknown> | null) ?? null;
+    const submittedRevision = createHash("sha256").update(JSON.stringify({
+      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: body.data.sheetMappings,
+      sheetRoleOverrides: body.data.sheetRoleOverrides, sheetResolutions: body.data.sheetResolutions, filingScope: body.data.filingScope,
+      excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
+      outsideScopeMode: body.data.outsideScopeMode, businessStartDate: profile.businessStartDate ?? null,
+    })).digest("hex");
+    if (!persistedDraft
+      || persistedDraft.mappingRevision !== body.data.reviewRevision
+      || body.data.reviewRevision !== submittedRevision
+      || persistedDraft.semanticPlanIdentity !== body.data.semanticPlanIdentity
+      || !sameConfirmedReview(persistedDraft, body.data)) {
+      res.status(409).json({
+        error: "This confirmation is not the latest saved spreadsheet review.",
+        issues: [{ field: "selection", message: "Save your current review choices, then confirm that saved version." }],
+      });
+      return;
+    }
     const persistedPlan = spreadsheetImportPlanSchema.safeParse(importState.aiProposal);
     const semanticPlan = persistedPlan.success && persistedPlan.data.status === "complete"
       ? persistedPlan.data
       : null;
     const semanticRules = new Map(semanticPlan?.sheets.map((sheet) => [sheet.sheetId, sheet.rowRules]) ?? []);
+    const semanticSheets = new Map(semanticPlan?.sheets.map((sheet) => [sheet.sheetId, sheet]) ?? []);
+    for (const sheetId of selected) {
+      const planned = semanticSheets.get(sheetId);
+      const resolution = body.data.sheetResolutions[sheetId];
+      if (planned && ['reference', 'summary', 'duplicate', 'excluded'].includes(planned.disposition)
+        && resolution !== 'include_income' && resolution !== 'include_expense') {
+        res.status(400).json({
+          error: "This sheet needs an explicit manual recovery decision.",
+          issues: [{ sheetId, field: "selection", message: "This sheet was identified as reference material. Explicitly choose to include it before assigning transaction columns." }],
+        });
+        return;
+      }
+    }
     const knownSheetIds = new Set(workbook.sheets.map((sheet) => sheet.sheetId));
     if ([...selected].some((sheetId) => !knownSheetIds.has(sheetId))) {
       res.status(400).json({
@@ -1244,7 +1367,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     }
 
     const mappingRevision = createHash("sha256").update(JSON.stringify({
-      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
+      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit,
+      sheetRoleOverrides: body.data.sheetRoleOverrides, sheetResolutions: body.data.sheetResolutions, filingScope: body.data.filingScope,
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode, outsideScopeMode: body.data.outsideScopeMode,
       businessStartDate,
     })).digest("hex");
@@ -1279,7 +1403,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     userDecision = {
       selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit,
       sheetRoleOverrides: body.data.sheetRoleOverrides, filingScope: body.data.filingScope,
-      excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
+      sheetResolutions: body.data.sheetResolutions, excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
       outsideScopeMode: body.data.outsideScopeMode,
       decisionSources: {
         sheetRoleOverrides: "user", selectedSheetIds: "user", sheetMappings: "user",
@@ -1289,9 +1413,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     };
     const sheetFinalDispositions = workbook.sheets.map((sheet) => {
       const sheetRows = rowOutcomes.filter((row) => row.sheetId === sheet.sheetId);
+      const semantic = semanticSheets.get(sheet.sheetId);
       return {
         sheetId: sheet.sheetId, worksheet: sheet.displayName,
         disposition: selected.has(sheet.sheetId) ? (sheetRoles.get(sheet.sheetId) === "non_transactional" ? "non_transactional" : "processed") : "unselected_sheet",
+        semanticDisposition: semantic?.disposition ?? "manual_recovery",
+        semanticDecisionSource: semantic?.decisionSource ?? (selected.has(sheet.sheetId) ? "manual_recovery" : "user"),
+        semanticValidationReason: semantic?.validationReason ?? "Confirmed user review decision.",
         sourceRows: sheetRows.length,
         dispositionCounts: sheetRows.reduce<Record<string, number>>((summary, row) => {
           summary[row.primaryDisposition] = (summary[row.primaryDisposition] ?? 0) + 1;

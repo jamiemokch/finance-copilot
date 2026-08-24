@@ -401,6 +401,7 @@ export type SpreadsheetInspectionResponse = {
     outsideScopeMode: 'retain' | 'exclude';
     sheetResolutions?: Record<string, 'include_income' | 'include_expense' | 'reference_only' | 'duplicate_sheet' | 'leave_out'>;
     mappingRevision?: string;
+    semanticPlanIdentity?: string;
     decisionSources?: Record<string, string>;
   } | null;
   reviewRevisionHistory?: Array<{ mappingRevision: string; savedAt: string }>;
@@ -491,6 +492,8 @@ export const evidenceApi = {
   ),
   confirmSpreadsheet: (profileId: string, evidenceId: string, data: {
     confirmation: true;
+    reviewRevision: string;
+    semanticPlanIdentity: string;
     selectedSheetIds: string[];
     sheetMappings: Record<string, unknown>;
     sheetRoleOverrides?: Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>;

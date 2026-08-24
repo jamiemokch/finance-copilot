@@ -235,6 +235,19 @@ export const spreadsheetAIResponseContract = {
   },
 } as const;
 
+/** Provider response-format schema. Server Zod validation remains authoritative. */
+export const spreadsheetAIResponseJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['schemaVersion', 'stage', 'request', 'plan'],
+  properties: {
+    schemaVersion: { const: SPREADSHEET_SEMANTIC_SCHEMA_VERSION },
+    stage: { enum: ['request_context', 'final_plan', 'abstain'] },
+    request: { type: ['object', 'null'], additionalProperties: true },
+    plan: { type: ['object', 'null'], additionalProperties: true },
+  },
+} as const;
+
 const multilingualHeaderAliases: Record<string, string> = {
   '日付': 'date', '日期': 'date', '날짜': 'date', 'تاريخ': 'date', 'fecha': 'date', 'datum': 'date', 'tarikh': 'date',
   '内容': 'description', '內容': 'description', '摘要': 'description', '說明': 'description', 'รายละเอียด': 'description', 'keterangan': 'description',
@@ -243,7 +256,16 @@ const multilingualHeaderAliases: Record<string, string> = {
   'カテゴリ': 'category', '类别': 'category', '分類': 'category', '分类': 'category',
 };
 
-export function redactSpreadsheetValue(value: string): string {
+function safeStructuralHeaderLabel(value: string): string | null {
+  const trimmed = value.trim().replace(/\s+/g, ' ');
+  if (!trimmed || trimmed.length > 32 || !/\p{L}/u.test(trimmed)) return null;
+  if (/@|https?:\/\/|www\.|\d|(?:iban|swift|account|invoice|address|street|road|email|phone)/i.test(trimmed)) return null;
+  const words = trimmed.match(/\p{L}+/gu) ?? [];
+  if (words.length > 3 || /[,:;()[\]{}]/.test(trimmed)) return null;
+  return trimmed;
+}
+
+export function redactSpreadsheetValue(value: string, options: { preserveStructuralHeader?: boolean } = {}): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
   const lower = trimmed.toLowerCase();
@@ -252,6 +274,8 @@ export function redactSpreadsheetValue(value: string): string {
   if (matchedHeaders.length) return `[header:${matchedHeaders.join('|')}]`;
   const multilingualHeader = multilingualHeaderAliases[trimmed];
   if (multilingualHeader) return `[header:${multilingualHeader}]`;
+  const safeHeader = options.preserveStructuralHeader ? safeStructuralHeaderLabel(trimmed) : null;
+  if (safeHeader) return `[header-label:${safeHeader}]`;
   if (/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(trimmed) || /^\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}$/.test(trimmed)) return '[date]';
   if (/^[£$€]?\s*\(?-?\d[\d,]*(?:\.\d{1,4})?\)?(?:\s*(?:cr|dr))?$/i.test(trimmed)) {
     const numeric = Number(trimmed.replace(/[£$€,\s()]/g, '').replace(/(cr|dr)$/i, ''));
@@ -270,7 +294,7 @@ function overviewRowsFor(sheet: SpreadsheetWorkbook['sheets'][number]) {
     values: row.values.slice(0, 64).map((value) => {
       if (cells >= SPREADSHEET_SEMANTIC_LIMITS.maxOverviewCellsPerSheet) return '';
       cells += 1;
-      return redactSpreadsheetValue(value).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters);
+       return redactSpreadsheetValue(value, { preserveStructuralHeader: row.rowNumber === sheet.inferredHeaderRow }).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters);
     }),
   }));
 }
@@ -352,7 +376,9 @@ export function buildRequestedSpreadsheetContext(
         return {
           rowNumber: requested.startRow + offset,
           values: Array.from({ length: requested.endColumn - requested.startColumn + 1 }, (_, columnOffset) =>
-            redactSpreadsheetValue(row?.values[requested.startColumn - 1 + columnOffset] ?? '').slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters)),
+            redactSpreadsheetValue(row?.values[requested.startColumn - 1 + columnOffset] ?? '', {
+              preserveStructuralHeader: (requested.startRow + offset) === sheet.inferredHeaderRow,
+            }).slice(0, SPREADSHEET_SEMANTIC_LIMITS.maxCellCharacters)),
         };
       }),
     };

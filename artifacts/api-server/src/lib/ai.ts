@@ -29,6 +29,7 @@ import {
   SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
   spreadsheetAIResponseSchema,
   spreadsheetAIResponseContract,
+  spreadsheetAIResponseJsonSchema,
   validateSpreadsheetImportPlan,
   type SpreadsheetImportPlan,
 } from './spreadsheet-semantic-contract.js';
@@ -58,6 +59,17 @@ export const SPREADSHEET_AI_LIMITS = {
 let _client: OpenAI | null = null;
 const spreadsheetAICache = new Map<string, { expiresAt: number; envelope: SpreadsheetAIEnvelope }>();
 const spreadsheetAIInFlight = new Map<string, Promise<SpreadsheetAIEnvelope>>();
+
+export type SpreadsheetSemanticSession = {
+  schemaVersion: typeof SPREADSHEET_SEMANTIC_SCHEMA_VERSION;
+  contentHash: string | null;
+  stage: 'workbook_overview' | 'requested_context' | 'complete' | 'incomplete';
+  continuationToken: string;
+  payload: unknown;
+  contextHistory: Array<{ continuationToken: string; rangeCount: number }>;
+  providerCalls: number;
+  currentPlan: SpreadsheetImportPlan | null;
+};
 
 export function invalidateSpreadsheetAICache(contentHash?: string) {
   for (const key of spreadsheetAICache.keys()) {
@@ -334,7 +346,14 @@ export async function providerCallWithTimeout(
             },
             { role: 'user', content: payload },
           ],
-          response_format: { type: 'json_object' },
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'spreadsheet_semantic_v2_response',
+              strict: true,
+              schema: spreadsheetAIResponseJsonSchema,
+            },
+          } as never,
         }),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
       ]);
@@ -363,6 +382,8 @@ export async function analyseSpreadsheetWithAI(
     client?: OpenAI;
     timeoutMs?: number;
     retryDelayMs?: number;
+    session?: SpreadsheetSemanticSession | null;
+    persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
   },
 ): Promise<SpreadsheetAIEnvelope> {
   const structuralAnalysis = analyseSpreadsheetStructure(workbook);
@@ -415,17 +436,35 @@ export async function analyseSpreadsheetWithAI(
   const active = spreadsheetAIInFlight.get(cacheKey);
   if (active) return active;
   const run = (async (): Promise<SpreadsheetAIEnvelope> => {
-    let providerCalls = 0;
-    let token = initialToken;
-    let payload: unknown = {
+    const resumable = testOptions?.session?.schemaVersion === SPREADSHEET_SEMANTIC_SCHEMA_VERSION
+      && testOptions.session.contentHash === (workbook.contentHash ?? null)
+      && (testOptions.session.stage === 'workbook_overview' || testOptions.session.stage === 'requested_context');
+    let providerCalls = resumable ? testOptions!.session!.providerCalls : 0;
+    let token = resumable ? testOptions!.session!.continuationToken : initialToken;
+    let payload: unknown = resumable ? testOptions!.session!.payload : {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       stage: 'workbook_overview',
       continuationToken: token,
       overview,
-        responseContract: spreadsheetAIResponseContract,
+      responseContract: spreadsheetAIResponseContract,
       instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient.',
     };
+    let contextHistory = resumable ? testOptions!.session!.contextHistory : [];
+    const checkpoint = async (
+      stage: SpreadsheetSemanticSession['stage'],
+      currentPlan: SpreadsheetImportPlan | null = null,
+    ) => testOptions?.persistSession?.({
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      contentHash: workbook.contentHash ?? null,
+      stage,
+      continuationToken: token,
+      payload,
+      contextHistory,
+      providerCalls,
+      currentPlan,
+    });
     try {
+      await checkpoint(resumable ? testOptions!.session!.stage : 'workbook_overview', resumable ? testOptions!.session!.currentPlan : null);
       for (let depth = 0; depth < SPREADSHEET_SEMANTIC_LIMITS.maxHierarchyDepth; depth += 1) {
         if (safeJsonSize(payload) > SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes) {
           return incomplete('incomplete', 'The requested review context exceeded the privacy-safe limit.', {
@@ -463,6 +502,11 @@ export async function analyseSpreadsheetWithAI(
             context,
             responseContract: spreadsheetAIResponseContract,
           };
+          contextHistory = [...contextHistory, {
+            continuationToken: parsed.data.request.continuationToken,
+            rangeCount: context.ranges.length,
+          }];
+          await checkpoint('requested_context');
           continue;
         }
         const plan: SpreadsheetImportPlan = parsed.data.plan;
@@ -470,6 +514,7 @@ export async function analyseSpreadsheetWithAI(
         const planError = validateSpreadsheetImportPlan(plan, workbook);
         if (planError) throw new Error(planError);
         if (plan.status !== 'complete' || parsed.data.stage === 'abstain') {
+          await checkpoint('incomplete', plan);
           return {
             status: 'abstained', proposal: null, semanticPlan: plan, semanticOverview: overview,
             analysis: structuralAnalysis, continuationToken: token,
@@ -482,6 +527,7 @@ export async function analyseSpreadsheetWithAI(
           analysis: analysisFromSemanticPlan(workbook, plan), continuationToken: token,
           sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, limits,
         };
+        await checkpoint('complete', plan);
         spreadsheetAICache.set(cacheKey, { expiresAt: Date.now() + SPREADSHEET_SEMANTIC_LIMITS.cacheTtlMs, envelope });
         if (spreadsheetAICache.size > SPREADSHEET_SEMANTIC_LIMITS.maxCacheEntries) spreadsheetAICache.delete(spreadsheetAICache.keys().next().value!);
         return envelope;
@@ -500,9 +546,11 @@ export async function analyseSpreadsheetWithAI(
         : message === 'schema_invalid' || message === 'continuation_invalid' ? 'provider_schema_invalid'
           : message.includes('limit') || message === 'response_too_large' ? 'operational_limit'
             : 'provider_unavailable';
-      return incomplete('failed', reason, {
+      const outcome = incomplete('failed', reason, {
         reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
       }, calls, token);
+      await checkpoint('incomplete', outcome.semanticPlan ?? null);
+      return outcome;
     }
   })();
   spreadsheetAIInFlight.set(cacheKey, run);

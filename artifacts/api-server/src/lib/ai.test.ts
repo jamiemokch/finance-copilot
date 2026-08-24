@@ -159,6 +159,19 @@ test('only the parser-established header row can expose safe labels, never early
   }
 });
 
+test('safe unseen multilingual structural headers reach the semantic provider without exposing row narratives', () => {
+  const workbook = inspectSpreadsheet(Buffer.from([
+    'Tarehe,Maelezo,Kiasi',
+    '06/04/2025,Malipo ya mteja binafsi,42.00',
+    '07/04/2025,Chakula cha biashara,13.00',
+  ].join('\n')), 'text/csv', 'kiswahili.csv');
+  const overview = JSON.stringify(buildSpreadsheetWorkbookOverview(workbook));
+  assert.match(overview, /\[header-label:Tarehe\]/);
+  assert.match(overview, /\[header-label:Maelezo\]/);
+  assert.match(overview, /\[header-label:Kiasi\]/);
+  assert.doesNotMatch(overview, /Malipo ya mteja binafsi|Chakula cha biashara/);
+});
+
 test('AI can request bounded follow-up context and return an all-sheet semantic plan', async () => {
   const workbook = inspectSpreadsheet(Buffer.from([
     'Date,Description,Amount',

@@ -331,6 +331,8 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const [acknowledgeUnresolved, setAcknowledgeUnresolved] = useState(false);
   const [preTradingStartMode, setPreTradingStartMode] = useState<'retain' | 'exclude'>('exclude');
   const [outsideScopeMode, setOutsideScopeMode] = useState<'retain' | 'exclude'>('exclude');
+  const [reviewRevision, setReviewRevision] = useState('');
+  const [semanticPlanIdentity, setSemanticPlanIdentity] = useState('');
   const [summary, setSummary] = useState<{ dispositionCounts: Record<string, number>; importedRows: number; taxYears: string[] } | null>(null);
   const [error, setError] = useState('');
   const [importError, setImportError] = useState<SpreadsheetImportError | null>(null);
@@ -359,6 +361,8 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     setPreTradingStartMode(draft?.preTradingStartMode ?? 'exclude');
     setOutsideScopeMode(draft?.outsideScopeMode ?? 'exclude');
     setAcknowledgeUnresolved(Boolean(draft?.excludedRowRefs?.length));
+    setReviewRevision(draft?.mappingRevision ?? '');
+    setSemanticPlanIdentity(draft?.semanticPlanIdentity ?? '');
   };
   const inspect = async (id: string) => {
     setStage('inspecting'); setError('');
@@ -442,6 +446,8 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       setAnalysis(saved.analysis);
       setFilingScope(saved.reviewDraft?.filingScope ?? []);
       setAcknowledgeUnresolved(Boolean(saved.reviewDraft?.excludedRowRefs?.length));
+      setReviewRevision(saved.reviewDraft?.mappingRevision ?? '');
+      setSemanticPlanIdentity(saved.reviewDraft?.semanticPlanIdentity ?? '');
       return saved;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'We could not save that choice. Please try again.';
@@ -532,12 +538,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     if (!evidenceId || !analysis || savingReview) return;
     setStage('confirming'); setError(''); setImportError(null);
     try {
-      await persistReviewDecision();
+      const saved = await persistReviewDecision();
       const selectedMappings = Object.fromEntries(selectedSheetIds
         .filter((sheetId) => Boolean(sheetMappings[sheetId]))
         .map((sheetId) => [sheetId, sheetMappings[sheetId]!]));
       const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
-        confirmation: true, selectedSheetIds, sheetMappings: selectedMappings, sheetRoleOverrides, sheetResolutions, filingScope,
+        confirmation: true,
+        reviewRevision: saved?.reviewDraft?.mappingRevision ?? reviewRevision,
+        semanticPlanIdentity: saved?.reviewDraft?.semanticPlanIdentity ?? semanticPlanIdentity,
+        selectedSheetIds, sheetMappings: selectedMappings, sheetRoleOverrides, sheetResolutions, filingScope,
         excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
         preTradingStartMode, outsideScopeMode,
       });

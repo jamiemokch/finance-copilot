@@ -341,12 +341,13 @@ function inspectCsv(buffer: Buffer, filename: string): SpreadsheetWorkbook {
     physicalLineStart: index === 0 ? 1 : (records[index - 1]?.info.lines ?? index) + 1,
     physicalLineEnd: records[index]?.info.lines ?? index + 1,
   }));
+  const inferredHeader = inferHeaderRow(sourceRows);
   const sheet: SpreadsheetSheet = {
     sheetId: 'sheet_1', displayName: filename || 'CSV', index: 0,
     rowCount: sourceRows.length, columnCount: width,
     parserRange: sourceRows.length && width ? { startRow: 1, endRow: sourceRows.length, startColumn: 1, endColumn: width } : null,
-    rows: sourceRows, headers: sourceRows.map((row) => row.values).find((row) => looksLikeHeader(row)) ?? [],
-    inferredHeaderRow: sourceRows.find((row) => looksLikeHeader(row.values))?.rowNumber ?? null,
+    rows: sourceRows, headers: inferredHeader?.values ?? [],
+    inferredHeaderRow: inferredHeader?.rowNumber ?? null,
     isEmpty: sourceRows.length === 0,
     structural: {
       populatedArea: sourceRows.length && width ? { startRow: 1, endRow: sourceRows.length, startColumn: 1, endColumn: width } : null,
