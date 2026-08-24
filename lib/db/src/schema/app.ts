@@ -292,6 +292,11 @@ export const spreadsheetSemanticSessionsTable = pgTable('spreadsheet_semantic_se
   // Remains stable for the logical review. claimToken changes on every lease
   // claim and fences a worker that resumes after another has reclaimed it.
   workIdentity: text('work_identity').notNull(),
+  // One logical review keeps this identity while each explicit automatic retry
+  // receives a fresh, separately fenced execution epoch.
+  currentExecutionId: uuid('current_execution_id'),
+  executionNumber: integer('execution_number').notNull().default(1),
+  automaticRetryCount: integer('automatic_retry_count').notNull().default(0),
   claimToken: text('claim_token'),
   leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -310,6 +315,47 @@ export type SpreadsheetSemanticSessionRecord = typeof spreadsheetSemanticSession
 export type InsertSpreadsheetSemanticSession = z.infer<typeof insertSpreadsheetSemanticSessionSchema>;
 
 /**
+ * A bounded automatic-analysis execution under a stable semantic review.
+ * Active executions are checkpointed under their claim token; once terminal,
+ * their state is historical audit evidence and is never reused by a retry.
+ */
+export const spreadsheetSemanticExecutionsTable = pgTable('spreadsheet_semantic_executions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  semanticSessionId: uuid('semantic_session_id')
+    .notNull()
+    .references(() => spreadsheetSemanticSessionsTable.id, { onDelete: 'cascade' }),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  workIdentity: text('work_identity').notNull(),
+  executionNumber: integer('execution_number').notNull(),
+  sourceContentHash: text('source_content_hash').notNull(),
+  sourceObjectPath: text('source_object_path').notNull(),
+  schemaVersion: text('schema_version').notNull(),
+  status: text('status').notNull().default('ready'),
+  stage: text('stage').notNull().default('workbook_overview'),
+  continuationToken: text('continuation_token').notNull(),
+  requestPayload: jsonb('request_payload').notNull().default({}),
+  contextHistory: jsonb('context_history').notNull().default('[]'),
+  providerCalls: integer('provider_calls').notNull().default(0),
+  currentPlan: jsonb('current_plan'),
+  claimToken: text('claim_token'),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('spreadsheet_semantic_execution_number_unique').on(table.semanticSessionId, table.executionNumber),
+  index('spreadsheet_semantic_execution_current_idx').on(table.semanticSessionId, table.status, table.leaseExpiresAt),
+]);
+
+export type SpreadsheetSemanticExecution = typeof spreadsheetSemanticExecutionsTable.$inferSelect;
+
+/**
  * Immutable privacy-safe provider call telemetry. The semantic session keeps a
  * compact copy for recovery while this table retains the audit-grade history.
  */
@@ -324,8 +370,13 @@ export const spreadsheetSemanticProviderAttemptsTable = pgTable('spreadsheet_sem
   semanticSessionId: uuid('semantic_session_id')
     .notNull()
     .references(() => spreadsheetSemanticSessionsTable.id, { onDelete: 'cascade' }),
+  executionId: uuid('execution_id')
+    .references(() => spreadsheetSemanticExecutionsTable.id, { onDelete: 'restrict' }),
   workIdentity: text('work_identity').notNull(),
+  // Globally monotonic within the logical review. It never resets when a fresh
+  // execution epoch begins, so old rows remain immutable and unambiguous.
   attemptNumber: integer('attempt_number').notNull(),
+  executionAttemptNumber: integer('execution_attempt_number'),
   telemetryVersion: text('telemetry_version').notNull(),
   routeClass: text('route_class').notNull(),
   // Defaults make this an additive schema push for historical attempt rows;

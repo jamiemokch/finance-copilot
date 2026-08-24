@@ -15,3 +15,4 @@
 - [Effective saved spreadsheet reviews](effective-saved-spreadsheet-reviews.md) — saved mapping choices return deterministic local re-analysis; clients adopt it only after the durable save succeeds
 - [AI-first spreadsheet semantics](ai-first-spreadsheet-semantics.md) — semantic meaning must come from a validated AI contract; local code remains structural and safety-focused
 - [Replit spreadsheet provider compatibility](replit-spreadsheet-provider.md) — verified alias-only strict policy with a nested wire envelope for managed-route constraints
+- [Spreadsheet semantic execution epochs](spreadsheet-semantic-execution-epochs.md) — automatic retries must be fresh fenced executions, not resumed exhausted sessions

@@ -10,7 +10,7 @@ import {
 import {
   evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
   inboxItemsTable, transactionsTable, profilesTable, spreadsheetRowOutcomesTable, spreadsheetSemanticSessionsTable,
-  spreadsheetSemanticProviderAttemptsTable,
+  spreadsheetSemanticProviderAttemptsTable, spreadsheetSemanticExecutionsTable,
 } from "@workspace/db/schema";
 import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
@@ -29,6 +29,7 @@ const router = Router();
 const storageService = new ObjectStorageService();
 const PROCESSING_LEASE_MS = 10 * 60 * 1000;
 const SEMANTIC_SESSION_LEASE_MS = 2 * 60 * 1000;
+const MAX_AUTOMATIC_RETRY_EXECUTIONS = 2;
 const SPREADSHEET_SOURCE_ROW_CONFLICT_CODE = "source_row_conflict";
 const SPREADSHEET_IMPORT_FAILURE_CODE = "spreadsheet_import_failed";
 const spreadsheetDetectionModeInput = z.object({
@@ -53,6 +54,9 @@ class SpreadsheetSourceRowConflictError extends Error {
 }
 
 function semanticSessionForAI(record: typeof spreadsheetSemanticSessionsTable.$inferSelect): SpreadsheetSemanticSession {
+  const providerAttempts = Array.isArray(record.providerAttempts)
+    ? record.providerAttempts as SpreadsheetSemanticSession["providerAttempts"]
+    : [];
   return {
     schemaVersion: record.schemaVersion as SpreadsheetSemanticSession["schemaVersion"],
     contentHash: record.sourceContentHash,
@@ -61,11 +65,62 @@ function semanticSessionForAI(record: typeof spreadsheetSemanticSessionsTable.$i
     payload: record.requestPayload,
     contextHistory: Array.isArray(record.contextHistory) ? record.contextHistory as SpreadsheetSemanticSession["contextHistory"] : [],
     providerCalls: record.providerCalls,
-    providerAttempts: Array.isArray(record.providerAttempts) ? record.providerAttempts as SpreadsheetSemanticSession["providerAttempts"] : [],
+    providerAttempts,
     currentPlan: spreadsheetImportPlanSchema.safeParse(record.currentPlan).success
       ? spreadsheetImportPlanSchema.parse(record.currentPlan)
       : null,
+    executionId: record.currentExecutionId,
+    executionNumber: record.executionNumber,
+    attemptOffset: providerAttempts.length,
   };
+}
+
+function semanticExecutionToken(sourceContentHash: string, executionNumber: number) {
+  return createHash("sha256")
+    .update(`${sourceContentHash}:spreadsheet-semantic.v2:execution:${executionNumber}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+async function ensureSemanticExecution(
+  record: typeof spreadsheetSemanticSessionsTable.$inferSelect,
+) {
+  if (record.currentExecutionId) return record;
+  const executionNumber = Math.max(1, record.executionNumber);
+  const [created] = await db.insert(spreadsheetSemanticExecutionsTable).values({
+    semanticSessionId: record.id,
+    profileId: record.profileId,
+    evidenceId: record.evidenceId,
+    workIdentity: record.workIdentity,
+    executionNumber,
+    sourceContentHash: record.sourceContentHash,
+    sourceObjectPath: record.sourceObjectPath,
+    schemaVersion: record.schemaVersion,
+    status: record.status,
+    stage: record.stage,
+    continuationToken: record.continuationToken,
+    requestPayload: record.requestPayload,
+    contextHistory: record.contextHistory,
+    providerCalls: record.providerCalls,
+    currentPlan: record.currentPlan,
+    claimToken: record.claimToken,
+    leaseExpiresAt: record.leaseExpiresAt,
+    completedAt: ["complete", "incomplete", "invalidated"].includes(record.status) ? new Date() : null,
+  }).onConflictDoNothing().returning();
+  const execution = created ?? (await db.select().from(spreadsheetSemanticExecutionsTable).where(and(
+    eq(spreadsheetSemanticExecutionsTable.semanticSessionId, record.id),
+    eq(spreadsheetSemanticExecutionsTable.executionNumber, executionNumber),
+  )).limit(1))[0];
+  if (!execution) throw new Error("semantic_execution_missing");
+  const [bound] = await db.update(spreadsheetSemanticSessionsTable).set({
+    currentExecutionId: execution.id,
+    updatedAt: new Date(),
+  }).where(and(
+    eq(spreadsheetSemanticSessionsTable.id, record.id),
+    eq(spreadsheetSemanticSessionsTable.workIdentity, record.workIdentity),
+    isNull(spreadsheetSemanticSessionsTable.currentExecutionId),
+  )).returning();
+  return bound ?? record;
 }
 
 const mappingSchemaInput = z.object({
@@ -1122,7 +1177,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       schemaVersion: "spreadsheet-semantic.v2",
       status: "ready",
       stage: "workbook_overview",
-      continuationToken: createHash("sha256").update(`${sourceContentHash}:spreadsheet-semantic.v2`).digest("hex").slice(0, 32),
+      continuationToken: semanticExecutionToken(sourceContentHash, 1),
       requestPayload: {},
       contextHistory: [],
       providerCalls: 0,
@@ -1134,6 +1189,12 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       eq(spreadsheetSemanticSessionsTable.profileId, profile.id),
     ));
     if (!semanticRecord) throw new Error("semantic_session_missing");
+    // Legacy non-ready sessions need an archival execution before a transition
+    // can replace their active state. A brand-new ready session creates its
+    // first execution only after it has successfully claimed the review.
+    if (!semanticRecord.currentExecutionId && semanticRecord.status !== "ready") {
+      semanticRecord = await ensureSemanticExecution(semanticRecord);
+    }
     let semanticClaimToken: string | null = null;
     let reclaimed = false;
     const sourceChanged = semanticRecord.sourceContentHash !== sourceContentHash
@@ -1141,33 +1202,55 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       || semanticRecord.schemaVersion !== "spreadsheet-semantic.v2";
     if (sourceChanged) {
       const resetToken = randomUUID();
-      const [reset] = await db.update(spreadsheetSemanticSessionsTable).set({
-        sourceContentHash,
-        sourceObjectPath: evidenceItem.objectPath,
-        schemaVersion: "spreadsheet-semantic.v2",
-        status: "working",
-        stage: "workbook_overview",
-        continuationToken: createHash("sha256").update(`${sourceContentHash}:spreadsheet-semantic.v2`).digest("hex").slice(0, 32),
-        requestPayload: {},
-        contextHistory: [],
-        providerCalls: 0,
-        providerAttempts: [],
-        currentPlan: null,
-        workIdentity: randomUUID(),
-        claimToken: resetToken,
-        leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
-        updatedAt: nowForSession,
-      }).where(and(
-        eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
-        eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
-        or(
-          inArray(spreadsheetSemanticSessionsTable.status, ["ready", "complete", "incomplete", "invalidated"]),
-          and(eq(spreadsheetSemanticSessionsTable.status, "working"), or(
-            isNull(spreadsheetSemanticSessionsTable.leaseExpiresAt),
-            lt(spreadsheetSemanticSessionsTable.leaseExpiresAt, nowForSession),
-          )),
-        ),
-      )).returning();
+      const nextExecutionNumber = semanticRecord.executionNumber + 1;
+      const reset = await db.transaction(async (tx) => {
+        const [resetSession] = await tx.update(spreadsheetSemanticSessionsTable).set({
+          sourceContentHash,
+          sourceObjectPath: evidenceItem.objectPath,
+          schemaVersion: "spreadsheet-semantic.v2",
+          status: "working",
+          stage: "workbook_overview",
+          continuationToken: semanticExecutionToken(sourceContentHash, nextExecutionNumber),
+          requestPayload: {},
+          contextHistory: [],
+          providerCalls: 0,
+          providerAttempts: [],
+          currentPlan: null,
+          workIdentity: randomUUID(),
+          currentExecutionId: null,
+          executionNumber: nextExecutionNumber,
+          automaticRetryCount: 0,
+          claimToken: resetToken,
+          leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
+          updatedAt: nowForSession,
+        }).where(and(
+          eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+          eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+          or(
+            inArray(spreadsheetSemanticSessionsTable.status, ["ready", "complete", "incomplete", "invalidated"]),
+            and(eq(spreadsheetSemanticSessionsTable.status, "working"), or(
+              isNull(spreadsheetSemanticSessionsTable.leaseExpiresAt),
+              lt(spreadsheetSemanticSessionsTable.leaseExpiresAt, nowForSession),
+            )),
+          ),
+        )).returning();
+        if (!resetSession) return null;
+        if (semanticRecord.currentExecutionId) {
+          await tx.update(spreadsheetSemanticExecutionsTable).set({
+            status: "invalidated",
+            claimToken: null,
+            leaseExpiresAt: null,
+            completedAt: nowForSession,
+            updatedAt: nowForSession,
+          }).where(and(
+            eq(spreadsheetSemanticExecutionsTable.id, semanticRecord.currentExecutionId),
+            eq(spreadsheetSemanticExecutionsTable.semanticSessionId, semanticRecord.id),
+            eq(spreadsheetSemanticExecutionsTable.workIdentity, semanticRecord.workIdentity),
+            inArray(spreadsheetSemanticExecutionsTable.status, ["ready", "working"]),
+          ));
+        }
+        return resetSession;
+      });
       if (!reset) {
         await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_session_conflict", {
           reason: "source_changed_while_active",
@@ -1203,12 +1286,35 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       semanticClaimToken = claimToken;
       reclaimed = true;
     } else if (detectionMode === "retry_automatic" && semanticRecord.status === "incomplete") {
+      if (semanticRecord.automaticRetryCount >= MAX_AUTOMATIC_RETRY_EXECUTIONS) {
+        await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_retry_limit_reached", {
+          semanticSessionId: semanticRecord.id,
+          semanticWorkIdentity: semanticRecord.workIdentity,
+          automaticRetryCount: semanticRecord.automaticRetryCount,
+          maximumAutomaticRetries: MAX_AUTOMATIC_RETRY_EXECUTIONS,
+          sourceContentHash,
+          sourceObjectPath: evidenceItem.objectPath,
+        });
+        res.status(409).json({
+          error: "Automatic review has reached its safe retry limit for this unchanged workbook. Start manual recovery to choose sheets and columns yourself.",
+          code: "automatic_retry_limit_reached",
+          recoveryState: "manual_recovery_required",
+        });
+        return;
+      }
       const claimToken = randomUUID();
-      const payloadStage = (semanticRecord.requestPayload as { stage?: unknown })?.stage;
+      const nextExecutionNumber = semanticRecord.executionNumber + 1;
       const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
         status: "working",
-        stage: payloadStage === "requested_context" ? "requested_context" : "workbook_overview",
+        stage: "workbook_overview",
+        continuationToken: semanticExecutionToken(sourceContentHash, nextExecutionNumber),
+        requestPayload: {},
+        contextHistory: [],
+        providerCalls: 0,
         currentPlan: null,
+        currentExecutionId: null,
+        executionNumber: nextExecutionNumber,
+        automaticRetryCount: semanticRecord.automaticRetryCount + 1,
         claimToken,
         leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
         updatedAt: nowForSession,
@@ -1222,7 +1328,65 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       }
       semanticRecord = claimedSession;
       semanticClaimToken = claimToken;
-    } else if (semanticRecord.status === "ready" || semanticRecord.status === "invalidated") {
+    } else if (semanticRecord.status === "invalidated") {
+      const claimToken = randomUUID();
+      const nextExecutionNumber = semanticRecord.executionNumber + 1;
+      const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
+        status: "working",
+        stage: "workbook_overview",
+        continuationToken: semanticExecutionToken(sourceContentHash, nextExecutionNumber),
+        requestPayload: {},
+        contextHistory: [],
+        providerCalls: 0,
+        currentPlan: null,
+        currentExecutionId: null,
+        executionNumber: nextExecutionNumber,
+        claimToken,
+        leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
+        updatedAt: nowForSession,
+      }).where(and(
+        eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+        eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+        eq(spreadsheetSemanticSessionsTable.status, "invalidated"),
+      )).returning();
+      if (!claimedSession) {
+        await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_session_conflict", {
+          reason: "invalidated_claim_race",
+          semanticSessionId: semanticRecord.id,
+          semanticWorkIdentity: semanticRecord.workIdentity,
+        });
+        res.status(409).json({ error: "This spreadsheet review changed. Reload the workbook review." }); return;
+      }
+      semanticRecord = claimedSession;
+      semanticClaimToken = claimToken;
+    } else if (semanticRecord.status === "ready" && semanticRecord.currentExecutionId) {
+      const claimToken = randomUUID();
+      const nextExecutionNumber = semanticRecord.executionNumber + 1;
+      const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
+        status: "working",
+        stage: "workbook_overview",
+        continuationToken: semanticExecutionToken(sourceContentHash, nextExecutionNumber),
+        requestPayload: {},
+        contextHistory: [],
+        providerCalls: 0,
+        currentPlan: null,
+        currentExecutionId: null,
+        executionNumber: nextExecutionNumber,
+        claimToken,
+        leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
+        updatedAt: nowForSession,
+      }).where(and(
+        eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+        eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+        eq(spreadsheetSemanticSessionsTable.status, "ready"),
+        eq(spreadsheetSemanticSessionsTable.currentExecutionId, semanticRecord.currentExecutionId),
+      )).returning();
+      if (!claimedSession) {
+        res.status(409).json({ error: "This spreadsheet review changed. Reload the workbook review." }); return;
+      }
+      semanticRecord = claimedSession;
+      semanticClaimToken = claimToken;
+    } else if (semanticRecord.status === "ready") {
       const claimToken = randomUUID();
       const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
         status: "working",
@@ -1245,6 +1409,25 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       semanticRecord = claimedSession;
       semanticClaimToken = claimToken;
     }
+    semanticRecord = await ensureSemanticExecution(semanticRecord);
+    if (semanticClaimToken) {
+      const [execution] = await db.update(spreadsheetSemanticExecutionsTable).set({
+        status: "working",
+        stage: semanticRecord.stage,
+        claimToken: semanticClaimToken,
+        leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
+        updatedAt: nowForSession,
+      }).where(and(
+        eq(spreadsheetSemanticExecutionsTable.id, semanticRecord.currentExecutionId!),
+        eq(spreadsheetSemanticExecutionsTable.semanticSessionId, semanticRecord.id),
+        eq(spreadsheetSemanticExecutionsTable.workIdentity, semanticRecord.workIdentity),
+        inArray(spreadsheetSemanticExecutionsTable.status, ["ready", "working"]),
+      )).returning();
+      if (!execution) {
+        res.status(409).json({ error: "This spreadsheet semantic execution was reclaimed. Reload the workbook review." });
+        return;
+      }
+    }
     if (semanticClaimToken) {
       await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, reclaimed ? "spreadsheet_semantic_session_reclaimed" : "spreadsheet_semantic_session_claimed", {
         semanticSessionId: semanticRecord.id,
@@ -1257,23 +1440,62 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     const persistSemanticSession = async (session: SpreadsheetSemanticSession) => {
       if (!semanticClaimToken) return;
       const status = session.stage === "complete" ? "complete" : session.stage === "incomplete" ? "incomplete" : "working";
-      const [checkpoint] = await db.update(spreadsheetSemanticSessionsTable).set({
-        status,
-        stage: session.stage,
-        continuationToken: session.continuationToken,
-        requestPayload: session.payload as Record<string, unknown>,
-        contextHistory: session.contextHistory,
-        providerCalls: session.providerCalls,
-        providerAttempts: session.providerAttempts,
-        currentPlan: session.currentPlan,
-        leaseExpiresAt: status === "working" ? new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS) : null,
-        updatedAt: new Date(),
-      }).where(and(
-        eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
-        eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
-        eq(spreadsheetSemanticSessionsTable.claimToken, semanticClaimToken),
-        eq(spreadsheetSemanticSessionsTable.status, "working"),
-      )).returning();
+      let checkpoint: typeof spreadsheetSemanticSessionsTable.$inferSelect;
+      try {
+        checkpoint = await db.transaction(async (tx) => {
+          const now = new Date();
+          const [execution] = await tx.update(spreadsheetSemanticExecutionsTable).set({
+            status,
+            stage: session.stage,
+            continuationToken: session.continuationToken,
+            requestPayload: session.payload as Record<string, unknown>,
+            contextHistory: session.contextHistory,
+            providerCalls: session.providerCalls,
+            currentPlan: session.currentPlan,
+            leaseExpiresAt: status === "working" ? new Date(now.getTime() + SEMANTIC_SESSION_LEASE_MS) : null,
+            completedAt: status === "working" ? null : now,
+            updatedAt: now,
+          }).where(and(
+            eq(spreadsheetSemanticExecutionsTable.id, semanticRecord.currentExecutionId!),
+            eq(spreadsheetSemanticExecutionsTable.semanticSessionId, semanticRecord.id),
+            eq(spreadsheetSemanticExecutionsTable.workIdentity, semanticRecord.workIdentity),
+            eq(spreadsheetSemanticExecutionsTable.claimToken, semanticClaimToken),
+            eq(spreadsheetSemanticExecutionsTable.status, "working"),
+          )).returning();
+          if (!execution) throw new Error("semantic_execution_fenced");
+          const [sessionCheckpoint] = await tx.update(spreadsheetSemanticSessionsTable).set({
+            status,
+            stage: session.stage,
+            continuationToken: session.continuationToken,
+            requestPayload: session.payload as Record<string, unknown>,
+            contextHistory: session.contextHistory,
+            providerCalls: session.providerCalls,
+            providerAttempts: session.providerAttempts,
+            currentPlan: session.currentPlan,
+            leaseExpiresAt: status === "working" ? new Date(now.getTime() + SEMANTIC_SESSION_LEASE_MS) : null,
+            updatedAt: now,
+          }).where(and(
+            eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+            eq(spreadsheetSemanticSessionsTable.currentExecutionId, semanticRecord.currentExecutionId!),
+            eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+            eq(spreadsheetSemanticSessionsTable.claimToken, semanticClaimToken),
+            eq(spreadsheetSemanticSessionsTable.status, "working"),
+          )).returning();
+          if (!sessionCheckpoint) throw new Error("semantic_session_fenced");
+          return sessionCheckpoint;
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message !== "semantic_execution_fenced" && message !== "semantic_session_fenced") throw error;
+        await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_session_fenced", {
+          semanticSessionId: semanticRecord.id,
+          semanticWorkIdentity: semanticRecord.workIdentity,
+          semanticExecutionId: semanticRecord.currentExecutionId,
+          attemptedClaimToken: semanticClaimToken,
+          fence: message,
+        });
+        throw new Error("semantic_session_fenced");
+      }
       if (!checkpoint) {
         await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_session_fenced", {
           semanticSessionId: semanticRecord.id,
@@ -1293,29 +1515,47 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         });
       }
     };
-    const persistProviderAttempts = async (attempts: NonNullable<SpreadsheetSemanticSession["providerAttempts"]>) => {
+    const persistProviderAttempts = async (
+      attempts: NonNullable<SpreadsheetSemanticSession["providerAttempts"]>,
+      executionProviderCalls: number,
+    ) => {
       if (!semanticClaimToken) return;
       const attempt = attempts.at(-1);
       if (!attempt) return;
       await db.transaction(async (tx) => {
         const [checkpoint] = await tx.update(spreadsheetSemanticSessionsTable).set({
-          providerCalls: Math.max(semanticRecord.providerCalls, attempt.attemptNumber),
+          providerCalls: executionProviderCalls,
           providerAttempts: attempts,
           leaseExpiresAt: new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS),
           updatedAt: new Date(),
         }).where(and(
           eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+          eq(spreadsheetSemanticSessionsTable.currentExecutionId, semanticRecord.currentExecutionId!),
           eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
           eq(spreadsheetSemanticSessionsTable.claimToken, semanticClaimToken),
           eq(spreadsheetSemanticSessionsTable.status, "working"),
         )).returning();
         if (!checkpoint) throw new Error("semantic_session_fenced");
+        const [execution] = await tx.update(spreadsheetSemanticExecutionsTable).set({
+          providerCalls: executionProviderCalls,
+          leaseExpiresAt: new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(spreadsheetSemanticExecutionsTable.id, semanticRecord.currentExecutionId!),
+          eq(spreadsheetSemanticExecutionsTable.semanticSessionId, semanticRecord.id),
+          eq(spreadsheetSemanticExecutionsTable.workIdentity, semanticRecord.workIdentity),
+          eq(spreadsheetSemanticExecutionsTable.claimToken, semanticClaimToken),
+          eq(spreadsheetSemanticExecutionsTable.status, "working"),
+        )).returning();
+        if (!execution) throw new Error("semantic_execution_fenced");
         await tx.insert(spreadsheetSemanticProviderAttemptsTable).values({
           profileId: profile.id,
           evidenceId: evidenceItem.id,
           semanticSessionId: checkpoint.id,
+          executionId: checkpoint.currentExecutionId,
           workIdentity: checkpoint.workIdentity,
           attemptNumber: attempt.attemptNumber,
+          executionAttemptNumber: executionProviderCalls,
           telemetryVersion: attempt.telemetryVersion,
           routeClass: attempt.routeClass,
           requestedModel: attempt.requestedModel,
@@ -1338,6 +1578,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
           details: {
             semanticSessionId: checkpoint.id,
             semanticWorkIdentity: checkpoint.workIdentity,
+            semanticExecutionId: checkpoint.currentExecutionId,
+            semanticExecutionNumber: checkpoint.executionNumber,
+            executionAttemptNumber: executionProviderCalls,
             ...attempt,
           },
         });

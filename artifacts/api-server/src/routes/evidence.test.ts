@@ -16,6 +16,7 @@ import {
   profilesTable,
   sessionsTable,
   spreadsheetRowOutcomesTable,
+  spreadsheetSemanticExecutionsTable,
   spreadsheetSemanticProviderAttemptsTable,
   spreadsheetSemanticSessionsTable,
   transactionsTable,
@@ -1098,6 +1099,13 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
        assert.equal(providerAttempts.every((attempt) => attempt.resolvedModel === 'gpt-5.4-mini'), true);
        assert.equal(providerAttempts.every((attempt) => attempt.model === attempt.resolvedModel), true);
        assert.equal(providerAttempts.every((attempt) => attempt.failurePhase === null), true);
+        assert.equal(providerAttempts.every((attempt) => attempt.executionId === reclaimedSession.currentExecutionId), true);
+        const [reclaimedExecution] = await db.select().from(spreadsheetSemanticExecutionsTable).where(
+          eq(spreadsheetSemanticExecutionsTable.id, reclaimedSession.currentExecutionId!),
+        );
+        assert.equal(reclaimedExecution.semanticSessionId, reclaimedSession.id);
+        assert.equal(reclaimedExecution.status, 'complete');
+        assert.equal(reclaimedExecution.providerCalls, 1);
       const reclaimedPlan = JSON.stringify(reclaimedSession.currentPlan);
 
       releaseFirstProvider?.();
@@ -1121,6 +1129,74 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       assert.ok(eventTypes.includes('spreadsheet_semantic_session_reclaimed'));
       assert.ok(eventTypes.includes('spreadsheet_semantic_session_fenced'));
       assert.ok(eventTypes.includes('spreadsheet_semantic_session_completed'));
+
+       const makeCurrentExecutionIncomplete = async () => {
+         const [current] = await db.select().from(spreadsheetSemanticSessionsTable)
+           .where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+         await db.transaction(async (tx) => {
+           await tx.update(spreadsheetSemanticExecutionsTable).set({
+             status: 'incomplete',
+             stage: 'incomplete',
+             providerCalls: 6,
+             currentPlan: null,
+             completedAt: new Date(),
+             updatedAt: new Date(),
+           }).where(eq(spreadsheetSemanticExecutionsTable.id, current.currentExecutionId!));
+           await tx.update(spreadsheetSemanticSessionsTable).set({
+             status: 'incomplete',
+             stage: 'incomplete',
+             providerCalls: 6,
+             currentPlan: null,
+             updatedAt: new Date(),
+           }).where(eq(spreadsheetSemanticSessionsTable.id, current.id));
+         });
+         return current;
+       };
+
+       const beforeFirstRetry = await makeCurrentExecutionIncomplete();
+       const firstRetry = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, {
+         method: 'POST', body: JSON.stringify({ mode: 'retry_automatic' }),
+       });
+       assert.equal(firstRetry.status, 200, JSON.stringify(firstRetry.body));
+       const [afterFirstRetry] = await db.select().from(spreadsheetSemanticSessionsTable)
+         .where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+       assert.equal(afterFirstRetry.workIdentity, beforeFirstRetry.workIdentity, 'an unchanged workbook keeps its stable review identity');
+       assert.equal(afterFirstRetry.automaticRetryCount, 1);
+       assert.notEqual(afterFirstRetry.currentExecutionId, beforeFirstRetry.currentExecutionId, 'an explicit retry creates a new execution epoch');
+       assert.equal(afterFirstRetry.providerCalls, 1, 'a fresh execution starts with its own provider budget');
+       const executionsAfterFirstRetry = await db.select().from(spreadsheetSemanticExecutionsTable).where(
+         eq(spreadsheetSemanticExecutionsTable.semanticSessionId, activeSession.id),
+       );
+       assert.equal(executionsAfterFirstRetry.length, 2);
+       const originalExecution = executionsAfterFirstRetry.find((execution) => execution.id === beforeFirstRetry.currentExecutionId);
+       assert.equal(originalExecution?.status, 'incomplete', 'the previous execution remains terminal history');
+
+       await makeCurrentExecutionIncomplete();
+       const secondRetry = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, {
+         method: 'POST', body: JSON.stringify({ mode: 'retry_automatic' }),
+       });
+       assert.equal(secondRetry.status, 200, JSON.stringify(secondRetry.body));
+       const [afterSecondRetry] = await db.select().from(spreadsheetSemanticSessionsTable)
+         .where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+       assert.equal(afterSecondRetry.automaticRetryCount, 2);
+
+       await makeCurrentExecutionIncomplete();
+       const providerCallsBeforeCap = providerCalls;
+       const cappedRetry = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, {
+         method: 'POST', body: JSON.stringify({ mode: 'retry_automatic' }),
+       });
+       assert.equal(cappedRetry.status, 409);
+       assert.equal(cappedRetry.body.code, 'automatic_retry_limit_reached');
+       assert.equal(cappedRetry.body.recoveryState, 'manual_recovery_required');
+       assert.equal(providerCalls, providerCallsBeforeCap, 'the capped retry never contacts the provider');
+       const executionsAfterCap = await db.select().from(spreadsheetSemanticExecutionsTable).where(
+         eq(spreadsheetSemanticExecutionsTable.semanticSessionId, activeSession.id),
+       );
+       assert.equal(executionsAfterCap.length, 3, 'the capped retry does not create a fourth execution');
+       const raceTransactions = await db.select().from(transactionsTable).where(
+         eq(transactionsTable.evidenceId, raceEvidenceId),
+       );
+       assert.equal(raceTransactions.length, 0, 'failed automatic retries never write financial transactions');
     } finally {
       releaseFirstProvider?.();
       invalidateSpreadsheetAICache();

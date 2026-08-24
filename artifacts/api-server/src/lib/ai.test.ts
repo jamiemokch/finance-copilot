@@ -776,13 +776,72 @@ test('a failed semantic session retries to success without replaying prior provi
     session: {
       ...failedSession,
       stage: 'workbook_overview',
+      payload: {},
+      contextHistory: [],
+      providerCalls: 0,
       currentPlan: null,
+      executionId: '00000000-0000-4000-8000-000000000002',
+      executionNumber: 2,
+      attemptOffset: failedSession.providerAttempts.length,
     },
   });
   assert.equal(retried.status, 'success');
   assert.equal(retryCalls, 1, 'the explicit retry issues exactly one new provider request');
-  assert.equal(retried.providerCalls, 3, 'the durable session retains its real prior provider work count');
+  assert.equal(retried.providerCalls, 1, 'the new execution receives a fresh provider-call budget');
   assert.equal(retried.providerAttempts?.length, 3, 'prior attempts are retained rather than duplicated');
+  assert.equal(retried.providerAttempts?.at(-1)?.attemptNumber, 3, 'attempt ordinals remain globally auditable across executions');
+});
+
+test('a five-call execution permits exactly one remaining provider request and never starts repair', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Bounded sale,11\n'), 'text/csv', 'one-call-left.csv');
+  const token = 'one-call-left-token';
+  const historicalAttempts: SpreadsheetProviderAttempt[] = Array.from({ length: 5 }, (_, index) => ({
+    telemetryVersion: 'spreadsheet-provider-attempt.v1',
+    attemptNumber: index + 1,
+    routeClass: 'replit_ai_integrations',
+    requestedModel: SPREADSHEET_PROVIDER_MODEL,
+    resolvedModel: SPREADSHEET_PROVIDER_MODEL,
+    model: SPREADSHEET_PROVIDER_MODEL,
+    responseMode: 'json_schema',
+    startedAt: '2026-08-24T12:48:28.303Z',
+    durationMs: 10,
+    outcomeCategory: 'success',
+    safeStatus: 'ok',
+    statusCode: null,
+    retryable: false,
+    failurePhase: null,
+  }));
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: JSON.stringify({ invalid: true }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    retryDelayMs: 0,
+    session: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      contentHash: workbook.contentHash ?? null,
+      stage: 'workbook_overview',
+      continuationToken: token,
+      payload: { continuationToken: token, stage: 'workbook_overview' },
+      contextHistory: [],
+      providerCalls: 5,
+      providerAttempts: historicalAttempts,
+      currentPlan: null,
+      executionId: '00000000-0000-4000-8000-000000000001',
+      executionNumber: 1,
+      attemptOffset: 0,
+    },
+  });
+  assert.equal(calls, 1, 'the final allowance cannot issue a repair or retry request');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 6);
+  assert.equal(result.providerAttempts?.length, 6);
+  assert.equal(result.providerAttempts?.at(-1)?.attemptNumber, 6);
 });
 
 test('an explicit retry replaces inherited object mode with alias-only strict policy while preserving historical attempts', async () => {

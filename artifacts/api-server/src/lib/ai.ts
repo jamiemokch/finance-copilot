@@ -105,6 +105,11 @@ export type SpreadsheetSemanticSession = {
   providerCalls: number;
   providerAttempts: SpreadsheetProviderAttempt[];
   currentPlan: SpreadsheetImportPlan | null;
+  // Calls are bounded within this active execution. Attempts remain cumulative
+  // so their immutable audit ordinal never resets across user retries.
+  executionId?: string | null;
+  executionNumber?: number;
+  attemptOffset?: number;
 };
 
 export function invalidateSpreadsheetAICache(contentHash?: string) {
@@ -467,12 +472,12 @@ export async function providerCallWithTimeout(
         continue;
       }
       const providerFailure = new SpreadsheetProviderFailure(failure.category);
-      providerFailure.providerCalls = (options.attemptOffset ?? 0) + providerCalls;
+      providerFailure.providerCalls = providerCalls;
       throw providerFailure;
     }
   }
   const failure = lastError instanceof Error ? lastError : new Error('provider failed');
-  (failure as Error & { providerCalls?: number }).providerCalls = (options.attemptOffset ?? 0) + providerCalls;
+  (failure as Error & { providerCalls?: number }).providerCalls = providerCalls;
   throw failure;
 }
 
@@ -1037,7 +1042,10 @@ export async function analyseSpreadsheetWithAI(
     session?: SpreadsheetSemanticSession | null;
     resetProviderState?: boolean;
     persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
-    persistProviderAttempts?: (attempts: SpreadsheetProviderAttempt[]) => Promise<void>;
+    persistProviderAttempts?: (
+      attempts: SpreadsheetProviderAttempt[],
+      executionProviderCalls: number,
+    ) => Promise<void>;
     // A durable lease holder must never inherit a stale worker's in-process
     // promise after its database claim has been reclaimed.
     inFlightKey?: string;
@@ -1135,7 +1143,10 @@ export async function analyseSpreadsheetWithAI(
     }
   }
   const overview = buildSpreadsheetWorkbookOverview(workbook);
-  const cacheKey = `${workbook.contentHash ?? 'no-hash'}:${SPREADSHEET_SEMANTIC_SCHEMA_VERSION}:${JSON.stringify(SPREADSHEET_SEMANTIC_LIMITS)}`;
+  const executionCacheScope = testOptions?.session
+    ? `${testOptions.session.executionId ?? "legacy"}:${testOptions.session.executionNumber ?? 0}`
+    : "stateless";
+  const cacheKey = `${workbook.contentHash ?? 'no-hash'}:${SPREADSHEET_SEMANTIC_SCHEMA_VERSION}:${JSON.stringify(SPREADSHEET_SEMANTIC_LIMITS)}:${executionCacheScope}`;
   const cached = spreadsheetAICache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return { ...cached.envelope, providerCalls: 0 };
@@ -1156,8 +1167,12 @@ export async function analyseSpreadsheetWithAI(
       && testOptions.session.contentHash === (workbook.contentHash ?? null)
       && (testOptions.session.stage === 'workbook_overview' || testOptions.session.stage === 'requested_context')
       && hasResumablePayload;
-    let providerCalls = resumable ? testOptions!.session!.providerCalls : 0;
-    let providerAttempts = resumable ? testOptions!.session!.providerAttempts ?? [] : [];
+    const hasSession = Boolean(testOptions?.session);
+    let providerCalls = hasSession ? testOptions!.session!.providerCalls : 0;
+    let providerAttempts = hasSession ? testOptions!.session!.providerAttempts ?? [] : [];
+    const attemptOffset = hasSession
+      ? testOptions!.session!.attemptOffset ?? Math.max(0, providerAttempts.length - providerCalls)
+      : 0;
     // Every new provider call begins with the verified strict policy. Historic
     // attempts remain audit history only; they never select model or object mode.
     let resolvedModel: string = providerPolicy.resolvedModel;
@@ -1199,11 +1214,12 @@ export async function analyseSpreadsheetWithAI(
             reason: 'operational_limit', detail: 'The hierarchy reached the maximum provider-call limit.', manualRecoveryRequired: true,
           }, providerCalls, token, providerAttempts);
         }
+        const remainingProviderCalls = SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls - providerCalls;
         const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(payload), {
           timeoutMs: testOptions?.timeoutMs,
           retryDelayMs: testOptions?.retryDelayMs,
-          maxProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage,
-          attemptOffset: providerCalls,
+          maxProviderCalls: Math.min(SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage, remainingProviderCalls),
+          attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
           classifyResponse: (content) => responseContractFailure(content, workbook)
@@ -1215,7 +1231,7 @@ export async function analyseSpreadsheetWithAI(
             : null,
           onAttempt: async (attempt) => {
             providerAttempts = [...providerAttempts, attempt];
-            await testOptions?.persistProviderAttempts?.(providerAttempts);
+            await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
           },
         });
         providerCalls += result.providerCalls;
@@ -1234,7 +1250,7 @@ export async function analyseSpreadsheetWithAI(
             timeoutMs: testOptions?.timeoutMs,
             retryDelayMs: testOptions?.retryDelayMs,
             maxProviderCalls: 1,
-            attemptOffset: providerCalls,
+            attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
             classifyResponse: (content) => responseContractFailure(content, workbook)
@@ -1246,7 +1262,7 @@ export async function analyseSpreadsheetWithAI(
               : null,
             onAttempt: async (attempt) => {
               providerAttempts = [...providerAttempts, attempt];
-              await testOptions?.persistProviderAttempts?.(providerAttempts);
+              await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
             },
           });
           providerCalls += repaired.providerCalls;
@@ -1303,8 +1319,8 @@ export async function analyseSpreadsheetWithAI(
         reason: 'operational_limit', detail: 'The maximum hierarchy depth was reached.', manualRecoveryRequired: true,
       }, providerCalls, token, providerAttempts);
     } catch (error) {
-      const calls = (error as { providerCalls?: number }).providerCalls ?? providerCalls;
-      providerCalls = calls;
+      const calls = (error as { providerCalls?: number }).providerCalls;
+      if (typeof calls === 'number') providerCalls += calls;
       const message = error instanceof Error ? error.message : 'provider_error';
       const failureCategory = error instanceof SpreadsheetProviderFailure
         ? error.category
@@ -1327,7 +1343,7 @@ export async function analyseSpreadsheetWithAI(
             : 'provider_unavailable';
       const outcome = incomplete('failed', reason, {
         reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
-      }, calls, token, providerAttempts, failureCategory);
+      }, providerCalls, token, providerAttempts, failureCategory);
       const persistedPlan = spreadsheetImportPlanSchema.safeParse(outcome.semanticPlan);
       await checkpoint('incomplete', persistedPlan.success ? persistedPlan.data : null);
       return outcome;
