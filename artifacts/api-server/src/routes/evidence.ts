@@ -72,6 +72,7 @@ const confirmedSpreadsheetInput = z.object({
   confirmation: z.literal(true),
   selectedSheetIds: z.array(z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/)).min(1).max(100),
   sheetMappings: z.record(mappingSchemaInput),
+  sheetRoleOverrides: z.record(z.enum(["transactional", "non_transactional", "mixed", "unknown"])).default({}),
   filingScope: z.array(z.string().regex(/^\d{4}-\d{4}$/)).min(1).max(20),
   excludedRowRefs: z.array(z.object({
     sheetId: z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/),
@@ -737,7 +738,20 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
       ...body.data, businessStartDate: profile.businessStartDate ?? null,
     })).digest("hex");
     const history = Array.isArray(state.reviewRevisionHistory) ? state.reviewRevisionHistory.slice(-19) : [];
-    const reviewDraft = { ...body.data, mappingRevision: revision, savedAt: new Date().toISOString(), actorUserId: req.user.id };
+    const reviewDraft = {
+      ...body.data,
+      decisionSources: {
+        sheetRoleOverrides: Object.fromEntries(
+          Object.keys(body.data.sheetRoleOverrides ?? {}).map((sheetId) => [sheetId, "user"]),
+        ),
+        selectedSheetIds: "user",
+        sheetMappings: "user",
+        filingScope: "user",
+      },
+      mappingRevision: revision,
+      savedAt: new Date().toISOString(),
+      actorUserId: req.user.id,
+    };
     const [saved] = await db.update(evidenceItemsTable).set({
       mappingSchema: {
         ...state,
@@ -805,7 +819,14 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       return;
     }
     const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
-    const analysis = analyseSpreadsheet(workbook);
+    const savedDraft = savedState?.reviewDraft as {
+      selectedSheetIds?: string[];
+      sheetRoleOverrides?: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown">;
+    } | null | undefined;
+    const analysis = analyseSpreadsheet(workbook, {
+      selectedSheetIds: savedDraft?.selectedSheetIds,
+      roleOverrides: savedDraft?.sheetRoleOverrides,
+    });
     if (workbook.totalParserRows === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
     const ai = await analyseSpreadsheetWithAI(workbook, analysis);
     const primarySheet = analysis.sheets.find((sheet) => sheet.role === "transactional") ?? analysis.sheets[0];
@@ -920,7 +941,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       .map((transaction) => spreadsheetMovementFingerprint(transaction.date, transaction.amount, transaction.description)));
     const businessStartDate = profile.businessStartDate ?? null;
     const scopedAnalysis = analyseSpreadsheet(workbook, {
-      selectedSheetIds: body.data.selectedSheetIds, tradingStartDate: businessStartDate,
+      selectedSheetIds: body.data.selectedSheetIds,
+      tradingStartDate: businessStartDate,
+      roleOverrides: body.data.sheetRoleOverrides,
     });
     const sheetRoles = new Map(scopedAnalysis.sheets.map((sheet) => [sheet.sheetId, sheet.role]));
     const unresolvedRows: Array<{ sheetId: string; worksheet: string; rowNumber: number }> = [];
@@ -1073,9 +1096,15 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     if (!claimed) { res.status(409).json({ error: "This spreadsheet was replaced or is already being processed. Reload the review before trying again." }); return; }
 
     userDecision = {
-      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit, filingScope: body.data.filingScope,
+      selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit,
+      sheetRoleOverrides: body.data.sheetRoleOverrides, filingScope: body.data.filingScope,
       excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
-      outsideScopeMode: body.data.outsideScopeMode, confirmedAt: now.toISOString(), actorUserId: req.user.id, mappingRevision,
+      outsideScopeMode: body.data.outsideScopeMode,
+      decisionSources: {
+        sheetRoleOverrides: "user", selectedSheetIds: "user", sheetMappings: "user",
+        filingScope: "user", excludedRowRefs: "user",
+      },
+      confirmedAt: now.toISOString(), actorUserId: req.user.id, mappingRevision,
     };
     const sheetFinalDispositions = workbook.sheets.map((sheet) => {
       const sheetRows = rowOutcomes.filter((row) => row.sheetId === sheet.sheetId);

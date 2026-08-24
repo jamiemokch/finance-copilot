@@ -127,7 +127,6 @@ export const profilesApi = {
     type?: string;
     industry?: string;
     vatRegistered?: boolean;
-    taxYear?: string;
     accountingBasis?: string;
     businessStartDate?: string | null;
   }) =>
@@ -361,6 +360,10 @@ export type SpreadsheetReviewAnalysis = {
     disposition: string;
     selected: boolean;
     role: 'transactional' | 'non_transactional' | 'mixed' | 'unknown';
+    confidence: number;
+    reviewRequired: boolean;
+    auditVisibility: 'default' | 'advanced';
+    decisionSource: 'deterministic' | 'ai' | 'user';
     mapping: { headerRow?: number; columns: Record<string, number | undefined> };
     previewRows: Array<{ rowNumber: number; values: string[] }>;
     warnings: string[];
@@ -378,11 +381,13 @@ export type SpreadsheetInspectionResponse = {
   reviewDraft?: {
     selectedSheetIds: string[];
     sheetMappings: Record<string, unknown>;
+    sheetRoleOverrides?: Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>;
     filingScope: string[];
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
     outsideScopeMode: 'retain' | 'exclude';
     mappingRevision?: string;
+    decisionSources?: Record<string, string>;
   } | null;
   reviewRevisionHistory?: Array<{ mappingRevision: string; savedAt: string }>;
   lastImportError?: SpreadsheetImportError | null;
@@ -457,6 +462,7 @@ export const evidenceApi = {
   saveSpreadsheetReview: (profileId: string, evidenceId: string, data: {
     selectedSheetIds: string[];
     sheetMappings: Record<string, unknown>;
+    sheetRoleOverrides?: Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>;
     filingScope: string[];
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
@@ -469,6 +475,7 @@ export const evidenceApi = {
     confirmation: true;
     selectedSheetIds: string[];
     sheetMappings: Record<string, unknown>;
+    sheetRoleOverrides?: Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>;
     filingScope: string[];
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
@@ -481,11 +488,6 @@ export const evidenceApi = {
   }>(`/profiles/${profileId}/evidence/${evidenceId}/confirm-spreadsheet`, {
     method: "POST", body: JSON.stringify(data),
   }),
-  processBatch: (profileId: string, evidenceId: string, confirmedMapping: unknown, bankCsv?: boolean) =>
-    apiFetch<{ evidence: APIEvidenceItem; processedRows: number; autoPostedRows: number; inboxRows: number; skippedRows: number }>(
-      `/profiles/${profileId}/evidence/${evidenceId}/process-batch`,
-      { method: "POST", body: JSON.stringify({ confirmedMapping, bankCsv }) },
-    ),
 };
 
 // ── Transactions ──────────────────────────────────────────────────────────────

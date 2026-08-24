@@ -156,6 +156,11 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       body: JSON.stringify({ name: 'presigned.txt', size: 12, contentType: 'text/plain' }),
     });
     assert.equal(retiredPresigned.status, 410, 'the retired direct-to-storage endpoint cannot mint a reset-escaping write URL');
+    const retiredSpreadsheetImporter = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/00000000-0000-0000-0000-000000000000/process-batch`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(retiredSpreadsheetImporter.status, 410, 'the legacy spreadsheet importer cannot bypass reviewed confirmation');
 
     const duplicateContent = 'same receipt bytes';
     const [firstUpload, retryUpload] = await Promise.all([

@@ -318,10 +318,14 @@ async function providerCallWithTimeout(
         await new Promise((resolve) => setTimeout(resolve, SPREADSHEET_AI_LIMITS.retryDelayMs));
         continue;
       }
-      throw error;
+      const failure = error instanceof Error ? error : new Error('provider failed');
+      (failure as Error & { providerCalls?: number }).providerCalls = providerCalls;
+      throw failure;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error('provider failed');
+  const failure = lastError instanceof Error ? lastError : new Error('provider failed');
+  (failure as Error & { providerCalls?: number }).providerCalls = providerCalls;
+  throw failure;
 }
 
 export async function analyseSpreadsheetWithAI(
@@ -387,6 +391,7 @@ export async function analyseSpreadsheetWithAI(
     }
     return envelope;
   } catch (error) {
+    providerCalls = (error as { providerCalls?: number }).providerCalls ?? providerCalls;
     const reason = error instanceof Error && error.message === 'timeout' ? 'AI analysis timed out.' :
       error instanceof Error && error.message === 'schema_invalid' ? 'AI returned a malformed proposal.' :
         error instanceof Error && error.message === 'reference_invalid' ? 'AI returned an invalid source reference.' :

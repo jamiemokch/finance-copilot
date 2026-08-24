@@ -37,7 +37,6 @@ router.post("/profiles", async (req, res) => {
     type: z.string().default("sole_trader"),
     industry: z.string().optional().default("other"),
     vatRegistered: z.boolean().optional().default(false),
-    taxYear: z.string().optional().default("2024/25"),
     accountingBasis: z.string().optional().default("cash"),
     businessStartDate: z.string()
       .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD dates")
@@ -52,7 +51,6 @@ router.post("/profiles", async (req, res) => {
       type: body.data.type,
       industry: body.data.industry,
       vatRegistered: body.data.vatRegistered,
-      taxYear: body.data.taxYear,
     };
     // accountingBasis handled via cast — column added in migration
     if (body.data.accountingBasis) {

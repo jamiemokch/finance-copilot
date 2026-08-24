@@ -22,13 +22,6 @@ const INDUSTRIES = [
 
 type ProfileType = 'sole_trader' | 'landlord' | 'company';
 
-/** Derive the SA filing deadline from a tax year string e.g. "2024/25" → "31 Jan 2026" */
-function taxYearToDeadline(taxYear: string): string {
-  const startYear = parseInt(taxYear.split('/')[0], 10);
-  if (isNaN(startYear)) return '31 Jan 2026';
-  return `31 Jan ${startYear + 2}`;
-}
-
 export default function Onboarding() {
   const { addProfile, setActiveProfileId } = useStore();
   const [, navigate] = useLocation();
@@ -41,7 +34,6 @@ export default function Onboarding() {
     name: '',
     type: 'sole_trader' as ProfileType,
     industry: 'other',
-    taxYear: '2024/25',
     accountingBasis: 'cash' as 'cash' | 'accrual',
     vatRegistered: false,
     businessStartDate: '',
@@ -72,7 +64,6 @@ export default function Onboarding() {
         name: form.name.trim(),
         type: form.type,
         industry: form.industry,
-        taxYear: form.taxYear,
         accountingBasis: form.accountingBasis,
         vatRegistered: form.vatRegistered,
         businessStartDate: form.businessStartDate || null,
@@ -189,7 +180,7 @@ export default function Onboarding() {
             </div>
 
             <Button className="w-full cursor-pointer gap-2" onClick={handleStep1Next}>
-              Next — Tax preferences <ChevronRight className="w-4 h-4" />
+              Next — Preferences <ChevronRight className="w-4 h-4" />
             </Button>
           </div>
         )}
@@ -199,32 +190,7 @@ export default function Onboarding() {
           <div className="space-y-6">
             <div className="text-center space-y-1">
               <h1 className="text-3xl font-serif font-bold">Tax preferences</h1>
-              <p className="text-muted-foreground">These help us calculate your SA deadline and estimate tax correctly.</p>
-            </div>
-
-            {/* Tax year */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Tax year</label>
-              <div className="grid grid-cols-3 gap-3">
-                {(['2023/24', '2024/25', '2025/26', '2026/27'] as const).map(yr => (
-                  <button
-                    key={yr}
-                    onClick={() => set('taxYear', yr)}
-                    className={cn(
-                      'p-3 rounded-xl border-2 text-sm font-medium text-center transition-all cursor-pointer',
-                      form.taxYear === yr
-                        ? 'border-primary bg-primary/5 text-primary ring-1 ring-primary'
-                        : 'border-border hover:border-primary/40 text-foreground',
-                    )}
-                  >
-                    {yr}
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                SA filing deadline for {form.taxYear}: <strong>{taxYearToDeadline(form.taxYear)}</strong>.
-                UK tax year runs 6 Apr – 5 Apr.
-              </p>
+              <p className="text-muted-foreground">These help us understand how you record money and whether VAT applies.</p>
             </div>
 
             {/* Accounting basis */}
@@ -313,8 +279,6 @@ export default function Onboarding() {
                 { label: 'Business',  value: form.name },
                 { label: 'Type',      value: form.type.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join(' ') },
                 { label: 'Industry',  value: INDUSTRIES.find(i => i.value === form.industry)?.label ?? form.industry },
-                { label: 'Tax year',  value: form.taxYear },
-                { label: 'SA deadline', value: taxYearToDeadline(form.taxYear) },
                 { label: 'Accounting', value: form.accountingBasis === 'cash' ? 'Cash basis' : 'Accrual basis' },
                 { label: 'VAT',       value: form.vatRegistered ? 'Registered' : 'Not registered' },
                 ...(form.businessStartDate ? [{ label: 'Trading start', value: form.businessStartDate }] : []),

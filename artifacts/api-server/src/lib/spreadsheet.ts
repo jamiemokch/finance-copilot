@@ -101,6 +101,10 @@ export type SpreadsheetSheetAnalysis = {
   disposition: SheetDisposition;
   selected: boolean;
   role: 'transactional' | 'non_transactional' | 'mixed' | 'unknown';
+  confidence: number;
+  reviewRequired: boolean;
+  auditVisibility: 'default' | 'advanced';
+  decisionSource: 'deterministic';
   mapping: SpreadsheetMapping;
   columnIds: string[];
   previewRows: SpreadsheetSourceRow[];
@@ -340,15 +344,49 @@ function inferredMapping(sheet: SpreadsheetSheet): SpreadsheetMapping {
   return {
     headerRow,
     columns: {
-      date: find([/\bdate\b/, /posted/, /transaction/, /booking/, /value date/]),
-      amount: find([/^amount$/, /value/, /net/, /signed/]),
-      debit: find([/debit/, /withdrawal/, /outgoing/, /paid out/, /money out/]),
-      credit: find([/credit/, /deposit/, /incoming/, /paid in/, /money in/]),
-      description: find([/description/, /details/, /memo/, /narrative/, /merchant/]),
-      category: find([/category/, /type/]),
+      date: find([/\bdate\b/, /posted/, /transaction/, /booking/, /value date/, /日期/, /交易日/, /記錄日期/]),
+      amount: find([/^amount$/, /value/, /net/, /signed/, /金額/, /金额/, /收入/, /支出/, /數目/]),
+      debit: find([/debit/, /withdrawal/, /outgoing/, /paid out/, /money out/, /支出/]),
+      credit: find([/credit/, /deposit/, /incoming/, /paid in/, /money in/, /收入/]),
+      description: find([/description/, /details/, /memo/, /narrative/, /merchant/, /描述/, /詳情/, /內容/, /項目/, /品名/, /客戶/, /供應商/]),
+      category: find([/category/, /type/, /類別/, /分类/]),
       balance: find([/^balance/, /running/]),
     },
   };
+}
+
+const REFERENCE_SHEET_NAME = /^(master data|query|queries|fs|tb|trial balance|financial statements?|summary|summaries|notes?)$/i;
+
+function classifySheet(sheet: SpreadsheetSheet, mapping: SpreadsheetMapping): {
+  role: SpreadsheetSheetAnalysis['role'];
+  confidence: number;
+  reviewRequired: boolean;
+  auditVisibility: SpreadsheetSheetAnalysis['auditVisibility'];
+} {
+  const normalizedName = sheet.displayName.trim().replace(/\s+/g, ' ');
+  const hasDate = mapping.columns.date !== undefined;
+  const hasMoney = mapping.columns.amount !== undefined
+    || mapping.columns.debit !== undefined
+    || mapping.columns.credit !== undefined;
+  const hasDescription = mapping.columns.description !== undefined || mapping.columns.category !== undefined;
+  const hasRequired = hasDate && hasMoney && hasDescription;
+
+  if (REFERENCE_SHEET_NAME.test(normalizedName)) {
+    return { role: 'non_transactional', confidence: 96, reviewRequired: false, auditVisibility: 'advanced' };
+  }
+  if (sheet.isEmpty) {
+    return { role: 'unknown', confidence: 0, reviewRequired: true, auditVisibility: 'advanced' };
+  }
+  if (hasRequired) {
+    return { role: 'transactional', confidence: 88, reviewRequired: false, auditVisibility: 'default' };
+  }
+  if (hasDate && hasMoney) {
+    return { role: 'transactional', confidence: 58, reviewRequired: true, auditVisibility: 'default' };
+  }
+  if (looksLikeHeader(sheet.headers)) {
+    return { role: 'non_transactional', confidence: 72, reviewRequired: false, auditVisibility: 'advanced' };
+  }
+  return { role: 'unknown', confidence: 35, reviewRequired: true, auditVisibility: 'default' };
 }
 
 export function ukTaxYear(date: string): string | null {
@@ -419,19 +457,25 @@ function emptyDispositionCounts(): Record<RowDisposition, number> {
 
 export function analyseSpreadsheet(
   workbook: SpreadsheetWorkbook,
-  options: { selectedSheetIds?: string[]; tradingStartDate?: string | null } = {},
+  options: {
+    selectedSheetIds?: string[];
+    tradingStartDate?: string | null;
+    roleOverrides?: Record<string, SpreadsheetSheetAnalysis['role']>;
+  } = {},
 ): SpreadsheetAnalysis {
-  const selected = options.selectedSheetIds ? new Set(options.selectedSheetIds) : new Set(workbook.sheets.map((sheet) => sheet.sheetId));
+  const explicitlySelected = options.selectedSheetIds ? new Set(options.selectedSheetIds) : null;
+  const roleOverrides = options.roleOverrides ?? {};
   const seenFingerprints = new Set<string>();
   const sheetAnalyses: SpreadsheetSheetAnalysis[] = workbook.sheets.map((sheet) => {
-    const isSelected = selected.has(sheet.sheetId);
     const mapping = inferredMapping(sheet);
+    const classification = classifySheet(sheet, mapping);
+    const isSelected = explicitlySelected ? explicitlySelected.has(sheet.sheetId) : classification.role === 'transactional' && !classification.reviewRequired;
     const hasRequired = mapping.columns.date !== undefined &&
       (mapping.columns.amount !== undefined || (mapping.columns.debit !== undefined && mapping.columns.credit !== undefined)) &&
       (mapping.columns.description !== undefined || mapping.columns.category !== undefined);
-    const role: SpreadsheetSheetAnalysis['role'] = sheet.isEmpty ? 'unknown' : hasRequired ? 'transactional' : looksLikeHeader(sheet.headers) ? 'non_transactional' : 'unknown';
-    const disposition: SheetDisposition = !isSelected ? 'unselected_sheet' :
-      sheet.isEmpty ? 'empty_sheet' : role === 'non_transactional' ? 'non_transactional' :
+    const role = roleOverrides[sheet.sheetId] ?? classification.role;
+    const disposition: SheetDisposition = sheet.isEmpty ? 'empty_sheet' :
+      !isSelected ? 'unselected_sheet' : role === 'non_transactional' ? 'non_transactional' :
         hasRequired ? 'processed' : 'blocked_invalid_mapping';
     const rows = sheet.rows.map((sourceRow) => {
       const finding = rowPrimary(sourceRow, mapping, isSelected, options.tradingStartDate);
@@ -441,7 +485,7 @@ export function analyseSpreadsheet(
         if (seenFingerprints.has(fingerprint)) { finding.primaryDisposition = 'duplicate'; finding.reason = 'Duplicate normalized source movement detected.'; finding.duplicateFingerprint = fingerprint; }
         else seenFingerprints.add(fingerprint);
       }
-      if (disposition === 'non_transactional' && finding.primaryDisposition === 'imported') {
+      if (role === 'non_transactional') {
         finding.primaryDisposition = 'non_transactional'; finding.reason = 'Sheet is classified as non-transactional.';
       }
       return finding;
@@ -456,7 +500,10 @@ export function analyseSpreadsheet(
     return {
       sheetId: sheet.sheetId, displayName: sheet.displayName,
       dimensions: { rows: sheet.rowCount, columns: sheet.columnCount }, parserRange: sheet.parserRange,
-      disposition, selected: isSelected, role, mapping, columnIds: Array.from({ length: sheet.columnCount }, (_, index) => cellId(index)),
+      disposition, selected: isSelected, role, confidence: classification.confidence,
+      reviewRequired: classification.reviewRequired, auditVisibility: classification.auditVisibility,
+      decisionSource: 'deterministic',
+      mapping, columnIds: Array.from({ length: sheet.columnCount }, (_, index) => cellId(index)),
       previewRows: sheet.rows.filter((row) => row.values.some((value) => normaliseCell(value))).slice(0, 8),
       rows, coverage: {
         status: (dated.length === 0 ? (rows.some((row) => row.primaryDisposition === 'invalid') ? 'partial' : 'unknown') : 'known') as 'known' | 'partial' | 'unknown',

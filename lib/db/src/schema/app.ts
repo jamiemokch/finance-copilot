@@ -24,7 +24,9 @@ export const profilesTable = pgTable('profiles', {
     .references(() => usersTable.id, { onDelete: 'cascade' }),
   name: text('name').notNull().default('My Business'),
   type: text('type').notNull().default('sole_trader'),
-  taxYear: text('tax_year').notNull().default('2024/25'),
+  // Tax years are inferred from dated evidence or chosen in tax-specific flows;
+  // onboarding must not silently assign one.
+  taxYear: text('tax_year'),
   // Cash account balances stored as jsonb: [{name, balance}]
   cashAccounts: jsonb('cash_accounts').notNull().default('[]'),
   // AR & AP stored as jsonb for demo simplicity
