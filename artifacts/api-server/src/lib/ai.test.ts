@@ -38,7 +38,18 @@ function failingClient(responses: Array<() => Promise<never>>): OpenAI {
   return {
     chat: {
       completions: {
-        create: async () => responses[Math.min(index++, responses.length - 1)!](),
+        create: async (_input: unknown, requestOptions?: { signal?: AbortSignal }) => {
+          const response = responses[Math.min(index++, responses.length - 1)!]();
+          const signal = requestOptions?.signal;
+          if (!signal) return response;
+          if (signal.aborted) throw signal.reason;
+          return Promise.race([
+            response,
+            new Promise<never>((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            }),
+          ]);
+        },
       },
     },
   } as unknown as OpenAI;
@@ -110,11 +121,62 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   await assert.rejects(
     () => providerCallWithTimeout(client, '{}', { timeoutMs: 5, retryDelayMs: 0, maxProviderCalls: 2 }),
     (error: unknown) => {
-      assert.equal((error as { message?: string }).message, 'transport_failure');
+      assert.equal((error as { message?: string }).message, 'timeout');
       assert.equal((error as { providerCalls?: number }).providerCalls, 2);
       return true;
     },
   );
+});
+
+test('a provider timeout aborts the upstream request and records one bounded attempt', async () => {
+  let observedSignal: AbortSignal | undefined;
+  let aborted = false;
+  const client = {
+    chat: { completions: { create: async (_input: unknown, requestOptions?: { signal?: AbortSignal; maxRetries?: number }) => {
+      observedSignal = requestOptions?.signal;
+      assert.equal(requestOptions?.maxRetries, 0, 'spreadsheet calls disable SDK retries');
+      return new Promise<never>((_resolve, reject) => {
+        const signal = observedSignal;
+        signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(signal.reason);
+        }, { once: true });
+      });
+    } } },
+  } as unknown as OpenAI;
+
+  await assert.rejects(
+    () => providerCallWithTimeout(client, '{}', { timeoutMs: 5, maxProviderCalls: 1 }),
+    (error: unknown) => {
+      assert.equal((error as Error).message, 'timeout');
+      assert.equal((error as { providerCalls?: number }).providerCalls, 1);
+      return true;
+    },
+  );
+  assert.equal(observedSignal?.aborted, true, 'the request signal is aborted rather than merely raced');
+  assert.equal(aborted, true, 'the upstream request observes cancellation');
+});
+
+test('spreadsheet retry accounting is the only retry authority', async () => {
+  const sdkRetryLimits: Array<number | undefined> = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (_input: unknown, requestOptions?: { maxRetries?: number }) => {
+      sdkRetryLimits.push(requestOptions?.maxRetries);
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error('temporary upstream failure') as Error & { status?: number };
+        error.status = 503;
+        throw error;
+      }
+      return { choices: [{ message: { content: '{}' } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', { retryDelayMs: 0, maxProviderCalls: 2 });
+  assert.equal(result.providerCalls, 2);
+  assert.equal(calls, 2, 'only the bounded application retry issues the second request');
+  assert.deepEqual(sdkRetryLimits, [0, 0]);
 });
 
 test('a managed strict-schema alias rejection is safe, typed, and never selects another model or object mode', async () => {
@@ -510,7 +572,7 @@ test('AI fallback telemetry reports both retry and timeout attempts', async () =
   });
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.reason, 'Automatic review is temporarily unavailable because the provider could not be reached.');
+  assert.equal(result.reason, 'Automatic review timed out waiting for a response. No records were imported.');
   assert.equal(result.providerCalls, 2);
   assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout']);
   assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'replit_ai_integrations' || attempt.routeClass === 'direct_openai'), true);
@@ -1002,6 +1064,56 @@ test('a persisted pending continuation resumes after an interrupted worker witho
   });
   assert.equal(result.status, 'success');
   assert.equal(resumedCalls, 1);
+});
+
+test('a whole-review deadline checkpoints safe continuation state and starts no further provider request', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Deadline-only sale,11\n'), 'text/csv', 'deadline.csv');
+  const checkpoints: SpreadsheetSemanticSession[] = [];
+  let nowMs = 0;
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      nowMs = 51;
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+              stage: 'request_context',
+              request: {
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                continuationToken: String(payload.continuationToken),
+                allowedSheetIds: ['sheet_1'],
+                requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 2, startColumn: 1, endColumn: 3, chunk: 0, reason: 'Need bounded structure.' }],
+              },
+              plan: null,
+            }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    reviewTimeoutMs: 50,
+    retryDelayMs: 0,
+    now: () => nowMs,
+    persistSession: async (session) => { checkpoints.push(structuredClone(session)); },
+  });
+
+  assert.equal(calls, 1, 'the review deadline prevents the next provider request');
+  assert.equal(result.status, 'incomplete');
+  assert.equal(result.reason, 'Automatic review timed out waiting for a response. No records were imported.');
+  assert.equal(result.providerCalls, 1, 'the existing execution budget remains accurate');
+  assert.equal(result.analysis?.sheets.every((sheet) => !sheet.selected), true, 'deadline results never create an importable analysis');
+  const checkpoint = checkpoints.at(-1);
+  assert.equal(checkpoint?.stage, 'incomplete');
+  assert.equal(checkpoint?.providerCalls, 1);
+  assert.equal((checkpoint?.currentPlan as { status?: string } | null)?.status, 'incomplete');
+  assert.equal((checkpoint?.payload as { stage?: string } | null)?.stage, 'requested_context', 'the latest safe continuation is retained');
 });
 
 test('legacy spreadsheet column detection is deterministic and never invokes a provider', async () => {

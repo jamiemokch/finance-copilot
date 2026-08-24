@@ -5,6 +5,10 @@ import {
   ApiError, bankImportsApi, evidenceApi, transactionsApi,
   type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
 } from '@/lib/api';
+import {
+  automaticReviewShouldClearAnalysis,
+  automaticReviewUnavailableReason,
+} from '@/lib/spreadsheet-review-status';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -340,7 +344,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const resumed = useRef(false);
 
   const applyInspection = (detected: Awaited<ReturnType<typeof evidenceApi.detectSchema>>) => {
-    const automaticUnavailable = detected.aiStatus?.recoveryState === 'automatic_unavailable';
+    const automaticUnavailable = automaticReviewShouldClearAnalysis(detected.aiStatus);
     // An automatic retry result must replace—not sit behind—any older review.
     // Structural findings are retained server-side for manual recovery, but are
     // deliberately not mounted as worksheet questions until the user opts in.
@@ -676,15 +680,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const automaticReviewReady = aiStatus?.recoveryState === 'automatic_ready' || aiStatus?.status === 'success';
   const manualRecoveryEnabled = aiStatus?.recoveryState === 'manual_recovery';
   const reviewEnabled = automaticReviewReady || manualRecoveryEnabled;
-  const unavailableReason = aiStatus?.failureCategory === 'model_unavailable'
-    ? 'The automatic review model is unavailable right now.'
-    : aiStatus?.failureCategory === 'provider_schema_invalid'
-      ? 'The automatic review service could not accept the protected review format.'
-      : aiStatus?.failureCategory === 'response_contract_invalid'
-        ? 'The automatic review response did not pass the protected spreadsheet checks.'
-        : aiStatus?.failureCategory === 'transport_failure'
-          ? 'The automatic review service could not be reached.'
-          : 'We could not automatically review this workbook.';
+  const unavailableReason = automaticReviewUnavailableReason(aiStatus);
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
   const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
   const confirmationBlockers = confirmationBlockersForReview({
@@ -700,7 +696,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     <button disabled={savingReview} onClick={leaveReview} className="text-sm text-primary flex gap-1 items-center cursor-pointer disabled:opacity-50"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
     <div><h2 className="text-xl font-serif">Review a spreadsheet or CSV</h2><p className="text-sm text-muted-foreground mt-1">We check every sheet first. Suggestions are only a guide; nothing reaches Financial Memory until you confirm what to bring in.</p></div>
     {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a CSV or Excel workbook</p><p className="text-xs text-muted-foreground">We will check every worksheet and show only the records that are likely to be money in or out.</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Upload a file" /></div>}
-    {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…</div>}
+    {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…<p className="mt-2 text-xs text-muted-foreground">Automatic review uses bounded attempts and will safely stop without importing records if it cannot finish.</p></div>}
     {stage === 'review' && !analysis && !reviewEnabled && <div data-testid="spreadsheet-automatic-review-unavailable" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 space-y-3">
       <div className="flex gap-2"><AlertCircle className="w-5 h-5 shrink-0 mt-0.5" /><div><p className="font-semibold">{unavailableReason}</p><p className="mt-1">Nothing was imported. Automatic review is unavailable for this workbook until a new attempt succeeds.</p></div></div>
       <p className="text-xs">You can retry automatic review, or explicitly choose manual recovery to select sheets and columns yourself.</p>

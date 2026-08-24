@@ -62,10 +62,14 @@ export type SpreadsheetProviderFailureCategory =
 class SpreadsheetProviderFailure extends Error {
   providerCalls?: number;
 
-  constructor(readonly category: SpreadsheetProviderFailureCategory) {
-    super(category);
+  constructor(
+    readonly category: SpreadsheetProviderFailureCategory,
+    reason?: 'timeout' | 'review_deadline',
+  ) {
+    super(reason ?? category);
   }
 }
+export const SPREADSHEET_PROVIDER_COMPATIBILITY_TIMEOUT_MS = 10_000;
 export const SPREADSHEET_AI_LIMITS = {
   maxLocalSheets: 100,
   maxSheets: 100,
@@ -77,6 +81,7 @@ export const SPREADSHEET_AI_LIMITS = {
   maxOutputTokens: SPREADSHEET_SEMANTIC_LIMITS.maxOutputTokens,
   maxDepth: SPREADSHEET_SEMANTIC_LIMITS.maxHierarchyDepth,
   timeoutMs: SPREADSHEET_SEMANTIC_LIMITS.timeoutMs,
+  reviewTimeoutMs: SPREADSHEET_SEMANTIC_LIMITS.reviewTimeoutMs,
   retryDelayMs: SPREADSHEET_SEMANTIC_LIMITS.retryDelayMs,
   maxProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage,
   maxTotalProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls,
@@ -331,6 +336,7 @@ export async function providerCallWithTimeout(
     initialResponseMode?: SpreadsheetProviderAttempt['responseMode'];
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
     allowJsonObjectFallback?: boolean;
+    timeoutReason?: 'timeout' | 'review_deadline';
     classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
@@ -343,6 +349,7 @@ export async function providerCallWithTimeout(
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
   const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
   const maxProviderCalls = options.maxProviderCalls ?? SPREADSHEET_AI_LIMITS.maxProviderCalls;
+  const timeoutReason = options.timeoutReason ?? 'timeout';
   const requestedModel = SPREADSHEET_PROVIDER_POLICY.requestedModel;
   let providerCalls = 0;
   let lastError: unknown;
@@ -362,7 +369,7 @@ export async function providerCallWithTimeout(
     const providerSchemaInvalid = status === 400 && (
       /response_format|json_schema|structured output|strict schema|unsupported.*format|not support.*json/i.test(message)
     );
-    const timeout = message === 'timeout' || /timeout|timed out/i.test(message);
+    const timeout = message === 'timeout' || message === 'review_deadline' || /timeout|timed out/i.test(message);
     const rateLimited = status === 429 || code.includes('rate_limit');
     const transportFailure = status === null;
     const retryable = timeout || rateLimited || status === null || status >= 500;
@@ -394,9 +401,14 @@ export async function providerCallWithTimeout(
   for (let attempt = 0; attempt < maxProviderCalls; attempt += 1) {
     providerCalls += 1;
     const startedAt = new Date();
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(timeoutReason));
+    }, timeoutMs);
     try {
-      const response = await Promise.race([
-        client.chat.completions.create({
+      const response = await client.chat.completions.create({
           model: resolvedModel,
           max_completion_tokens: SPREADSHEET_AI_LIMITS.maxOutputTokens,
           messages: [
@@ -416,9 +428,12 @@ export async function providerCallWithTimeout(
               },
             }
             : { type: 'json_object' }) as never,
-        }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-      ]);
+        }, {
+          signal: controller.signal,
+          // Spreadsheet retries are counted and bounded above. Do not let the
+          // SDK create invisible additional provider work underneath that cap.
+          maxRetries: 0,
+        } as never);
       const content = response.choices[0]?.message?.content ?? '';
       const responseFailure = options.classifyResponse?.(content);
       await options.onAttempt?.({
@@ -438,7 +453,8 @@ export async function providerCallWithTimeout(
         failurePhase: responseFailure?.failurePhase ?? null,
       });
       return { content, providerCalls, resolvedModel, responseMode };
-    } catch (error) {
+    } catch (caught) {
+      const error = timedOut ? new Error(timeoutReason) : caught;
       lastError = error;
       const failure = classifyFailure(error);
       await options.onAttempt?.({
@@ -454,9 +470,14 @@ export async function providerCallWithTimeout(
         outcomeCategory: failure.outcomeCategory,
         safeStatus: failure.safeStatus,
         statusCode: failure.status,
-        retryable: failure.retryable || (failure.providerSchemaInvalid && responseMode === 'json_schema' && Boolean(options.allowJsonObjectFallback)),
+        retryable: !timedOut && (failure.retryable || (failure.providerSchemaInvalid && responseMode === 'json_schema' && Boolean(options.allowJsonObjectFallback))),
         failurePhase: 'provider_request',
       });
+      if (timedOut && timeoutReason === 'review_deadline') {
+        const deadlineFailure = new SpreadsheetProviderFailure(failure.category, 'review_deadline');
+        deadlineFailure.providerCalls = providerCalls;
+        throw deadlineFailure;
+      }
       // Managed spreadsheet review uses a verified strict-schema policy only.
       // JSON-object remains an opt-in compatibility boundary for non-managed
       // callers and is never used for model availability/configuration errors.
@@ -471,9 +492,14 @@ export async function providerCallWithTimeout(
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         continue;
       }
-      const providerFailure = new SpreadsheetProviderFailure(failure.category);
+      const providerFailure = new SpreadsheetProviderFailure(
+        failure.category,
+        timedOut || failure.timeout ? 'timeout' : undefined,
+      );
       providerFailure.providerCalls = providerCalls;
       throw providerFailure;
+    } finally {
+      clearTimeout(timeoutHandle);
     }
   }
   const failure = lastError instanceof Error ? lastError : new Error('provider failed');
@@ -498,7 +524,7 @@ export type SpreadsheetProviderCompatibilityCheckResult = {
     semanticPlan: 'valid' | 'invalid' | 'not_applicable' | 'not_received';
     responseContract: 'valid' | 'invalid' | 'not_received';
   };
-  attempts: Array<Pick<SpreadsheetProviderAttempt, 'attemptNumber' | 'requestedModel' | 'resolvedModel' | 'responseMode' | 'outcomeCategory' | 'safeStatus' | 'statusCode' | 'retryable' | 'failurePhase'>>;
+  attempts: Array<Pick<SpreadsheetProviderAttempt, 'attemptNumber' | 'requestedModel' | 'resolvedModel' | 'responseMode' | 'durationMs' | 'outcomeCategory' | 'safeStatus' | 'statusCode' | 'retryable' | 'failurePhase'>>;
 };
 
 type CompatibilityCheckState = SpreadsheetProviderCompatibilityCheckResult['checks'];
@@ -794,7 +820,7 @@ export async function runSpreadsheetProviderCompatibilityCheck(options: {
   let providerError = false;
   try {
     result = await providerCallWithTimeout(options.client ?? getClient(), payload, {
-      timeoutMs: options.timeoutMs,
+      timeoutMs: options.timeoutMs ?? SPREADSHEET_PROVIDER_COMPATIBILITY_TIMEOUT_MS,
       retryDelayMs: options.retryDelayMs,
       maxProviderCalls: 1,
       routeClass: 'replit_ai_integrations',
@@ -833,6 +859,7 @@ export async function runSpreadsheetProviderCompatibilityCheck(options: {
       requestedModel: attempt.requestedModel,
       resolvedModel: attempt.resolvedModel,
       responseMode: attempt.responseMode,
+      durationMs: attempt.durationMs,
       outcomeCategory: attempt.outcomeCategory,
       safeStatus: attempt.safeStatus,
       statusCode: attempt.statusCode,
@@ -888,7 +915,7 @@ export async function runSpreadsheetProviderPositiveSemanticCompatibilityCheck(o
   let providerError = false;
   try {
     result = await providerCallWithTimeout(options.client ?? getClient(), JSON.stringify(buildSpreadsheetProviderPositiveCompatibilityPayload()), {
-      timeoutMs: options.timeoutMs,
+      timeoutMs: options.timeoutMs ?? SPREADSHEET_PROVIDER_COMPATIBILITY_TIMEOUT_MS,
       retryDelayMs: options.retryDelayMs,
       maxProviderCalls: 1,
       routeClass: 'replit_ai_integrations',
@@ -924,6 +951,7 @@ export async function runSpreadsheetProviderPositiveSemanticCompatibilityCheck(o
       requestedModel: attempt.requestedModel,
       resolvedModel: attempt.resolvedModel,
       responseMode: attempt.responseMode,
+      durationMs: attempt.durationMs,
       outcomeCategory: attempt.outcomeCategory,
       safeStatus: attempt.safeStatus,
       statusCode: attempt.statusCode,
@@ -1038,7 +1066,9 @@ export async function analyseSpreadsheetWithAI(
   testOptions?: {
     client?: OpenAI;
     timeoutMs?: number;
+    reviewTimeoutMs?: number;
     retryDelayMs?: number;
+    now?: () => number;
     session?: SpreadsheetSemanticSession | null;
     resetProviderState?: boolean;
     persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
@@ -1056,7 +1086,9 @@ export async function analyseSpreadsheetWithAI(
     maxSheets: SPREADSHEET_AI_LIMITS.maxSheets, maxRowsPerSheet: SPREADSHEET_AI_LIMITS.maxRowsPerSheet,
     maxCellsPerSheet: SPREADSHEET_AI_LIMITS.maxCellsPerSheet, maxCellCharacters: SPREADSHEET_AI_LIMITS.maxCellCharacters,
     maxRequestBytes: SPREADSHEET_AI_LIMITS.maxRequestBytes, maxResponseBytes: SPREADSHEET_AI_LIMITS.maxResponseBytes,
-    maxOutputTokens: SPREADSHEET_AI_LIMITS.maxOutputTokens, timeoutMs: SPREADSHEET_AI_LIMITS.timeoutMs,
+    maxOutputTokens: SPREADSHEET_AI_LIMITS.maxOutputTokens,
+    timeoutMs: SPREADSHEET_AI_LIMITS.timeoutMs,
+    reviewTimeoutMs: SPREADSHEET_AI_LIMITS.reviewTimeoutMs,
   };
   const initialToken = createHash('sha256')
     .update(`${workbook.contentHash ?? 'no-hash'}:${SPREADSHEET_SEMANTIC_SCHEMA_VERSION}`).digest('hex').slice(0, 32);
@@ -1156,6 +1188,17 @@ export async function analyseSpreadsheetWithAI(
   const active = spreadsheetAIInFlight.get(inFlightKey);
   if (active) return active;
   const run = (async (): Promise<SpreadsheetAIEnvelope> => {
+    const now = testOptions?.now ?? Date.now;
+    const reviewDeadlineAt = now() + (testOptions?.reviewTimeoutMs ?? SPREADSHEET_AI_LIMITS.reviewTimeoutMs);
+    const timeoutForNextProviderCall = () => {
+      const remainingMs = reviewDeadlineAt - now();
+      if (remainingMs <= 0) throw new Error('review_deadline');
+      const providerTimeoutMs = testOptions?.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
+      return {
+        timeoutMs: Math.min(providerTimeoutMs, remainingMs),
+        timeoutReason: remainingMs <= providerTimeoutMs ? 'review_deadline' as const : 'timeout' as const,
+      };
+    };
     const savedPayload = testOptions?.session?.payload;
     const hasResumablePayload = Boolean(
       savedPayload
@@ -1204,6 +1247,7 @@ export async function analyseSpreadsheetWithAI(
     try {
       await checkpoint(resumable ? testOptions!.session!.stage : 'workbook_overview', resumable ? testOptions!.session!.currentPlan : null);
       for (let depth = 0; depth < SPREADSHEET_SEMANTIC_LIMITS.maxHierarchyDepth; depth += 1) {
+        const providerTimeout = timeoutForNextProviderCall();
         if (safeJsonSize(payload) > SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes) {
           return incomplete('incomplete', 'The requested review context exceeded the privacy-safe limit.', {
             reason: 'operational_limit', detail: 'A bounded request exceeded the byte limit.', manualRecoveryRequired: true,
@@ -1216,7 +1260,7 @@ export async function analyseSpreadsheetWithAI(
         }
         const remainingProviderCalls = SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls - providerCalls;
         const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(payload), {
-          timeoutMs: testOptions?.timeoutMs,
+          ...providerTimeout,
           retryDelayMs: testOptions?.retryDelayMs,
           maxProviderCalls: Math.min(SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage, remainingProviderCalls),
           attemptOffset: attemptOffset + providerCalls,
@@ -1247,7 +1291,7 @@ export async function analyseSpreadsheetWithAI(
           const repairPayload = repairPayloadForContract(responseContent);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
-            timeoutMs: testOptions?.timeoutMs,
+            ...timeoutForNextProviderCall(),
             retryDelayMs: testOptions?.retryDelayMs,
             maxProviderCalls: 1,
             attemptOffset: attemptOffset + providerCalls,
@@ -1327,21 +1371,24 @@ export async function analyseSpreadsheetWithAI(
         : message === 'timeout' ? 'transport_failure'
           : message === 'schema_invalid' || message === 'continuation_invalid' ? 'response_contract_invalid'
             : 'provider_unavailable';
+      const timedOut = message === 'timeout' || message === 'review_deadline';
       const reason = failureCategory === 'model_unavailable'
         ? 'Automatic review is unavailable because the configured review model is not available.'
         : failureCategory === 'provider_schema_invalid'
           ? 'Automatic review is unavailable because the provider rejected the review format.'
-          : failureCategory === 'transport_failure'
-            ? 'Automatic review is temporarily unavailable because the provider could not be reached.'
+          : timedOut
+            ? 'Automatic review timed out waiting for a response. No records were imported.'
+            : failureCategory === 'transport_failure'
+              ? 'Automatic review is temporarily unavailable because the provider could not be reached.'
             : failureCategory === 'response_contract_invalid'
               ? 'AI returned a response that did not pass the protected spreadsheet contract.'
           : message.includes('context_request') || message === 'response_too_large' ? 'AI requested context outside the safe limits.'
             : 'AI analysis could not complete.';
-      const abstentionReason = failureCategory === 'transport_failure' && message === 'timeout' ? 'provider_timeout'
+      const abstentionReason = timedOut ? 'provider_timeout'
         : failureCategory === 'provider_schema_invalid' || failureCategory === 'response_contract_invalid' ? 'provider_schema_invalid'
           : message.includes('limit') || message === 'response_too_large' ? 'operational_limit'
             : 'provider_unavailable';
-      const outcome = incomplete('failed', reason, {
+      const outcome = incomplete(message === 'review_deadline' ? 'incomplete' : 'failed', reason, {
         reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
       }, providerCalls, token, providerAttempts, failureCategory);
       const persistedPlan = spreadsheetImportPlanSchema.safeParse(outcome.semanticPlan);
