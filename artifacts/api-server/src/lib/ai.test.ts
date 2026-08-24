@@ -96,6 +96,38 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   );
 });
 
+test('an explicit structured-output compatibility rejection uses the validated JSON fallback once', async () => {
+  const attemptedModes: string[] = [];
+  const telemetry: Array<{ telemetryVersion: string; responseMode: string; outcomeCategory: string; safeStatus: string }> = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (input: { response_format?: { type?: string } }) => {
+      calls += 1;
+      attemptedModes.push(input.response_format?.type ?? 'missing');
+      if (calls === 1) {
+        const error = new Error('response_format json_schema is unsupported') as Error & { status?: number };
+        error.status = 400;
+        throw error;
+      }
+      return { choices: [{ message: { content: '{}' } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0,
+    onAttempt: async (attempt) => { telemetry.push(attempt); },
+  });
+
+  assert.equal(result.providerCalls, 2);
+  assert.deepEqual(attemptedModes, ['json_schema', 'json_object']);
+  assert.deepEqual(telemetry.map((attempt) => [attempt.responseMode, attempt.outcomeCategory, attempt.safeStatus]), [
+    ['json_schema', 'compatibility', 'compatibility'],
+    ['json_object', 'success', 'ok'],
+  ]);
+  assert.equal(telemetry.every((attempt) => attempt.telemetryVersion === 'spreadsheet-provider-attempt.v1'), true);
+  assert.equal(telemetry.every((attempt) => !JSON.stringify(attempt).includes('unsupported')), true);
+});
+
 test('AI fallback telemetry reports both retry and timeout attempts', async () => {
   const workbook = inspectSpreadsheet(Buffer.from([
     'Date,Description,Amount',
@@ -120,6 +152,8 @@ test('AI fallback telemetry reports both retry and timeout attempts', async () =
   assert.equal(result.status, 'failed');
   assert.equal(result.reason, 'AI analysis timed out.');
   assert.equal(result.providerCalls, 2);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout']);
+  assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'replit_ai_integrations' || attempt.routeClass === 'direct_openai'), true);
   assert.equal(result.analysis?.sheets.every((sheet) => !sheet.selected), true, 'a provider failure is never an import plan');
   assert.deepEqual(result.analysis?.sheets.map((sheet) => sheet.mapping.columns), [{}], 'manual recovery must not receive locally inferred column defaults');
 });

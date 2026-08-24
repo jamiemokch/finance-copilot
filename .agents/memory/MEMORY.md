@@ -14,3 +14,4 @@
 - [Layman-first spreadsheet review](layman-first-spreadsheet-review.md) — unclear sheets must state the exact missing fact, preview the relevant rows, and offer safe, persisted choices
 - [Effective saved spreadsheet reviews](effective-saved-spreadsheet-reviews.md) — saved mapping choices return deterministic local re-analysis; clients adopt it only after the durable save succeeds
 - [AI-first spreadsheet semantics](ai-first-spreadsheet-semantics.md) — semantic meaning must come from a validated AI contract; local code remains structural and safety-focused
+- [Replit spreadsheet provider compatibility](replit-spreadsheet-provider.md) — the configured Replit route supports gpt-5.4-mini strict JSON Schema; only fallback on explicit format incompatibility

@@ -285,6 +285,9 @@ export const spreadsheetSemanticSessionsTable = pgTable('spreadsheet_semantic_se
   requestPayload: jsonb('request_payload').notNull().default({}),
   contextHistory: jsonb('context_history').notNull().default('[]'),
   providerCalls: integer('provider_calls').notNull().default(0),
+  // Operational-only provider telemetry. Never stores prompts, workbook
+  // contents, model responses, headers, credentials, or raw error bodies.
+  providerAttempts: jsonb('provider_attempts').notNull().default('[]'),
   currentPlan: jsonb('current_plan'),
   // Remains stable for the logical review. claimToken changes on every lease
   // claim and fences a worker that resumes after another has reclaimed it.
@@ -305,6 +308,46 @@ export const insertSpreadsheetSemanticSessionSchema = createInsertSchema(spreads
 });
 export type SpreadsheetSemanticSessionRecord = typeof spreadsheetSemanticSessionsTable.$inferSelect;
 export type InsertSpreadsheetSemanticSession = z.infer<typeof insertSpreadsheetSemanticSessionSchema>;
+
+/**
+ * Immutable privacy-safe provider call telemetry. The semantic session keeps a
+ * compact copy for recovery while this table retains the audit-grade history.
+ */
+export const spreadsheetSemanticProviderAttemptsTable = pgTable('spreadsheet_semantic_provider_attempts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  profileId: uuid('profile_id')
+    .notNull()
+    .references(() => profilesTable.id, { onDelete: 'cascade' }),
+  evidenceId: uuid('evidence_id')
+    .notNull()
+    .references(() => evidenceItemsTable.id, { onDelete: 'cascade' }),
+  semanticSessionId: uuid('semantic_session_id')
+    .notNull()
+    .references(() => spreadsheetSemanticSessionsTable.id, { onDelete: 'cascade' }),
+  workIdentity: text('work_identity').notNull(),
+  attemptNumber: integer('attempt_number').notNull(),
+  telemetryVersion: text('telemetry_version').notNull(),
+  routeClass: text('route_class').notNull(),
+  model: text('model').notNull(),
+  responseMode: text('response_mode').notNull(),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+  durationMs: integer('duration_ms').notNull(),
+  outcomeCategory: text('outcome_category').notNull(),
+  safeStatus: text('safe_status').notNull(),
+  statusCode: integer('status_code'),
+  retryable: boolean('retryable').notNull(),
+  failurePhase: text('failure_phase'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('spreadsheet_provider_attempt_work_number_unique').on(table.semanticSessionId, table.workIdentity, table.attemptNumber),
+  index('spreadsheet_provider_attempt_evidence_idx').on(table.evidenceId, table.createdAt),
+]);
+export const insertSpreadsheetSemanticProviderAttemptSchema = createInsertSchema(spreadsheetSemanticProviderAttemptsTable).omit({
+  id: true,
+  createdAt: true,
+});
+export type SpreadsheetSemanticProviderAttempt = typeof spreadsheetSemanticProviderAttemptsTable.$inferSelect;
+export type InsertSpreadsheetSemanticProviderAttempt = z.infer<typeof insertSpreadsheetSemanticProviderAttemptSchema>;
 
 // ─── Financial Accounts & Bank Import Audit ────────────────────────────────────
 

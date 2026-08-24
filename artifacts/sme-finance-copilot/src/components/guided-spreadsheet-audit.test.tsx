@@ -101,6 +101,21 @@ test('Yatson uncertainty cards explain the precise gap and offer layman choices'
   assert.match(html, /Use another named column/);
 });
 
+test('automatic-review failure can suppress all worksheet question cards until manual recovery is selected', () => {
+  const html = renderToStaticMarkup(<GuidedSpreadsheetReview
+    enabled={false}
+    sheets={yatsonReviewSheets}
+    selectedSheetIds={[]}
+    resolutions={{}}
+    saving={false}
+    checkingSheetId=""
+    onCheckingSheet={() => undefined}
+    onResolve={() => undefined}
+    onCorrect={() => undefined}
+  />);
+  assert.equal(html, '');
+});
+
 test('ready sheets explain detected fields and unresolved review blocks confirmation locally', () => {
   const readyHtml = renderToStaticMarkup(<GuidedSpreadsheetReview
     sheets={yatsonReviewSheets}

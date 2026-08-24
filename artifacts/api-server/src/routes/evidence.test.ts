@@ -16,6 +16,7 @@ import {
   profilesTable,
   sessionsTable,
   spreadsheetRowOutcomesTable,
+  spreadsheetSemanticProviderAttemptsTable,
   spreadsheetSemanticSessionsTable,
   transactionsTable,
   usersTable,
@@ -541,10 +542,23 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       preTradingStartMode: 'exclude',
       outsideScopeMode: 'exclude',
     };
-    const incompleteDraftResponse = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
+    const prematureManualSave = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
       method: 'PATCH',
       body: JSON.stringify(incompleteReview),
     });
+    let incompleteDraftResponse = prematureManualSave;
+    if (firstInspection.body.aiStatus.recoveryState === 'automatic_unavailable') {
+      assert.equal(prematureManualSave.status, 409, 'worksheet choices stay blocked until manual recovery is explicitly selected');
+      const manualRecovery = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, {
+        method: 'POST', body: JSON.stringify({ mode: 'manual_recovery' }),
+      });
+      assert.equal(manualRecovery.status, 200);
+      assert.equal(manualRecovery.body.aiStatus.recoveryState, 'manual_recovery');
+      incompleteDraftResponse = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
+        method: 'PATCH',
+        body: JSON.stringify(incompleteReview),
+      });
+    }
     assert.equal(incompleteDraftResponse.status, 400);
     assert.deepEqual(incompleteDraftResponse.body.issues, [{
       sheetId: 'sheet_1',
@@ -680,6 +694,10 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     const saveBoundaryReview = async () => {
       const inspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/detect-schema`, { method: 'POST' });
       assert.equal(inspection.status, 200);
+      const manualRecovery = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${spreadsheetEvidenceId}/detect-schema`, {
+        method: 'POST', body: JSON.stringify({ mode: 'manual_recovery' }),
+      });
+      assert.equal(manualRecovery.status, 200);
       const review = {
         selectedSheetIds: ['sheet_1', 'sheet_2'],
         sheetMappings: { sheet_1: boundaryMapping, sheet_2: boundaryMapping },
@@ -896,6 +914,9 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     });
     const saveDuplicateReview = async (evidenceId: string) => {
       assert.equal((await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/detect-schema`, { method: 'POST' })).status, 200);
+      assert.equal((await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/detect-schema`, {
+        method: 'POST', body: JSON.stringify({ mode: 'manual_recovery' }),
+      })).status, 200);
       const saved = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/spreadsheet-review`, {
         method: 'PATCH',
         body: JSON.stringify({
@@ -1066,6 +1087,15 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       assert.equal(reclaimedSession.status, 'complete', JSON.stringify(reclaimedSession.currentPlan));
       assert.notEqual(reclaimedSession.claimToken, activeSession.claimToken);
       assert.equal(reclaimedSession.providerCalls, 1);
+       assert.equal(Array.isArray(reclaimedSession.providerAttempts), true);
+       const providerAttempts = await db.select().from(spreadsheetSemanticProviderAttemptsTable).where(and(
+         eq(spreadsheetSemanticProviderAttemptsTable.profileId, alicePrimary),
+         eq(spreadsheetSemanticProviderAttemptsTable.evidenceId, raceEvidenceId),
+       ));
+       assert.equal(providerAttempts.length, 1, 'only the current fenced lease may persist provider telemetry');
+       assert.equal(providerAttempts.every((attempt) => attempt.telemetryVersion === 'spreadsheet-provider-attempt.v1'), true);
+       assert.equal(providerAttempts.every((attempt) => attempt.model === 'gpt-5.4-mini'), true);
+       assert.equal(providerAttempts.every((attempt) => attempt.failurePhase === null), true);
       const reclaimedPlan = JSON.stringify(reclaimedSession.currentPlan);
 
       releaseFirstProvider?.();

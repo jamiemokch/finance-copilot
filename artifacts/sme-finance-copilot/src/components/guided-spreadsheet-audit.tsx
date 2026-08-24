@@ -16,6 +16,7 @@ export function GuidedSpreadsheetAudit({
   selectedSheetIds,
   sheetRoleOverrides,
   saving,
+  editingAllowed = true,
   onToggle,
   onToggleSheet,
   onSetRole,
@@ -27,6 +28,7 @@ export function GuidedSpreadsheetAudit({
   selectedSheetIds: string[];
   sheetRoleOverrides: Record<string, GuidedSpreadsheetAuditSheet['role']>;
   saving: boolean;
+  editingAllowed?: boolean;
   onToggle: (open: boolean) => void;
   onToggleSheet: (sheetId: string, checked: boolean) => void;
   onSetRole: (sheetId: string, role: GuidedSpreadsheetAuditSheet['role']) => void;
@@ -44,18 +46,18 @@ export function GuidedSpreadsheetAudit({
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2">
-            <input type="checkbox" checked={selectedSheetIds.includes(sheet.sheetId)} disabled={saving || sheet.disposition === 'empty_sheet'} onChange={(event) => onToggleSheet(sheet.sheetId, event.target.checked)} />
+            <input type="checkbox" checked={selectedSheetIds.includes(sheet.sheetId)} disabled={saving || !editingAllowed || sheet.disposition === 'empty_sheet'} onChange={(event) => onToggleSheet(sheet.sheetId, event.target.checked)} />
             Include in review
           </label>
           <label className="flex items-center gap-2">Role
-            <select disabled={saving} className="w-44" value={sheetRoleOverrides[sheet.sheetId] ?? sheet.role} onChange={(event) => onSetRole(sheet.sheetId, event.target.value as GuidedSpreadsheetAuditSheet['role'])}>
+            <select disabled={saving || !editingAllowed} className="w-44" value={sheetRoleOverrides[sheet.sheetId] ?? sheet.role} onChange={(event) => onSetRole(sheet.sheetId, event.target.value as GuidedSpreadsheetAuditSheet['role'])}>
               <option value="transactional">Transaction records</option>
               <option value="non_transactional">Reference only</option>
               <option value="mixed">Mixed content</option>
               <option value="unknown">Not sure yet</option>
             </select>
           </label>
-          <button type="button" disabled={saving} onClick={() => onCorrectSheet(sheet.sheetId)}>Correct columns</button>
+           <button type="button" disabled={saving || !editingAllowed} onClick={() => onCorrectSheet(sheet.sheetId)}>Correct columns</button>
         </div>
       </div>)}
     </div>}

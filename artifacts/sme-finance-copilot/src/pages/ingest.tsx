@@ -315,7 +315,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const [evidenceId, setEvidenceId] = useState(resumeEvidence?.id ?? '');
   const [filename, setFilename] = useState(resumeEvidence?.filename ?? '');
   const [analysis, setAnalysis] = useState<SpreadsheetReviewAnalysis | null>(null);
-  const [aiStatus, setAiStatus] = useState<{ status: string; reason?: string | null } | null>(null);
+  const [aiStatus, setAiStatus] = useState<NonNullable<Awaited<ReturnType<typeof evidenceApi.detectSchema>>['aiStatus']> | null>(null);
   const [sheetMappings, setSheetMappings] = useState<Record<string, ReviewMapping>>({});
   const [selectedSheetIds, setSelectedSheetIds] = useState<string[]>([]);
   const [sheetRoleOverrides, setSheetRoleOverrides] = useState<Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>>({});
@@ -577,6 +577,32 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       // persistReviewDecision surfaces the recoverable error in the review.
     }
   };
+  const retryAutomaticReview = async () => {
+    if (!evidenceId || savingReview) return;
+    setStage('inspecting');
+    setSaveFailure('');
+    try {
+      const detected = await evidenceApi.detectSchema(profileId, evidenceId, 'retry_automatic');
+      applyInspection(detected);
+      setStage('review');
+    } catch (err) {
+      setSaveFailure(err instanceof Error ? err.message : 'Automatic review could not be retried. No records were added.');
+      setStage('review');
+    }
+  };
+  const startManualRecovery = async () => {
+    if (!evidenceId || savingReview) return;
+    setSavingReview(true);
+    setSaveFailure('');
+    try {
+      const detected = await evidenceApi.detectSchema(profileId, evidenceId, 'manual_recovery');
+      applyInspection(detected);
+    } catch (err) {
+      setSaveFailure(err instanceof Error ? err.message : 'Manual recovery could not be started. No records were added.');
+    } finally {
+      setSavingReview(false);
+    }
+  };
   const updateUnresolvedAcknowledgement = async (checked: boolean) => {
     setAcknowledgeUnresolved(checked);
     try {
@@ -611,6 +637,9 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const columnCount = activeSheet?.dimensions.columns ?? 0;
   const importableSheets = (analysis?.sheets ?? []).filter((sheet) => sheet.selected || selectedSheetIds.includes(sheet.sheetId));
   const questions = unresolvedReviewSheets(analysis?.sheets ?? [], sheetResolutions);
+  const automaticReviewReady = aiStatus?.recoveryState === 'automatic_ready' || aiStatus?.status === 'success';
+  const manualRecoveryEnabled = aiStatus?.recoveryState === 'manual_recovery';
+  const reviewEnabled = automaticReviewReady || manualRecoveryEnabled;
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
   const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
   const confirmationBlockers = confirmationBlockersForReview({
@@ -620,6 +649,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     incompleteRowCount: unresolvedRows.length,
     incompleteRowsAcknowledged: acknowledgeUnresolved,
   });
+  if (!reviewEnabled) confirmationBlockers.unshift('Retry automatic review or choose manual recovery before records can be considered.');
   const canConfirm = confirmationBlockers.length === 0;
   return <Card className="p-6 shadow-sm space-y-5">
     <button disabled={savingReview} onClick={leaveReview} className="text-sm text-primary flex gap-1 items-center cursor-pointer disabled:opacity-50"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
@@ -659,16 +689,26 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
         </div>}
       </div>}
       {saveFailure && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 space-y-2"><p><strong>Your last choice was not saved.</strong> {saveFailure} Try again before leaving this review.</p><SpreadsheetServerIssues issues={reviewSaveIssues} onShowSheet={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }} /></div>}
-      <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
-        <strong>{aiStatus?.status === 'success'
-          ? 'We understood the workbook and prepared a review summary.'
-          : 'Automatic understanding is incomplete.'}</strong>{' '}
-        {aiStatus?.status === 'success'
-          ? 'Check the summary below before you confirm.'
-          : 'Nothing can be imported automatically. If you want to continue, choose one specific sheet in Advanced audit details and tell us its date, money, and description columns.'}
+       <div data-testid="spreadsheet-automatic-review-state" className={cn("rounded-lg border p-3 text-sm", automaticReviewReady ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
+         <strong>{automaticReviewReady
+           ? 'We understood the workbook and prepared a review summary.'
+           : manualRecoveryEnabled
+             ? 'Manual recovery is active.'
+             : 'We could not automatically review this workbook.'}</strong>{' '}
+         {automaticReviewReady
+           ? 'Check the summary below before you confirm.'
+           : manualRecoveryEnabled
+             ? 'Choose each sheet and its columns yourself. Nothing is added until the final confirmation.'
+             : 'No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.'}
+         {!reviewEnabled && <div className="mt-3 flex flex-wrap gap-2">
+           <Button data-testid="retry-automatic-spreadsheet-review" size="sm" disabled={savingReview} onClick={() => void retryAutomaticReview()}>Retry automatic review</Button>
+           <Button data-testid="start-manual-spreadsheet-recovery" size="sm" variant="outline" disabled={savingReview} onClick={() => void startManualRecovery()}>Start manual recovery</Button>
+         </div>}
       </div>
-       <GuidedSpreadsheetReview
+       {reviewEnabled && <>
+        <GuidedSpreadsheetReview
          sheets={analysis.sheets}
+          enabled={reviewEnabled}
          selectedSheetIds={selectedSheetIds}
          resolutions={sheetResolutions}
          saving={savingReview}
@@ -677,7 +717,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
          onResolve={(sheet, resolution) => void resolveSheetQuestion(sheet, resolution)}
          onCorrect={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }}
        />
-       {editingSheetId && activeSheet && activeMapping && <div className="space-y-3 rounded-xl border border-primary/30 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">Choose the named columns for {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Use this only when the choices above do not match what you see in the preview.</p></div><Button size="sm" variant="outline" disabled={savingReview} onClick={() => setEditingSheetId('')}>Done</Button></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select disabled={savingReview} value={roleFor(column)} onChange={(event) => void setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Do not use</option><option value="date">Date</option><option value="amount">One money amount</option><option value="debit">Money out</option><option value="credit">Money in</option><option value="description">What it was for</option><option value="category">Type of item</option><option value="balance">Balance only — do not add</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div></div>}
+        {editingSheetId && activeSheet && activeMapping && <div className="space-y-3 rounded-xl border border-primary/30 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">Choose the named columns for {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Use this only when the choices above do not match what you see in the preview.</p></div><Button size="sm" variant="outline" disabled={savingReview} onClick={() => setEditingSheetId('')}>Done</Button></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select disabled={savingReview} value={roleFor(column)} onChange={(event) => void setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Do not use</option><option value="date">Date</option><option value="amount">One money amount</option><option value="debit">Money out</option><option value="credit">Money in</option><option value="description">What it was for</option><option value="category">Type of item</option><option value="balance">Balance only — do not add</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div></div>}
        <div className="grid gap-4 md:grid-cols-2"><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Date range found</p><p className="text-sm">{hasCoverage ? `${analysis.coverage.startDate} to ${analysis.coverage.endDate}` : 'We need a usable date column before we can show a date range.'}</p><p className="text-xs text-muted-foreground">This is based only on valid dates we could read.</p></div><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">{analysis.taxYears.length === 1 ? 'Tax year found' : 'Which tax year should these records support?'}</p>{analysis.taxYears.length === 1 ? <p className="text-sm">{analysis.taxYears[0]} <span className="text-muted-foreground">— based on the dates in the spreadsheet</span></p> : analysis.taxYears.length ? analysis.taxYears.map((year) => <label key={year} className="flex gap-2 text-sm"><input type="checkbox" checked={filingScope.includes(year)} onChange={(event) => void toggleScope(year, event.target.checked)} />{year}</label>) : <p className="text-sm text-amber-800">We could not find enough usable dates. Answer the sheet questions above, then check again.</p>}</div></div>
       <GuidedSpreadsheetAudit
         advancedOpen={advancedOpen}
@@ -686,6 +726,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
         selectedSheetIds={selectedSheetIds}
         sheetRoleOverrides={sheetRoleOverrides}
         saving={savingReview}
+         editingAllowed={reviewEnabled}
         onToggle={setAdvancedOpen}
         onToggleSheet={(sheetId, checked) => void toggleSheet(sheetId, checked)}
         onSetRole={(sheetId, role) => void setSheetRole(sheetId, role)}
@@ -699,7 +740,8 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
          taxYears={filingScope}
          unresolved={confirmationBlockers}
        />
-       <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" disabled={savingReview} onClick={() => void reanalyse()}>Check again for suggestions</Button><div className="space-y-1 text-right"><Button disabled={!canConfirm || savingReview} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm and import</Button>{!canConfirm && <p className="max-w-md text-xs text-amber-800">Answer the items in “Before we add anything” to continue.</p>}</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-3">{automaticReviewReady && <Button variant="outline" disabled={savingReview} onClick={() => void reanalyse()}>Check again for suggestions</Button>}<div className="space-y-1 text-right"><Button disabled={!canConfirm || savingReview} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm and import</Button>{!canConfirm && <p className="max-w-md text-xs text-amber-800">Answer the items in “Before we add anything” to continue.</p>}</div></div>
+       </>}
     </div>}
     {stage === 'confirming' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Bringing in your confirmed records…</div>}
     {stage === 'done' && summary && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-900"><div className="flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" /><div><p className="font-semibold">Spreadsheet records imported</p><p className="text-sm mt-1">{summary.importedRows} movement{summary.importedRows === 1 ? '' : 's'} added as unclassified records. They do not affect tax or profit until you classify them.</p><p className="text-xs mt-2">Tax years: {summary.taxYears.join(', ') || 'none'}</p></div></div></div>}

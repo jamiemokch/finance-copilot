@@ -131,6 +131,7 @@ function FieldExplanation({ sheet, field, label, onCorrect }: { sheet: GuidedRev
 
 export function GuidedSpreadsheetReview({
   sheets,
+  enabled = true,
   selectedSheetIds,
   resolutions,
   saving,
@@ -140,6 +141,8 @@ export function GuidedSpreadsheetReview({
   onCorrect,
 }: {
   sheets: GuidedReviewSheet[];
+  /** Questions and suggested sheet controls stay hidden until recovery is chosen. */
+  enabled?: boolean;
   selectedSheetIds: string[];
   resolutions: Record<string, SheetResolution>;
   saving: boolean;
@@ -148,6 +151,7 @@ export function GuidedSpreadsheetReview({
   onResolve: (sheet: GuidedReviewSheet, resolution: SheetResolution) => void;
   onCorrect: (sheetId: string) => void;
 }) {
+  if (!enabled) return null;
   const selected = useMemo(() => new Set(selectedSheetIds), [selectedSheetIds]);
   const ready = sheets.filter((sheet) =>
     selected.has(sheet.sheetId)

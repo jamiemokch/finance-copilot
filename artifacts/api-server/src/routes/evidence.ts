@@ -10,6 +10,7 @@ import {
 import {
   evidenceAuditEventsTable, evidenceItemsTable, evidenceTransactionLinksTable,
   inboxItemsTable, transactionsTable, profilesTable, spreadsheetRowOutcomesTable, spreadsheetSemanticSessionsTable,
+  spreadsheetSemanticProviderAttemptsTable,
 } from "@workspace/db/schema";
 import { eq, and, desc, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
@@ -30,6 +31,9 @@ const PROCESSING_LEASE_MS = 10 * 60 * 1000;
 const SEMANTIC_SESSION_LEASE_MS = 2 * 60 * 1000;
 const SPREADSHEET_SOURCE_ROW_CONFLICT_CODE = "source_row_conflict";
 const SPREADSHEET_IMPORT_FAILURE_CODE = "spreadsheet_import_failed";
+const spreadsheetDetectionModeInput = z.object({
+  mode: z.enum(["retry_automatic", "manual_recovery"]).optional(),
+}).strict();
 
 type SpreadsheetSourceRowConflict = {
   sheetId: string;
@@ -57,6 +61,7 @@ function semanticSessionForAI(record: typeof spreadsheetSemanticSessionsTable.$i
     payload: record.requestPayload,
     contextHistory: Array.isArray(record.contextHistory) ? record.contextHistory as SpreadsheetSemanticSession["contextHistory"] : [],
     providerCalls: record.providerCalls,
+    providerAttempts: Array.isArray(record.providerAttempts) ? record.providerAttempts as SpreadsheetSemanticSession["providerAttempts"] : [],
     currentPlan: spreadsheetImportPlanSchema.safeParse(record.currentPlan).success
       ? spreadsheetImportPlanSchema.parse(record.currentPlan)
       : null,
@@ -841,6 +846,18 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     if (evidenceItem.workflowVersion >= 2 || evidenceItem.importStatus === "done") {
       res.status(409).json({ error: "This spreadsheet review can no longer be edited." }); return;
     }
+    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
+    const savedPlan = spreadsheetImportPlanSchema.safeParse(state.aiProposal);
+    const savedRecoveryState = (state.aiStatus as { recoveryState?: unknown } | undefined)?.recoveryState;
+    if ((savedRecoveryState === "automatic_unavailable"
+      || (savedPlan.success && savedPlan.data.status !== "complete"))
+      && savedRecoveryState !== "manual_recovery") {
+      res.status(409).json({
+        error: "Choose manual recovery or retry automatic review before saving sheet choices.",
+        issues: [{ field: "selection", message: "Automatic review is unavailable. Select “Start manual recovery” before choosing worksheet mappings." }],
+      });
+      return;
+    }
     const file = await storageService.getObjectEntityFile(evidenceItem.objectPath);
     const [buffer] = await file.download();
     const workbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
@@ -870,8 +887,6 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         return;
       }
     }
-    const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
-    const savedPlan = spreadsheetImportPlanSchema.safeParse(state.aiProposal);
     const [semanticSession] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(
       eq(spreadsheetSemanticSessionsTable.evidenceId, evidenceItem.id),
       eq(spreadsheetSemanticSessionsTable.profileId, profile.id),
@@ -1021,6 +1036,9 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
 // POST /profiles/:profileId/evidence/:evidenceId/detect-schema — CSV/XLSX column proposal
 router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const detectionRequest = spreadsheetDetectionModeInput.safeParse(req.body ?? {});
+  if (!detectionRequest.success) { res.status(400).json({ error: "Invalid spreadsheet review action" }); return; }
+  const detectionMode = detectionRequest.data.mode;
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
@@ -1051,6 +1069,10 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     // A user decision is durable and must never be overwritten by a later
     // analysis request. Return the persisted review state instead.
     if (savedState?.deterministicFindings && savedState.mappingSchema && (savedState.userDecision || savedState.reviewDraft)) {
+      if (detectionMode === "retry_automatic") {
+        res.status(409).json({ error: "Automatic review cannot replace saved manual choices. Continue the saved review instead." });
+        return;
+      }
       res.json({
         mappingSchema: savedState.mappingSchema,
         previewRows: [],
@@ -1058,6 +1080,22 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         aiProposal: savedState.aiProposal ?? null,
         aiStatus: savedState.aiStatus ?? { status: "not_requested" },
         userDecision: savedState.userDecision,
+        reviewDraft: savedState.reviewDraft ?? null,
+        reviewRevisionHistory: savedState.reviewRevisionHistory ?? [],
+        lastImportError: savedState.lastImportError ?? null,
+      });
+      return;
+    }
+    const savedAiStatus = savedState?.aiStatus as { status?: unknown; recoveryState?: unknown } | null | undefined;
+    if (savedState?.deterministicFindings && savedState.mappingSchema
+      && savedAiStatus?.recoveryState === "automatic_unavailable" && !detectionMode) {
+      res.json({
+        mappingSchema: savedState.mappingSchema,
+        previewRows: [],
+        analysis: savedState.deterministicFindings,
+        aiProposal: savedState.aiProposal ?? null,
+        aiStatus: savedState.aiStatus,
+        userDecision: savedState.userDecision ?? null,
         reviewDraft: savedState.reviewDraft ?? null,
         reviewRevisionHistory: savedState.reviewRevisionHistory ?? [],
         lastImportError: savedState.lastImportError ?? null,
@@ -1088,6 +1126,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       requestPayload: {},
       contextHistory: [],
       providerCalls: 0,
+      providerAttempts: [],
       workIdentity: randomUUID(),
     }).onConflictDoNothing();
     let [semanticRecord] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(
@@ -1112,6 +1151,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         requestPayload: {},
         contextHistory: [],
         providerCalls: 0,
+        providerAttempts: [],
         currentPlan: null,
         workIdentity: randomUUID(),
         claimToken: resetToken,
@@ -1162,6 +1202,26 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       semanticRecord = claimedSession;
       semanticClaimToken = claimToken;
       reclaimed = true;
+    } else if (detectionMode === "retry_automatic" && semanticRecord.status === "incomplete") {
+      const claimToken = randomUUID();
+      const payloadStage = (semanticRecord.requestPayload as { stage?: unknown })?.stage;
+      const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
+        status: "working",
+        stage: payloadStage === "requested_context" ? "requested_context" : "workbook_overview",
+        currentPlan: null,
+        claimToken,
+        leaseExpiresAt: new Date(nowForSession.getTime() + SEMANTIC_SESSION_LEASE_MS),
+        updatedAt: nowForSession,
+      }).where(and(
+        eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+        eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+        eq(spreadsheetSemanticSessionsTable.status, "incomplete"),
+      )).returning();
+      if (!claimedSession) {
+        res.status(409).json({ error: "This spreadsheet automatic review changed. Reload the workbook review." }); return;
+      }
+      semanticRecord = claimedSession;
+      semanticClaimToken = claimToken;
     } else if (semanticRecord.status === "ready" || semanticRecord.status === "invalidated") {
       const claimToken = randomUUID();
       const [claimedSession] = await db.update(spreadsheetSemanticSessionsTable).set({
@@ -1204,6 +1264,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         requestPayload: session.payload as Record<string, unknown>,
         contextHistory: session.contextHistory,
         providerCalls: session.providerCalls,
+        providerAttempts: session.providerAttempts,
         currentPlan: session.currentPlan,
         leaseExpiresAt: status === "working" ? new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS) : null,
         updatedAt: new Date(),
@@ -1232,11 +1293,73 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         });
       }
     };
+    const persistProviderAttempts = async (attempts: NonNullable<SpreadsheetSemanticSession["providerAttempts"]>) => {
+      if (!semanticClaimToken) return;
+      const attempt = attempts.at(-1);
+      if (!attempt) return;
+      await db.transaction(async (tx) => {
+        const [checkpoint] = await tx.update(spreadsheetSemanticSessionsTable).set({
+          providerAttempts: attempts,
+          leaseExpiresAt: new Date(Date.now() + SEMANTIC_SESSION_LEASE_MS),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+          eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+          eq(spreadsheetSemanticSessionsTable.claimToken, semanticClaimToken),
+          eq(spreadsheetSemanticSessionsTable.status, "working"),
+        )).returning();
+        if (!checkpoint) throw new Error("semantic_session_fenced");
+        await tx.insert(spreadsheetSemanticProviderAttemptsTable).values({
+          profileId: profile.id,
+          evidenceId: evidenceItem.id,
+          semanticSessionId: checkpoint.id,
+          workIdentity: checkpoint.workIdentity,
+          attemptNumber: attempt.attemptNumber,
+          telemetryVersion: attempt.telemetryVersion,
+          routeClass: attempt.routeClass,
+          model: attempt.model,
+          responseMode: attempt.responseMode,
+          startedAt: new Date(attempt.startedAt),
+          durationMs: attempt.durationMs,
+          outcomeCategory: attempt.outcomeCategory,
+          safeStatus: attempt.safeStatus,
+          statusCode: attempt.statusCode,
+          retryable: attempt.retryable,
+          failurePhase: attempt.failurePhase,
+        }).onConflictDoNothing();
+        await tx.insert(evidenceAuditEventsTable).values({
+          profileId: profile.id,
+          evidenceId: evidenceItem.id,
+          actorUserId: req.user.id,
+          eventType: "spreadsheet_provider_attempt",
+          details: {
+            semanticSessionId: checkpoint.id,
+            semanticWorkIdentity: checkpoint.workIdentity,
+            ...attempt,
+          },
+        });
+        semanticRecord = checkpoint;
+        persistedSemanticSession = semanticSessionForAI(checkpoint);
+      });
+    };
     const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis, {
       session: persistedSemanticSession,
       persistSession: persistSemanticSession,
+      persistProviderAttempts,
       inFlightKey: semanticClaimToken ? `${semanticRecord.id}:${semanticClaimToken}` : undefined,
     });
+    // Operational limits and missing configuration return before the AI runner
+    // starts. Persist those unavailable states through the same fenced session
+    // path so a later explicit retry has an unambiguous durable starting point.
+    if (semanticClaimToken && semanticRecord.status === "working" && ai.status !== "success" && ai.semanticPlan) {
+      await persistSemanticSession({
+        ...persistedSemanticSession,
+        stage: "incomplete",
+        providerCalls: ai.providerCalls,
+        providerAttempts: ai.providerAttempts ?? persistedSemanticSession.providerAttempts,
+        currentPlan: spreadsheetImportPlanSchema.parse(ai.semanticPlan),
+      });
+    }
     if (semanticClaimToken) {
       const [currentSession] = await db.select({
         id: spreadsheetSemanticSessionsTable.id,
@@ -1291,34 +1414,68 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
         continuationToken: semanticRecord.continuationToken,
       },
       semanticPlanIdentity: semanticPlanIdentity(workbook.contentHash, ai.semanticPlan),
-      aiStatus: { status: ai.status, reason: ai.reason ?? null, sampledSheetIds: ai.sampledSheetIds, providerCalls: ai.providerCalls, limits: ai.limits, continuationToken: ai.continuationToken ?? null },
+      aiStatus: {
+        status: ai.status,
+        reason: ai.reason ?? null,
+        sampledSheetIds: ai.sampledSheetIds,
+        providerCalls: ai.providerCalls,
+        providerAttempts: ai.providerAttempts ?? [],
+        limits: ai.limits,
+        continuationToken: ai.continuationToken ?? null,
+        recoveryState: ai.status === "success"
+          ? "automatic_ready"
+          : detectionMode === "manual_recovery"
+            ? "manual_recovery"
+            : "automatic_unavailable",
+      },
       userDecision: savedState?.userDecision ?? null,
       reviewDraft: savedState?.reviewDraft ?? null,
       reviewRevisionHistory: savedState?.reviewRevisionHistory ?? [],
       lastImportError: savedState?.lastImportError ?? null,
     };
-    const [reopened] = await db.update(evidenceItemsTable).set({
-      mappingSchema: state as unknown as Record<string, unknown>,
-      importStatus: "mapping",
-      processingLeaseExpiresAt: null,
-      processingToken: null,
-      totalRows: workbook.totalParserRows,
-    }).where(and(
-      eq(evidenceItemsTable.id, evidenceItem.id),
-      eq(evidenceItemsTable.profileId, profile.id),
-      or(
-        inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
-        and(eq(evidenceItemsTable.importStatus, "processing"), or(
-          isNull(evidenceItemsTable.processingLeaseExpiresAt),
-          lt(evidenceItemsTable.processingLeaseExpiresAt, now),
-        )),
-      ),
-    )).returning();
+    const [reopened] = await db.transaction(async (tx) => {
+      if (semanticClaimToken) {
+        const [fencedSession] = await tx.select({ id: spreadsheetSemanticSessionsTable.id })
+          .from(spreadsheetSemanticSessionsTable)
+          .where(and(
+            eq(spreadsheetSemanticSessionsTable.id, semanticRecord.id),
+            eq(spreadsheetSemanticSessionsTable.workIdentity, semanticRecord.workIdentity),
+            eq(spreadsheetSemanticSessionsTable.claimToken, semanticClaimToken),
+          ))
+          .for("update");
+        if (!fencedSession) return [];
+      }
+      return tx.update(evidenceItemsTable).set({
+        mappingSchema: state as unknown as Record<string, unknown>,
+        importStatus: "mapping",
+        processingLeaseExpiresAt: null,
+        processingToken: null,
+        totalRows: workbook.totalParserRows,
+      }).where(and(
+        eq(evidenceItemsTable.id, evidenceItem.id),
+        eq(evidenceItemsTable.profileId, profile.id),
+        or(
+          inArray(evidenceItemsTable.importStatus, ["idle", "mapping", "done", "error"]),
+          and(eq(evidenceItemsTable.importStatus, "processing"), or(
+            isNull(evidenceItemsTable.processingLeaseExpiresAt),
+            lt(evidenceItemsTable.processingLeaseExpiresAt, now),
+          )),
+        ),
+      )).returning();
+    });
     if (!reopened) { res.status(409).json({ error: "This spreadsheet is still being processed" }); return; }
     await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_inspected", {
       contentHash: workbook.contentHash, parserVersion: analysis.parserVersion, sheetCount: workbook.sheets.length,
       totalParserRows: workbook.totalParserRows, aiStatus: ai.status, fallbackReason: ai.reason ?? null,
+      recoveryState: state.aiStatus.recoveryState,
+      providerAttemptCount: state.aiStatus.providerAttempts.length,
     });
+    if (detectionMode === "manual_recovery") {
+      await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_manual_recovery_selected", {
+        semanticSessionId: semanticRecord.id,
+        semanticWorkIdentity: semanticRecord.workIdentity,
+      });
+    }
     res.json({
       mappingSchema, previewRows, analysis, semanticWorkbookOverview: state.semanticWorkbookOverview, aiProposal: ai.semanticPlan,
       aiStatus: state.aiStatus, userDecision: state.userDecision, reviewDraft: state.reviewDraft,
@@ -1380,6 +1537,14 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     const semanticPlan = persistedPlan.success && persistedPlan.data.status === "complete"
       ? persistedPlan.data
       : null;
+    const recoveryState = (importState.aiStatus as { recoveryState?: unknown } | undefined)?.recoveryState;
+    if (!semanticPlan && recoveryState !== "manual_recovery") {
+      res.status(409).json({
+        error: "Choose manual recovery or retry automatic review before importing.",
+        issues: [{ field: "selection", message: "Automatic review is unavailable. Start manual recovery and save your choices before importing." }],
+      });
+      return;
+    }
     const currentPlanIdentity = semanticPlanIdentity(sourceContentHash, persistedPlan.success ? persistedPlan.data : null);
     if (body.data.semanticPlanIdentity !== currentPlanIdentity
       || persistedDraft.semanticPlanIdentity !== currentPlanIdentity) {

@@ -19,6 +19,7 @@ import {
   spreadsheetUnderstandingProposalSchema,
   type SpreadsheetUnderstandingProposal,
   type SpreadsheetAIEnvelope,
+  type SpreadsheetProviderAttempt,
 } from './spreadsheet-understanding.js';
 import {
   analysisFromSemanticPlan,
@@ -36,6 +37,8 @@ import {
 } from './spreadsheet-semantic-contract.js';
 
 const FINANCE_COPILOT_MODEL = 'gpt-5.4-mini';
+export const SPREADSHEET_PROVIDER_MODEL = FINANCE_COPILOT_MODEL;
+export const SPREADSHEET_PROVIDER_TELEMETRY_VERSION = 'spreadsheet-provider-attempt.v1' as const;
 export const SPREADSHEET_AI_LIMITS = {
   maxLocalSheets: 100,
   maxSheets: 100,
@@ -69,6 +72,7 @@ export type SpreadsheetSemanticSession = {
   payload: unknown;
   contextHistory: Array<{ continuationToken: string; rangeCount: number }>;
   providerCalls: number;
+  providerAttempts: SpreadsheetProviderAttempt[];
   currentPlan: SpreadsheetImportPlan | null;
 };
 
@@ -286,6 +290,8 @@ export async function providerCallWithTimeout(
     timeoutMs?: number;
     retryDelayMs?: number;
     maxProviderCalls?: number;
+    attemptOffset?: number;
+    onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
 ): Promise<{ content: string; providerCalls: number }> {
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
@@ -293,12 +299,46 @@ export async function providerCallWithTimeout(
   const maxProviderCalls = options.maxProviderCalls ?? SPREADSHEET_AI_LIMITS.maxProviderCalls;
   let providerCalls = 0;
   let lastError: unknown;
+  let responseMode: SpreadsheetProviderAttempt['responseMode'] = 'json_schema';
+  const routeClass: SpreadsheetProviderAttempt['routeClass'] = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL
+    ? 'replit_ai_integrations'
+    : 'direct_openai';
+  const classifyFailure = (error: unknown) => {
+    const candidate = error as { status?: unknown; code?: unknown; message?: unknown };
+    const status = typeof candidate.status === 'number' && Number.isInteger(candidate.status)
+      ? candidate.status
+      : null;
+    const message = String(candidate.message ?? '').toLowerCase();
+    const compatibility = status === 400 && (
+      /response_format|json_schema|structured output|strict schema|unsupported.*format|not support.*json/i.test(message)
+    );
+    const timeout = message === 'timeout' || /timeout|timed out/i.test(message);
+    const rateLimited = status === 429 || String(candidate.code ?? '').toLowerCase().includes('rate_limit');
+    const retryable = timeout || rateLimited || status === null || status >= 500;
+    return {
+      status,
+      compatibility,
+      timeout,
+      rateLimited,
+      retryable,
+      outcomeCategory: compatibility ? 'compatibility' as const
+        : timeout ? 'timeout' as const
+          : rateLimited ? 'rate_limited' as const
+            : 'unavailable' as const,
+      safeStatus: compatibility ? 'compatibility' as const
+        : timeout ? 'timeout' as const
+          : rateLimited ? 'rate_limited' as const
+            : status === null ? 'network' as const
+              : 'http_error' as const,
+    };
+  };
   for (let attempt = 0; attempt < maxProviderCalls; attempt += 1) {
     providerCalls += 1;
+    const startedAt = new Date();
     try {
       const response = await Promise.race([
         client.chat.completions.create({
-          model: FINANCE_COPILOT_MODEL,
+          model: SPREADSHEET_PROVIDER_MODEL,
           max_completion_tokens: SPREADSHEET_AI_LIMITS.maxOutputTokens,
           messages: [
             {
@@ -307,28 +347,65 @@ export async function providerCallWithTimeout(
             },
             { role: 'user', content: payload },
           ],
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'spreadsheet_semantic_v2_response',
-              strict: true,
-              schema: spreadsheetAIResponseJsonSchema,
-            },
-          } as never,
+          response_format: (responseMode === 'json_schema'
+            ? {
+              type: 'json_schema',
+              json_schema: {
+                name: 'spreadsheet_semantic_v2_response',
+                strict: true,
+                schema: spreadsheetAIResponseJsonSchema,
+              },
+            }
+            : { type: 'json_object' }) as never,
         }),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
       ]);
+      await options.onAttempt?.({
+        telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,
+        attemptNumber: (options.attemptOffset ?? 0) + providerCalls,
+        routeClass,
+        model: SPREADSHEET_PROVIDER_MODEL,
+        responseMode,
+        startedAt: startedAt.toISOString(),
+        durationMs: Date.now() - startedAt.getTime(),
+        outcomeCategory: 'success',
+        safeStatus: 'ok',
+        statusCode: null,
+        retryable: false,
+        failurePhase: null,
+      });
       return { content: response.choices[0]?.message?.content ?? '', providerCalls };
     } catch (error) {
       lastError = error;
-      const status = (error as { status?: number }).status;
-      if (attempt < maxProviderCalls - 1 && (status === 429 || !status || status >= 500)) {
+      const failure = classifyFailure(error);
+      await options.onAttempt?.({
+        telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,
+        attemptNumber: (options.attemptOffset ?? 0) + providerCalls,
+        routeClass,
+        model: SPREADSHEET_PROVIDER_MODEL,
+        responseMode,
+        startedAt: startedAt.toISOString(),
+        durationMs: Date.now() - startedAt.getTime(),
+        outcomeCategory: failure.outcomeCategory,
+        safeStatus: failure.safeStatus,
+        statusCode: failure.status,
+        retryable: failure.retryable || (failure.compatibility && responseMode === 'json_schema'),
+        failurePhase: 'provider_request',
+      });
+      // Strict JSON Schema is the verified Replit route. The only fallback is
+      // a compact JSON-object request when a provider explicitly rejects the
+      // structured-output format; Zod/semantic validation below still applies.
+      if (failure.compatibility && responseMode === 'json_schema' && attempt < maxProviderCalls - 1) {
+        responseMode = 'json_object';
+        continue;
+      }
+      if (attempt < maxProviderCalls - 1 && failure.retryable) {
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         continue;
       }
-      const failure = error instanceof Error ? error : new Error('provider failed');
-      (failure as Error & { providerCalls?: number }).providerCalls = providerCalls;
-      throw failure;
+      const providerFailure = error instanceof Error ? error : new Error('provider failed');
+      (providerFailure as Error & { providerCalls?: number }).providerCalls = providerCalls;
+      throw providerFailure;
     }
   }
   const failure = lastError instanceof Error ? lastError : new Error('provider failed');
@@ -345,6 +422,7 @@ export async function analyseSpreadsheetWithAI(
     retryDelayMs?: number;
     session?: SpreadsheetSemanticSession | null;
     persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
+    persistProviderAttempts?: (attempts: SpreadsheetProviderAttempt[]) => Promise<void>;
     // A durable lease holder must never inherit a stale worker's in-process
     // promise after its database claim has been reclaimed.
     inFlightKey?: string;
@@ -365,6 +443,7 @@ export async function analyseSpreadsheetWithAI(
     abstention: Parameters<typeof incompletePlanForWorkbook>[2],
     providerCalls = 0,
     continuationToken = initialToken,
+    providerAttempts: SpreadsheetProviderAttempt[] = [],
   ): SpreadsheetAIEnvelope => ({
     status,
     proposal: null,
@@ -374,6 +453,7 @@ export async function analyseSpreadsheetWithAI(
     reason,
     sampledSheetIds: [],
     providerCalls,
+    providerAttempts,
     limits,
   });
   const tooLarge = workbook.totalParserRows > SPREADSHEET_AI_LIMITS.largeWorkbookRows
@@ -398,6 +478,7 @@ export async function analyseSpreadsheetWithAI(
         reason: complete ? undefined : persisted.currentPlan.abstention?.detail ?? 'The review needs a targeted manual decision.',
         sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId),
         providerCalls: 0,
+        providerAttempts: persisted.providerAttempts ?? [],
         limits,
       };
     }
@@ -435,6 +516,7 @@ export async function analyseSpreadsheetWithAI(
       && (testOptions.session.stage === 'workbook_overview' || testOptions.session.stage === 'requested_context')
       && hasResumablePayload;
     let providerCalls = resumable ? testOptions!.session!.providerCalls : 0;
+    let providerAttempts = resumable ? testOptions!.session!.providerAttempts ?? [] : [];
     let token = resumable ? testOptions!.session!.continuationToken : initialToken;
     let payload: unknown = resumable ? testOptions!.session!.payload : {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
@@ -456,6 +538,7 @@ export async function analyseSpreadsheetWithAI(
       payload,
       contextHistory,
       providerCalls,
+        providerAttempts,
       currentPlan,
     });
     try {
@@ -464,23 +547,28 @@ export async function analyseSpreadsheetWithAI(
         if (safeJsonSize(payload) > SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes) {
           return incomplete('incomplete', 'The requested review context exceeded the privacy-safe limit.', {
             reason: 'operational_limit', detail: 'A bounded request exceeded the byte limit.', manualRecoveryRequired: true,
-          }, providerCalls, token);
+          }, providerCalls, token, providerAttempts);
         }
         if (providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) {
           return incomplete('incomplete', 'The review reached its safe step limit before it could finish.', {
             reason: 'operational_limit', detail: 'The hierarchy reached the maximum provider-call limit.', manualRecoveryRequired: true,
-          }, providerCalls, token);
+          }, providerCalls, token, providerAttempts);
         }
         const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(payload), {
           timeoutMs: testOptions?.timeoutMs,
           retryDelayMs: testOptions?.retryDelayMs,
           maxProviderCalls: SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage,
+          attemptOffset: providerCalls,
+          onAttempt: async (attempt) => {
+            providerAttempts = [...providerAttempts, attempt];
+            await testOptions?.persistProviderAttempts?.(providerAttempts);
+          },
         });
         providerCalls += result.providerCalls;
         if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) {
           return incomplete('incomplete', 'The review reached its safe provider-call limit.', {
             reason: 'operational_limit', detail: 'The provider-call budget was exhausted.', manualRecoveryRequired: true,
-          }, providerCalls, token);
+          }, providerCalls, token, providerAttempts);
         }
         if (Buffer.byteLength(result.content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) throw new Error('response_too_large');
         const parsed = spreadsheetAIResponseSchema.safeParse(JSON.parse(result.content) as unknown);
@@ -514,13 +602,13 @@ export async function analyseSpreadsheetWithAI(
             status: 'abstained', proposal: null, semanticPlan: plan, semanticOverview: overview,
             analysis: structuralAnalysis, continuationToken: token,
             reason: plan.abstention?.detail ?? 'The review needs a targeted manual decision.',
-            sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, limits,
+            sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, providerAttempts, limits,
           };
         }
         const envelope: SpreadsheetAIEnvelope = {
           status: 'success', proposal: null, semanticPlan: plan, semanticOverview: overview,
           analysis: analysisFromSemanticPlan(workbook, plan), continuationToken: token,
-          sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, limits,
+          sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, providerAttempts, limits,
         };
         await checkpoint('complete', plan);
         spreadsheetAICache.set(cacheKey, { expiresAt: Date.now() + SPREADSHEET_SEMANTIC_LIMITS.cacheTtlMs, envelope });
@@ -529,9 +617,10 @@ export async function analyseSpreadsheetWithAI(
       }
       return incomplete('incomplete', 'The review needs more steps than we allow for financial data.', {
         reason: 'operational_limit', detail: 'The maximum hierarchy depth was reached.', manualRecoveryRequired: true,
-      }, providerCalls, token);
+      }, providerCalls, token, providerAttempts);
     } catch (error) {
       const calls = (error as { providerCalls?: number }).providerCalls ?? providerCalls;
+      providerCalls = calls;
       const message = error instanceof Error ? error.message : 'provider_error';
       const reason = message === 'timeout' ? 'AI analysis timed out.'
         : message === 'schema_invalid' ? 'AI returned a malformed response.'
@@ -543,7 +632,7 @@ export async function analyseSpreadsheetWithAI(
             : 'provider_unavailable';
       const outcome = incomplete('failed', reason, {
         reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
-      }, calls, token);
+      }, calls, token, providerAttempts);
       const persistedPlan = spreadsheetImportPlanSchema.safeParse(outcome.semanticPlan);
       await checkpoint('incomplete', persistedPlan.success ? persistedPlan.data : null);
       return outcome;

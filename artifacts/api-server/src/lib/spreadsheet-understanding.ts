@@ -129,6 +129,25 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
+/**
+ * This contains operational metadata only. It deliberately excludes workbook
+ * values, request payloads, response text, provider headers, and raw errors.
+ */
+export type SpreadsheetProviderAttempt = {
+  telemetryVersion: 'spreadsheet-provider-attempt.v1';
+  attemptNumber: number;
+  routeClass: 'replit_ai_integrations' | 'direct_openai';
+  model: string;
+  responseMode: 'json_schema' | 'json_object';
+  startedAt: string;
+  durationMs: number;
+  outcomeCategory: 'success' | 'timeout' | 'rate_limited' | 'compatibility' | 'unavailable';
+  safeStatus: 'ok' | 'timeout' | 'rate_limited' | 'compatibility' | 'network' | 'http_error';
+  statusCode: number | null;
+  retryable: boolean;
+  failurePhase: 'provider_request' | null;
+};
+
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */
 export const spreadsheetUnderstandingJsonSchema = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -150,6 +169,7 @@ export type SpreadsheetAIEnvelope = {
   reason?: string;
   sampledSheetIds: string[];
   providerCalls: number;
+  providerAttempts?: SpreadsheetProviderAttempt[];
   limits: {
     maxSheets: number; maxRowsPerSheet: number; maxCellsPerSheet: number; maxCellCharacters: number;
     maxRequestBytes: number; maxResponseBytes: number; maxOutputTokens: number; timeoutMs: number;

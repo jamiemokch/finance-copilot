@@ -389,7 +389,28 @@ export type SpreadsheetInspectionResponse = {
   previewRows: string[][];
   analysis?: SpreadsheetReviewAnalysis;
   aiProposal?: unknown;
-  aiStatus?: { status: string; reason?: string | null; sampledSheetIds?: string[]; continuationToken?: string | null };
+  aiStatus?: {
+    status: string;
+    reason?: string | null;
+    sampledSheetIds?: string[];
+    continuationToken?: string | null;
+    recoveryState?: 'automatic_ready' | 'automatic_unavailable' | 'manual_recovery';
+    providerCalls?: number;
+    providerAttempts?: Array<{
+      telemetryVersion: 'spreadsheet-provider-attempt.v1';
+      attemptNumber: number;
+      routeClass: 'replit_ai_integrations' | 'direct_openai';
+      model: string;
+      responseMode: 'json_schema' | 'json_object';
+      startedAt: string;
+      durationMs: number;
+      outcomeCategory: string;
+      safeStatus: string;
+      statusCode: number | null;
+      retryable: boolean;
+      failurePhase: 'provider_request' | null;
+    }>;
+  };
   userDecision?: unknown;
   reviewDraft?: {
     selectedSheetIds: string[];
@@ -472,8 +493,11 @@ export const evidenceApi = {
     apiFetch<void>(`/profiles/${profileId}/evidence/${evidenceId}/links/${transactionId}`, { method: "DELETE" }),
   downloadUrl: (profileId: string, evidenceId: string) =>
     `${API}/profiles/${encodeURIComponent(profileId)}/evidence/${encodeURIComponent(evidenceId)}/download`,
-  detectSchema: (profileId: string, evidenceId: string) =>
-    apiFetch<SpreadsheetInspectionResponse>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, { method: "POST" }),
+  detectSchema: (profileId: string, evidenceId: string, mode?: 'retry_automatic' | 'manual_recovery') =>
+    apiFetch<SpreadsheetInspectionResponse>(`/profiles/${profileId}/evidence/${evidenceId}/detect-schema`, {
+      method: "POST",
+      body: JSON.stringify(mode ? { mode } : {}),
+    }),
   saveSpreadsheetReview: (profileId: string, evidenceId: string, data: {
     selectedSheetIds: string[];
     sheetMappings: Record<string, unknown>;
