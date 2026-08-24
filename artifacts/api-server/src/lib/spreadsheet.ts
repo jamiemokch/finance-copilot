@@ -573,13 +573,22 @@ export function mapSpreadsheetRow(row: string[], mapping: SpreadsheetMapping) {
   };
 }
 
-export function normaliseImportedDate(value: string): string {
+export function normaliseImportedDate(value: string): string | null {
   const trimmed = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const validIsoDate = (candidate: string) => {
+    const match = candidate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const [year, month, day] = match.slice(1).map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+      ? candidate
+      : null;
+  };
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return validIsoDate(trimmed);
   const uk = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (!uk) return trimmed;
+  if (!uk) return null;
   const year = uk[3].length === 2 ? `20${uk[3]}` : uk[3];
-  return `${year}-${uk[2].padStart(2, '0')}-${uk[1].padStart(2, '0')}`;
+  return validIsoDate(`${year}-${uk[2].padStart(2, '0')}-${uk[1].padStart(2, '0')}`);
 }
 
 export function looksLikeHeader(row: string[]): boolean {

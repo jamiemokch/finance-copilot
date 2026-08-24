@@ -73,6 +73,7 @@ const confirmedSpreadsheetInput = z.object({
   selectedSheetIds: z.array(z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/)).min(1).max(100),
   sheetMappings: z.record(mappingSchemaInput),
   sheetRoleOverrides: z.record(z.enum(["transactional", "non_transactional", "mixed", "unknown"])).default({}),
+  sheetResolutions: z.record(z.enum(["include_income", "include_expense", "reference_only", "duplicate_sheet", "leave_out"])).default({}),
   filingScope: z.array(z.string().regex(/^\d{4}-\d{4}$/)).min(1).max(20),
   excludedRowRefs: z.array(z.object({
     sheetId: z.string().regex(/^sheet_[A-Za-z0-9_-]{1,127}$/),
@@ -85,6 +86,42 @@ const confirmedSpreadsheetInput = z.object({
 const spreadsheetDraftInput = confirmedSpreadsheetInput.omit({ confirmation: true });
 
 type SpreadsheetReviewDraft = z.infer<typeof spreadsheetDraftInput>;
+
+type SpreadsheetReviewIssue = {
+  sheetId?: string;
+  worksheet?: string;
+  rowNumber?: number;
+  field?: "date" | "amount" | "description" | "tax_year" | "selection";
+  message: string;
+};
+
+function inputReviewIssues(issues: Array<{ path: PropertyKey[] }>): SpreadsheetReviewIssue[] {
+  const result = new Map<string, SpreadsheetReviewIssue>();
+  for (const issue of issues) {
+    const [section, sheetId, columnSection, columnName] = issue.path;
+    const mappedField = section === "sheetMappings" && columnSection === "columns"
+      ? columnName === "date" ? "date" : columnName === "description" || columnName === "category" ? "description" : "amount"
+      : section === "filingScope" ? "tax_year"
+        : "selection";
+    const key = `${String(sheetId ?? "")}:${mappedField}`;
+    if (!result.has(key)) {
+      result.set(key, {
+        ...(typeof sheetId === "string" && sheetId.startsWith("sheet_") ? { sheetId } : {}),
+        field: mappedField,
+        message: mappedField === "tax_year"
+          ? "Choose at least one tax year based on the dates in this spreadsheet."
+          : mappedField === "date"
+            ? "Tell us which column is the date for this sheet."
+            : mappedField === "amount"
+              ? "Tell us which column contains the money amount for this sheet."
+              : mappedField === "description"
+                ? "Tell us which column says what each entry is for."
+                : "Answer the remaining sheet questions before importing.",
+      });
+    }
+  }
+  return [...result.values()];
+}
 
 function spreadsheetSourceRowIndex(sheetIndex: number, rowNumber: number) {
   return sheetIndex * 1_100_000 + rowNumber;
@@ -711,7 +748,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
 router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   const body = spreadsheetDraftInput.safeParse(req.body);
-  if (!body.success) { res.status(400).json({ error: "Choose selected sheets, mappings, and filing scope before saving this review." }); return; }
+  if (!body.success) {
+    res.status(400).json({
+      error: "We could not save this choice yet.",
+      issues: inputReviewIssues(body.error.issues),
+    });
+    return;
+  }
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
@@ -727,10 +770,20 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     for (const sheetId of body.data.selectedSheetIds) {
       const sheet = knownSheets.get(sheetId);
       const mapping = body.data.sheetMappings[sheetId];
-      if (!sheet || !mapping) { res.status(400).json({ error: "Every selected worksheet needs a mapping from this workbook." }); return; }
+      if (!sheet || !mapping) {
+        res.status(400).json({
+          error: "We need one more choice before saving.",
+          issues: [{ sheetId, worksheet: sheet?.displayName, field: "selection", message: "Tell us how to read this sheet before including it." }],
+        });
+        return;
+      }
       const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
       if (mapping.headerRow >= sheet.rowCount || indices.some((index) => index >= sheet.columnCount)) {
-        res.status(400).json({ error: `The saved mapping contains a row or column outside ${sheet.displayName}.` }); return;
+        res.status(400).json({
+          error: "A saved column choice no longer matches this sheet.",
+          issues: [{ sheetId, worksheet: sheet.displayName, field: "selection", message: "Check the named columns for this sheet and choose them again." }],
+        });
+        return;
       }
     }
     const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
@@ -892,7 +945,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
 router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", async (req, res) => {
   if (!req.isAuthenticated()) { res.status(401).json({ error: "Unauthorized" }); return; }
   const body = confirmedSpreadsheetInput.safeParse(req.body);
-  if (!body.success) { res.status(400).json({ error: "Confirm selected sheets, mappings, and filing scope before importing." }); return; }
+  if (!body.success) {
+    res.status(400).json({
+      error: "A few answers are still needed before importing.",
+      issues: inputReviewIssues(body.error.issues),
+    });
+    return;
+  }
   let processingToken = "";
   let evidenceItem: typeof evidenceItemsTable.$inferSelect | undefined;
   let userDecision: Record<string, unknown> | undefined;
@@ -911,7 +970,11 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     const selected = new Set(body.data.selectedSheetIds);
     const knownSheetIds = new Set(workbook.sheets.map((sheet) => sheet.sheetId));
     if ([...selected].some((sheetId) => !knownSheetIds.has(sheetId))) {
-      res.status(400).json({ error: "A selected sheet is not part of this workbook." }); return;
+      res.status(400).json({
+        error: "This workbook changed after it was reviewed.",
+        issues: [{ field: "selection", message: "Review the sheet choices again before importing." }],
+      });
+      return;
     }
     const excluded = new Set(body.data.excludedRowRefs.map((row) => `${row.sheetId}:${row.rowNumber}`));
     const counts = Object.fromEntries([
@@ -976,12 +1039,22 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         continue;
       }
       const mapping = body.data.sheetMappings[sheet.sheetId] as MappingSchema | undefined;
-      if (!mapping) { res.status(400).json({ error: `Choose a confirmed mapping for ${sheet.displayName}.` }); return; }
+      if (!mapping) {
+        res.status(400).json({
+          error: "We still need to know how to read one sheet.",
+          issues: [{ sheetId: sheet.sheetId, worksheet: sheet.displayName, field: "selection", message: `Choose how to read “${sheet.displayName}”, or leave it out for now.` }],
+        });
+        return;
+      }
       mappingsForAudit[sheet.sheetId] = mapping;
       const maxColumn = sheet.columnCount;
       const indices = Object.values(mapping.columns).filter((value): value is number => value !== undefined);
       if (mapping.headerRow < 0 || mapping.headerRow >= sheet.rowCount || indices.some((index) => index < 0 || index >= maxColumn)) {
-        res.status(400).json({ error: `The confirmed mapping contains a column outside ${sheet.displayName}.` }); return;
+        res.status(400).json({
+          error: "One of the saved column choices no longer fits this sheet.",
+          issues: [{ sheetId: sheet.sheetId, worksheet: sheet.displayName, field: "selection", message: `Check the named columns for “${sheet.displayName}” and choose them again.` }],
+        });
+        return;
       }
       for (const source of sheet.rows) {
         const outcomeBase = {
@@ -1055,7 +1128,23 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     }
     if (unresolvedRows.length) {
       const first = unresolvedRows[0]!;
-      res.status(400).json({ error: `Row ${first.rowNumber} in ${first.worksheet} has an unresolved date, amount, or description. Exclude it explicitly or correct the mapping.` });
+      const outcome = rowOutcomes.find((row) => row.sheetId === first.sheetId && row.sourceRowNumber === first.rowNumber);
+      const field = !outcome?.normalizedValueReference.date
+        ? "date"
+        : outcome.normalizedValueReference.amount === null
+          ? "amount"
+          : "description";
+      const missing = field === "date" ? "a usable date" : field === "amount" ? "a usable money amount" : "a description of what the entry is for";
+      res.status(400).json({
+        error: "A sheet still has entries we cannot read safely.",
+        issues: [{
+          sheetId: first.sheetId,
+          worksheet: first.worksheet,
+          rowNumber: first.rowNumber,
+          field,
+          message: `In “${first.worksheet}”, row ${first.rowNumber} is missing ${missing}. Choose another named column, or leave this sheet out for now.`,
+        }],
+      });
       return;
     }
     if (rowOutcomes.length !== workbook.totalParserRows) {

@@ -1,5 +1,6 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
 import { GuidedSpreadsheetAudit } from '@/components/guided-spreadsheet-audit';
+import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, type SheetResolution } from '@/components/guided-spreadsheet-review';
 import {
   ApiError, bankImportsApi, evidenceApi, transactionsApi,
   type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
@@ -318,8 +319,10 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const [sheetMappings, setSheetMappings] = useState<Record<string, ReviewMapping>>({});
   const [selectedSheetIds, setSelectedSheetIds] = useState<string[]>([]);
   const [sheetRoleOverrides, setSheetRoleOverrides] = useState<Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>>({});
+  const [sheetResolutions, setSheetResolutions] = useState<Record<string, SheetResolution>>({});
   const [activeSheetId, setActiveSheetId] = useState('');
   const [editingSheetId, setEditingSheetId] = useState('');
+  const [checkingSheetId, setCheckingSheetId] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [savingReview, setSavingReview] = useState(false);
   const [saveFailure, setSaveFailure] = useState('');
@@ -346,6 +349,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     const persistedMappings = draft?.sheetMappings as Record<string, ReviewMapping> | undefined;
     setSheetMappings(persistedMappings && Object.keys(persistedMappings).length ? persistedMappings : suggestedMappings);
     setSheetRoleOverrides(draft?.sheetRoleOverrides ?? {});
+    setSheetResolutions(draft?.sheetResolutions ?? {});
     const selectable = (nextAnalysis?.sheets ?? []).filter((sheet) => sheet.selected).map((sheet) => sheet.sheetId);
     const restoredSelected = draft?.selectedSheetIds?.filter((sheetId) => (nextAnalysis?.sheets ?? []).some((sheet) => sheet.sheetId === sheetId)) ?? selectable;
     setSelectedSheetIds(restoredSelected);
@@ -379,6 +383,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     // an earlier workbook's full inventory mounted or expanded.
     setAdvancedOpen(false);
     setEditingSheetId('');
+    setCheckingSheetId('');
     setActiveSheetId('');
     setSaveFailure('');
     setFilename(file.name); setStage('inspecting'); setError(''); setImportError(null);
@@ -405,6 +410,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     sheetMappings: Record<string, ReviewMapping>;
     selectedSheetIds: string[];
     sheetRoleOverrides: Record<string, 'transactional' | 'non_transactional' | 'mixed' | 'unknown'>;
+    sheetResolutions: Record<string, SheetResolution>;
     filingScope: string[];
     acknowledgeUnresolved: boolean;
     preTradingStartMode: 'retain' | 'exclude';
@@ -417,6 +423,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     const shouldExcludeUnresolved = overrides.acknowledgeUnresolved ?? acknowledgeUnresolved;
     await evidenceApi.saveSpreadsheetReview(profileId, evidenceId, {
       selectedSheetIds: nextSelected, sheetMappings: nextMappings, sheetRoleOverrides: overrides.sheetRoleOverrides ?? sheetRoleOverrides, filingScope: nextScope,
+      sheetResolutions: overrides.sheetResolutions ?? sheetResolutions,
       excludedRowRefs: shouldExcludeUnresolved ? unresolvedRows : [],
       preTradingStartMode: overrides.preTradingStartMode ?? preTradingStartMode,
       outsideScopeMode: overrides.outsideScopeMode ?? outsideScopeMode,
@@ -470,6 +477,34 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       setSheetRoleOverrides(sheetRoleOverrides);
     }
   };
+  const resolveSheetQuestion = async (sheet: NonNullable<SpreadsheetReviewAnalysis>['sheets'][number], resolution: SheetResolution) => {
+    const previousSelected = selectedSheetIds;
+    const previousOverrides = sheetRoleOverrides;
+    const previousResolutions = sheetResolutions;
+    const include = resolution === 'include_income' || resolution === 'include_expense';
+    const nextSelected = include
+      ? [...new Set([...selectedSheetIds, sheet.sheetId])]
+      : selectedSheetIds.filter((sheetId) => sheetId !== sheet.sheetId);
+    const nextOverrides = {
+      ...sheetRoleOverrides,
+      [sheet.sheetId]: include ? 'transactional' as const : 'non_transactional' as const,
+    };
+    const nextResolutions = { ...sheetResolutions, [sheet.sheetId]: resolution };
+    setSelectedSheetIds(nextSelected);
+    setSheetRoleOverrides(nextOverrides);
+    setSheetResolutions(nextResolutions);
+    try {
+      await persistReviewDecision({
+        selectedSheetIds: nextSelected,
+        sheetRoleOverrides: nextOverrides,
+        sheetResolutions: nextResolutions,
+      });
+    } catch {
+      setSelectedSheetIds(previousSelected);
+      setSheetRoleOverrides(previousOverrides);
+      setSheetResolutions(previousResolutions);
+    }
+  };
   const toggleScope = async (taxYear: string, checked: boolean) => {
     const nextScope = checked ? [...new Set([...filingScope, taxYear])].sort() : filingScope.filter((year) => year !== taxYear);
     setFilingScope(nextScope);
@@ -485,20 +520,25 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     try {
       await persistReviewDecision();
       const result = await evidenceApi.confirmSpreadsheet(profileId, evidenceId, {
-        confirmation: true, selectedSheetIds, sheetMappings, sheetRoleOverrides, filingScope,
+        confirmation: true, selectedSheetIds, sheetMappings, sheetRoleOverrides, sheetResolutions, filingScope,
         excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
         preTradingStartMode, outsideScopeMode,
       });
       setSummary(result); await refresh(); setStage('done');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'The spreadsheet could not be confirmed.';
-      const details = err instanceof ApiError ? err.details : undefined;
+       const details = err instanceof ApiError ? err.details : undefined;
       setImportError({
         code: details?.code === 'source_row_conflict' ? 'source_row_conflict' : 'spreadsheet_import_failed',
         message,
         ...(details?.conflict ? { conflict: details.conflict } : {}),
+         ...(details?.issues ? { issues: details.issues } : {}),
         ...(details?.rolledBack ? { rolledBack: true } : {}),
       });
+       const firstIssueSheet = details?.issues?.find((issue) => issue.sheetId)?.sheetId;
+       if (firstIssueSheet) {
+         window.setTimeout(() => document.getElementById(`sheet-issue-${firstIssueSheet}`)?.focus(), 0);
+       }
       setError(message); setStage('review');
     }
   };
@@ -544,28 +584,56 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   };
   const columnCount = activeSheet?.dimensions.columns ?? 0;
   const importableSheets = (analysis?.sheets ?? []).filter((sheet) => sheet.selected || selectedSheetIds.includes(sheet.sheetId));
-  const questions = (analysis?.sheets ?? []).filter((sheet) => sheet.reviewRequired || sheet.role === 'unknown' || (sheet.role === 'transactional' && sheet.confidence < 70));
-  const canConfirm = selectedSheetIds.length > 0 && filingScope.length > 0 && (unresolvedRows.length === 0 || acknowledgeUnresolved);
+  const sheetNeedsNamedColumns = (sheet: NonNullable<SpreadsheetReviewAnalysis>['sheets'][number]) => {
+    const columns = sheet.mapping.columns;
+    return columns.date === undefined
+      || (columns.amount === undefined && columns.debit === undefined && columns.credit === undefined)
+      || (columns.description === undefined && columns.category === undefined);
+  };
+  const questions = (analysis?.sheets ?? []).filter((sheet) => {
+    if (!sheet.reviewRequired && sheet.role !== 'unknown') return false;
+    const resolution = sheetResolutions[sheet.sheetId];
+    return !resolution || ((resolution === 'include_income' || resolution === 'include_expense') && sheetNeedsNamedColumns(sheet));
+  });
+  const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
+  const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
+  const confirmationBlockers = confirmationBlockersForReview({
+    unresolvedSheetNames: questions.map((sheet) => sheet.displayName),
+    selectedSheetCount: selectedSheetIds.length,
+    taxYearCount: filingScope.length,
+    incompleteRowCount: unresolvedRows.length,
+    incompleteRowsAcknowledged: acknowledgeUnresolved,
+  });
+  const canConfirm = confirmationBlockers.length === 0;
   return <Card className="p-6 shadow-sm space-y-5">
     <button disabled={savingReview} onClick={leaveReview} className="text-sm text-primary flex gap-1 items-center cursor-pointer disabled:opacity-50"><ChevronLeft className="w-4 h-4" />All ways to add records</button>
     <div><h2 className="text-xl font-serif">Review a spreadsheet or CSV</h2><p className="text-sm text-muted-foreground mt-1">We check every sheet first. Suggestions are only a guide; nothing reaches Financial Memory until you confirm what to bring in.</p></div>
     {stage === 'pick' && <div className="border-2 border-dashed border-border rounded-xl p-10 text-center space-y-3"><FileSpreadsheet className="w-9 h-9 text-primary mx-auto" /><p className="font-medium">Choose a CSV or Excel workbook</p><p className="text-xs text-muted-foreground">We will check every worksheet and show only the records that are likely to be money in or out.</p><FilePicker accept=".csv,.xlsx,.xls" onPick={chooseFile} label="Upload a file" /></div>}
     {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…</div>}
     {stage === 'review' && analysis && <div className="space-y-5">
-      {importError && <div role="alert" className={cn(
+       {importError && <div role="alert" className={cn(
         "rounded-xl border p-4 space-y-3 text-sm",
         importError.code === 'source_row_conflict'
           ? "border-amber-300 bg-amber-50 text-amber-950"
           : "border-red-200 bg-red-50 text-red-900",
       )}>
         <div className="flex gap-2"><AlertCircle className="w-5 h-5 shrink-0 mt-0.5" /><div className="space-y-1">
-          <p className="font-semibold">{importError.code === 'source_row_conflict' ? 'Import stopped to protect against a duplicate row' : 'Import could not be completed'}</p>
-          <p>{importError.message}</p>
-          {importError.conflict && <p className="font-medium">Affected source: worksheet “{importError.conflict.worksheet}”, row {importError.conflict.rowNumber}.</p>}
-          <p className="text-xs opacity-85">No movement from this confirmation was added. You can retry the current workbook or replace it with a corrected version.</p>
+           <p className="font-semibold">{importError.code === 'source_row_conflict' ? 'We stopped before adding a possible duplicate' : 'We found something that needs your decision'}</p>
+           {importError.conflict && <p className="font-medium">“{importError.conflict.worksheet}”, row {importError.conflict.rowNumber} is already recorded. No records from this attempt were added.</p>}
+           {!importError.conflict && <p>Use the specific question below to decide what to do next. No records from this attempt were added.</p>}
         </div></div>
+         <SpreadsheetServerIssues issues={importError.issues ?? []} onShowSheet={(sheetId) => {
+           const issueCard = document.getElementById(`sheet-issue-${sheetId}`);
+           if (issueCard) {
+             issueCard.focus();
+             return;
+           }
+           setCheckingSheetId(sheetId);
+           setActiveSheetId(sheetId);
+           setEditingSheetId(sheetId);
+         }} />
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={replacingWorkbook} onClick={() => void confirm()}>Retry current workbook</Button>
+           <Button size="sm" disabled={replacingWorkbook || !canConfirm} onClick={() => void confirm()}>Try again after reviewing</Button>
           <Button size="sm" variant="outline" disabled={replacingWorkbook || savingReview} onClick={() => setReplacingWorkbook(true)}>Replace workbook</Button>
         </div>
         {replacingWorkbook && <div className="rounded-lg border border-current/20 bg-white/60 p-3 space-y-2">
@@ -578,13 +646,18 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' || aiStatus?.status === 'partial' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
         <strong>{aiStatus?.status === 'success' ? 'Suggestions are ready to check.' : 'We used safe local checks instead.'}</strong> Nothing has been added to your records.
       </div>
-      <div className="rounded-xl border p-4 space-y-3"><div><p className="font-medium">What we found</p><p className="text-xs text-muted-foreground">We checked every worksheet. Only likely transaction records are shown here.</p></div>
-        <p className="text-sm">We found {importableSheets.length} likely money sheet{importableSheets.length === 1 ? '' : 's'}, {analysis.sheets.reduce((total, sheet) => total + sheet.rows.length, 0)} source record{analysis.sheets.reduce((total, sheet) => total + sheet.rows.length, 0) === 1 ? '' : 's'}, and {analysis.taxYears.length} tax year{analysis.taxYears.length === 1 ? '' : 's'}.</p>
-        {importableSheets.length > 0 ? <div className="space-y-2">{importableSheets.map((sheet) => <div key={sheet.sheetId} className="rounded-lg border border-primary/20 bg-primary/[.03] p-3 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">{sheet.displayName}</p><p className="text-xs text-muted-foreground">{sheet.dimensions.rows} source rows · {sheet.confidence}% confidence</p></div><div className="flex gap-2"><Badge variant="outline">Ready to include</Badge><Button size="sm" variant="outline" onClick={() => { setActiveSheetId(sheet.sheetId); setEditingSheetId(sheet.sheetId); }}>Correct this</Button></div></div>)}</div> : <p className="text-sm text-amber-800">We could not safely choose a transaction sheet. Answer the question below or open Advanced audit details.</p>}
-      </div>
-      {questions.length > 0 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950"><p className="font-medium">One quick check before import</p>{questions.slice(0, 3).map((sheet) => <div key={sheet.sheetId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-white/70 p-3"><span><strong>{sheet.displayName}</strong> is not clear enough to include automatically.</span><Button size="sm" variant="outline" onClick={() => { setAdvancedOpen(true); setActiveSheetId(sheet.sheetId); }}>Review this sheet</Button></div>)}</div>}
-      {editingSheetId && activeSheet && activeMapping && <div className="space-y-3 rounded-xl border border-primary/30 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">Correct {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Change only this sheet if a column needs correcting. Nothing is imported until you confirm below.</p></div><Button size="sm" variant="outline" disabled={savingReview} onClick={() => setEditingSheetId('')}>Done editing</Button></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select disabled={savingReview} value={roleFor(column)} onChange={(event) => void setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Ignore</option><option value="date">Date</option><option value="amount">Signed amount</option><option value="debit">Debit</option><option value="credit">Credit</option><option value="description">Description</option><option value="category">Category</option><option value="balance">Balance / audit only</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div></div>}
-      <div className="grid gap-4 md:grid-cols-2"><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Record coverage</p><p className="text-sm">{analysis.coverage.startDate && analysis.coverage.endDate ? `${analysis.coverage.startDate} to ${analysis.coverage.endDate}` : 'We need a date check before we can work out the coverage.'}</p><p className="text-xs text-muted-foreground">This describes the source records, not a tax calculation.</p></div><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">{analysis.taxYears.length === 1 ? 'Tax year found' : 'Which tax year should these records support?'}</p>{analysis.taxYears.length === 1 ? <p className="text-sm">{analysis.taxYears[0]} <span className="text-muted-foreground">— based on the dates in the spreadsheet</span></p> : analysis.taxYears.length ? analysis.taxYears.map((year) => <label key={year} className="flex gap-2 text-sm"><input type="checkbox" checked={filingScope.includes(year)} onChange={(event) => toggleScope(year, event.target.checked)} />{year}</label>) : <p className="text-sm text-amber-800">No reliable transaction dates were found. Correct a sheet so we can ask the right question.</p>}</div></div>
+       <GuidedSpreadsheetReview
+         sheets={analysis.sheets}
+         selectedSheetIds={selectedSheetIds}
+         resolutions={sheetResolutions}
+         saving={savingReview}
+         checkingSheetId={checkingSheetId}
+         onCheckingSheet={setCheckingSheetId}
+         onResolve={(sheet, resolution) => void resolveSheetQuestion(sheet, resolution)}
+         onCorrect={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }}
+       />
+       {editingSheetId && activeSheet && activeMapping && <div className="space-y-3 rounded-xl border border-primary/30 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">Choose the named columns for {activeSheet.displayName}</p><p className="text-xs text-muted-foreground">Use this only when the choices above do not match what you see in the preview.</p></div><Button size="sm" variant="outline" disabled={savingReview} onClick={() => setEditingSheetId('')}>Done</Button></div><div className="overflow-x-auto border rounded-lg"><table className="w-full text-sm"><thead className="bg-secondary/50"><tr>{Array.from({ length: columnCount }, (_, column) => <th key={column} className="p-2 min-w-36 text-left"><span className="block text-xs mb-1">Column {column + 1}</span><Select disabled={savingReview} value={roleFor(column)} onChange={(event) => void setRole(column, event.target.value as ColumnRole)} className="text-xs"><option value="none">Do not use</option><option value="date">Date</option><option value="amount">One money amount</option><option value="debit">Money out</option><option value="credit">Money in</option><option value="description">What it was for</option><option value="category">Type of item</option><option value="balance">Balance only — do not add</option></Select></th>)}</tr></thead><tbody>{activeSheet.previewRows.slice(0, 6).map((row) => <tr key={row.rowNumber} className="border-t">{Array.from({ length: columnCount }, (_, column) => <td key={column} className="p-2 max-w-48 truncate">{row.values[column] || '—'}</td>)}</tr>)}</tbody></table></div></div>}
+       <div className="grid gap-4 md:grid-cols-2"><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">Date range found</p><p className="text-sm">{hasCoverage ? `${analysis.coverage.startDate} to ${analysis.coverage.endDate}` : 'We need a usable date column before we can show a date range.'}</p><p className="text-xs text-muted-foreground">This is based only on valid dates we could read.</p></div><div className="rounded-xl border p-4 space-y-2"><p className="font-medium">{analysis.taxYears.length === 1 ? 'Tax year found' : 'Which tax year should these records support?'}</p>{analysis.taxYears.length === 1 ? <p className="text-sm">{analysis.taxYears[0]} <span className="text-muted-foreground">— based on the dates in the spreadsheet</span></p> : analysis.taxYears.length ? analysis.taxYears.map((year) => <label key={year} className="flex gap-2 text-sm"><input type="checkbox" checked={filingScope.includes(year)} onChange={(event) => void toggleScope(year, event.target.checked)} />{year}</label>) : <p className="text-sm text-amber-800">We could not find enough usable dates. Answer the sheet questions above, then check again.</p>}</div></div>
       <GuidedSpreadsheetAudit
         advancedOpen={advancedOpen}
         sheets={analysis.sheets}
@@ -597,9 +670,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
         onSetRole={(sheetId, role) => void setSheetRole(sheetId, role)}
         onCorrectSheet={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }}
       />
-      {(unresolvedRows.length > 0 || (analysis.dispositionCounts.pre_trading_start ?? 0) > 0) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950">{unresolvedRows.length > 0 && <label className="flex gap-2 items-start"><input disabled={savingReview} type="checkbox" checked={acknowledgeUnresolved} onChange={(event) => void updateUnresolvedAcknowledgement(event.target.checked)} /><span>I confirm that {unresolvedRows.length} unresolved row{unresolvedRows.length === 1 ? '' : 's'} will be explicitly excluded from this import.</span></label>}{(analysis.dispositionCounts.pre_trading_start ?? 0) > 0 && <label className="space-y-1 block">Records from before you started trading<select disabled={savingReview} className="ml-2 border rounded px-2 py-1" value={preTradingStartMode} onChange={(event) => void updatePreTradingStartMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude from this import</option><option value="retain">Keep as historical records</option></select></label>}</div>}
-      <div className="rounded-xl border p-4 space-y-2 text-sm"><p className="font-medium">Record checks</p><div className="flex flex-wrap gap-2">{Object.entries(analysis.dispositionCounts).filter(([, count]) => count > 0).map(([key, count]) => <Badge key={key} variant="outline">{count} {key.replaceAll('_', ' ')}</Badge>)}</div><label className="block">Records outside the tax years you chose<select disabled={savingReview} className="ml-2 border rounded px-2 py-1" value={outsideScopeMode} onChange={(event) => void updateOutsideScopeMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Exclude</option><option value="retain">Keep as outside the chosen tax years</option></select></label></div>
-      <div className="flex justify-between gap-3"><Button variant="outline" disabled={savingReview} onClick={() => void reanalyse()}>Check again for suggestions</Button><Button disabled={!canConfirm || savingReview} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm and import</Button></div>
+       {(unresolvedRows.length > 0 || (analysis.dispositionCounts.pre_trading_start ?? 0) > 0) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 text-sm text-amber-950">{unresolvedRows.length > 0 && <label className="flex gap-2 items-start"><input disabled={savingReview} type="checkbox" checked={acknowledgeUnresolved} onChange={(event) => void updateUnresolvedAcknowledgement(event.target.checked)} /><span>Leave out {unresolvedRows.length} row{unresolvedRows.length === 1 ? '' : 's'} with incomplete date, money, or description details. You can also use the named-column choices above to fix the sheet instead.</span></label>}{(analysis.dispositionCounts.pre_trading_start ?? 0) > 0 && <label className="space-y-1 block">Records from before you started trading<select disabled={savingReview} className="ml-2 border rounded px-2 py-1" value={preTradingStartMode} onChange={(event) => void updatePreTradingStartMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Leave out for now</option><option value="retain">Keep as historical records</option></select></label>}</div>}
+       <div className="rounded-xl border p-4 text-sm"><label className="block">For records outside the tax years you chose<select disabled={savingReview} className="ml-2 border rounded px-2 py-1" value={outsideScopeMode} onChange={(event) => void updateOutsideScopeMode(event.target.value as 'retain' | 'exclude')}><option value="exclude">Leave out for now</option><option value="retain">Keep outside the chosen tax years</option></select></label></div>
+       <ImportChecklist
+         selectedSheets={importableSheets}
+         leftOutCount={analysis.sheets.length - importableSheets.length}
+         taxYears={filingScope}
+         unresolved={confirmationBlockers}
+       />
+       <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" disabled={savingReview} onClick={() => void reanalyse()}>Check again for suggestions</Button><div className="space-y-1 text-right"><Button disabled={!canConfirm || savingReview} onClick={() => void confirm()}><CheckCircle2 className="mr-2 h-4 w-4" />Confirm and import</Button>{!canConfirm && <p className="max-w-md text-xs text-amber-800">Answer the items in “Before we add anything” to continue.</p>}</div></div>
     </div>}
     {stage === 'confirming' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Bringing in your confirmed records…</div>}
     {stage === 'done' && summary && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-900"><div className="flex gap-2"><CheckCircle2 className="w-5 h-5 shrink-0" /><div><p className="font-semibold">Spreadsheet records imported</p><p className="text-sm mt-1">{summary.importedRows} movement{summary.importedRows === 1 ? '' : 's'} added as unclassified records. They do not affect tax or profit until you classify them.</p><p className="text-xs mt-2">Tax years: {summary.taxYears.join(', ') || 'none'}</p></div></div></div>}

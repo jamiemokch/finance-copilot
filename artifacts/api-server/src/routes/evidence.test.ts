@@ -554,6 +554,33 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       'transactional',
       're-analysis applies the durable user role instead of replacing it with a new suggestion',
     );
+    const actionableRejection = await request(
+      aliceSession,
+      `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/confirm-spreadsheet`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmation: true,
+          selectedSheetIds: ['sheet_1'],
+          sheetMappings: {
+            sheet_1: { headerRow: 0, columns: { date: 2, description: 1, amount: 0 } },
+          },
+          filingScope: ['2025-2026'],
+          excludedRowRefs: [],
+          preTradingStartMode: 'exclude',
+          outsideScopeMode: 'exclude',
+        }),
+      },
+    );
+    assert.equal(actionableRejection.status, 400);
+    assert.equal(actionableRejection.body.error, 'A sheet still has entries we cannot read safely.');
+    assert.deepEqual(actionableRejection.body.issues, [{
+      sheetId: 'sheet_1',
+      worksheet: 'Ledger',
+      rowNumber: 2,
+      field: 'date',
+      message: 'In “Ledger”, row 2 is missing a usable date. Choose another named column, or leave this sheet out for now.',
+    }], 'server rejection identifies the exact sheet, row, field, and layman-safe next step');
 
     const maximumExcelRow = 1_048_576;
     const boundarySheet = {

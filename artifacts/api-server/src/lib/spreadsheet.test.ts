@@ -138,6 +138,22 @@ test('the exact 17-sheet Yatson workbook keeps references hidden and proposes on
   assert.equal(byName.get('生意記錄')?.role, 'transactional', 'Chinese sheet names are judged by their structure, not rejected by name');
 });
 
+test('coverage is calculated only from valid parsed dates, never a sheet name or arbitrary text', () => {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+    ['Date', 'Description', 'Amount'],
+    ['1-Apr-22', '生意記錄', '125.00'],
+  ]), 'Revenue');
+  const file = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  const analysis = analyseSpreadsheet(inspectSpreadsheet(file, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'coverage-check.xlsx'));
+
+  assert.equal(analysis.coverage.startDate, null);
+  assert.equal(analysis.coverage.endDate, null);
+  assert.equal(analysis.coverage.status, 'partial');
+  assert.deepEqual(analysis.taxYears, []);
+  assert.equal(analysis.sheets[0]?.rows[1]?.normalizedValueReference.date, null);
+});
+
 test('CSV inspection preserves quoted multiline fields as one logical source row', () => {
   const csv = `Date,Description,Amount
 06/04/2025,"Client note

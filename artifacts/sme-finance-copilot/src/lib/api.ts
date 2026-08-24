@@ -20,10 +20,19 @@ export type SpreadsheetSourceRowConflict = {
   rowNumber: number;
 };
 
+export type SpreadsheetIssue = {
+  sheetId?: string;
+  worksheet?: string;
+  rowNumber?: number;
+  field?: 'date' | 'amount' | 'description' | 'tax_year' | 'selection';
+  message: string;
+};
+
 export type SpreadsheetImportError = {
   code: 'source_row_conflict' | 'spreadsheet_import_failed';
   message: string;
   conflict?: SpreadsheetSourceRowConflict;
+  issues?: SpreadsheetIssue[];
   rolledBack?: boolean;
 };
 
@@ -34,6 +43,7 @@ export class ApiError extends Error {
     public details?: {
       code?: string;
       conflict?: SpreadsheetSourceRowConflict;
+      issues?: SpreadsheetIssue[];
       rolledBack?: boolean;
     },
   ) {
@@ -59,12 +69,14 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
         error?: unknown;
         code?: unknown;
         conflict?: SpreadsheetSourceRowConflict;
+        issues?: SpreadsheetIssue[];
         rolledBack?: unknown;
       };
       msg = typeof body.error === 'string' ? body.error : msg;
       details = {
         ...(typeof body.code === 'string' ? { code: body.code } : {}),
         ...(body.conflict ? { conflict: body.conflict } : {}),
+        ...(Array.isArray(body.issues) ? { issues: body.issues } : {}),
         ...(body.rolledBack === true ? { rolledBack: true } : {}),
       };
     } catch {
@@ -386,6 +398,7 @@ export type SpreadsheetInspectionResponse = {
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
     outsideScopeMode: 'retain' | 'exclude';
+    sheetResolutions?: Record<string, 'include_income' | 'include_expense' | 'reference_only' | 'duplicate_sheet' | 'leave_out'>;
     mappingRevision?: string;
     decisionSources?: Record<string, string>;
   } | null;
@@ -467,6 +480,7 @@ export const evidenceApi = {
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
     outsideScopeMode: 'retain' | 'exclude';
+    sheetResolutions?: Record<string, 'include_income' | 'include_expense' | 'reference_only' | 'duplicate_sheet' | 'leave_out'>;
   }) => apiFetch<{ reviewDraft: SpreadsheetInspectionResponse['reviewDraft'] }>(
     `/profiles/${profileId}/evidence/${evidenceId}/spreadsheet-review`,
     { method: "PATCH", body: JSON.stringify(data) },
@@ -480,6 +494,7 @@ export const evidenceApi = {
     excludedRowRefs: Array<{ sheetId: string; rowNumber: number }>;
     preTradingStartMode: 'retain' | 'exclude';
     outsideScopeMode: 'retain' | 'exclude';
+    sheetResolutions?: Record<string, 'include_income' | 'include_expense' | 'reference_only' | 'duplicate_sheet' | 'leave_out'>;
   }) => apiFetch<{
     evidence: APIEvidenceItem;
     dispositionCounts: Record<string, number>;
