@@ -95,12 +95,18 @@ type SpreadsheetReviewIssue = {
   message: string;
 };
 
-function inputReviewIssues(issues: Array<{ path: PropertyKey[] }>): SpreadsheetReviewIssue[] {
+function inputReviewIssues(issues: Array<{ path: PropertyKey[]; message: string }>): SpreadsheetReviewIssue[] {
   const result = new Map<string, SpreadsheetReviewIssue>();
   for (const issue of issues) {
     const [section, sheetId, columnSection, columnName] = issue.path;
-    const mappedField = section === "sheetMappings" && columnSection === "columns"
-      ? columnName === "date" ? "date" : columnName === "description" || columnName === "category" ? "description" : "amount"
+    const missingNamedColumn = issue.message === "A date column is required" ? "date"
+      : issue.message === "A description column is required" ? "description"
+        : issue.message === "An amount, debit, or credit column is required" ? "amount"
+          : null;
+    const mappedField = section === "sheetMappings" && missingNamedColumn
+      ? missingNamedColumn
+      : section === "sheetMappings" && columnSection === "columns"
+        ? columnName === "date" ? "date" : columnName === "description" || columnName === "category" ? "description" : "amount"
       : section === "filingScope" ? "tax_year"
         : "selection";
     const key = `${String(sheetId ?? "")}:${mappedField}`;
@@ -786,13 +792,31 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
         return;
       }
     }
+    const effectiveAnalysis = analyseSpreadsheet(workbook, {
+      selectedSheetIds: body.data.selectedSheetIds,
+      roleOverrides: body.data.sheetRoleOverrides,
+      sheetMappings: body.data.sheetMappings,
+      tradingStartDate: profile.businessStartDate ?? null,
+    });
+    const effectiveInvalidRows = new Set(
+      effectiveAnalysis.sheets
+        .filter((sheet) => sheet.selected)
+        .flatMap((sheet) => sheet.rows)
+        .filter((row) => row.primaryDisposition === "invalid")
+        .map((row) => `${row.sheetId}:${row.sourceRow}`),
+    );
+    const effectiveDraft = {
+      ...body.data,
+      filingScope: body.data.filingScope.length ? body.data.filingScope : effectiveAnalysis.taxYears,
+      excludedRowRefs: body.data.excludedRowRefs.filter((row) => effectiveInvalidRows.has(`${row.sheetId}:${row.rowNumber}`)),
+    };
     const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
     const revision = createHash("sha256").update(JSON.stringify({
-      ...body.data, businessStartDate: profile.businessStartDate ?? null,
+      ...effectiveDraft, businessStartDate: profile.businessStartDate ?? null,
     })).digest("hex");
     const history = Array.isArray(state.reviewRevisionHistory) ? state.reviewRevisionHistory.slice(-19) : [];
     const reviewDraft = {
-      ...body.data,
+      ...effectiveDraft,
       decisionSources: {
         sheetRoleOverrides: Object.fromEntries(
           Object.keys(body.data.sheetRoleOverrides ?? {}).map((sheetId) => [sheetId, "user"]),
@@ -808,6 +832,7 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     const [saved] = await db.update(evidenceItemsTable).set({
       mappingSchema: {
         ...state,
+        deterministicFindings: effectiveAnalysis,
         reviewDraft,
         reviewRevisionHistory: [...history, { mappingRevision: revision, savedAt: reviewDraft.savedAt, actorUserId: req.user.id }],
       } as Record<string, unknown>,
@@ -819,7 +844,11 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     )).returning();
     if (!saved) { res.status(409).json({ error: "This spreadsheet is currently being processed. Reload before editing." }); return; }
     await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_review_saved", { mappingRevision: revision });
-    res.json({ reviewDraft, reviewRevisionHistory: (saved.mappingSchema as Record<string, unknown>)?.reviewRevisionHistory ?? [] });
+    res.json({
+      reviewDraft,
+      analysis: effectiveAnalysis,
+      reviewRevisionHistory: (saved.mappingSchema as Record<string, unknown>)?.reviewRevisionHistory ?? [],
+    });
   } catch (err) {
     req.log.error(err, "Failed to save spreadsheet review");
     res.status(500).json({ error: "Failed to save spreadsheet review" });

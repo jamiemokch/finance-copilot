@@ -481,7 +481,10 @@ export const evidenceApi = {
     preTradingStartMode: 'retain' | 'exclude';
     outsideScopeMode: 'retain' | 'exclude';
     sheetResolutions?: Record<string, 'include_income' | 'include_expense' | 'reference_only' | 'duplicate_sheet' | 'leave_out'>;
-  }) => apiFetch<{ reviewDraft: SpreadsheetInspectionResponse['reviewDraft'] }>(
+  }) => apiFetch<{
+    reviewDraft: SpreadsheetInspectionResponse['reviewDraft'];
+    analysis: SpreadsheetReviewAnalysis;
+  }>(
     `/profiles/${profileId}/evidence/${evidenceId}/spreadsheet-review`,
     { method: "PATCH", body: JSON.stringify(data) },
   ),

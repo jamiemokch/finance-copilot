@@ -526,6 +526,27 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     const reviewDraftEvidenceId = reviewDraftEvidence.body.id as string;
     const firstInspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' });
     assert.equal(firstInspection.status, 200);
+    const incompleteReview = {
+      selectedSheetIds: ['sheet_1'],
+      sheetMappings: {
+        sheet_1: { headerRow: 0, columns: { date: 0, description: 1 } },
+      },
+      sheetRoleOverrides: {},
+      filingScope: ['2025-2026'],
+      excludedRowRefs: [],
+      preTradingStartMode: 'exclude',
+      outsideScopeMode: 'exclude',
+    };
+    const incompleteDraftResponse = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
+      method: 'PATCH',
+      body: JSON.stringify(incompleteReview),
+    });
+    assert.equal(incompleteDraftResponse.status, 400);
+    assert.deepEqual(incompleteDraftResponse.body.issues, [{
+      sheetId: 'sheet_1',
+      field: 'amount',
+      message: 'Tell us which column contains the money amount for this sheet.',
+    }], 'an incomplete correction stays blocked with a plain-language reason');
     const savedReview = {
       selectedSheetIds: ['sheet_1', 'sheet_2'],
       sheetMappings: {
@@ -543,6 +564,17 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       body: JSON.stringify(savedReview),
     });
     assert.equal(savedDraftResponse.status, 200);
+    const correctedLedger = savedDraftResponse.body.analysis.sheets.find((sheet: { sheetId: string }) => sheet.sheetId === 'sheet_1');
+    assert.deepEqual(
+      correctedLedger.mapping.columns,
+      savedReview.sheetMappings.sheet_1.columns,
+      'saving a corrected column choice immediately returns the effective mapping',
+    );
+    assert.equal(
+      correctedLedger.rows.find((row: { sourceRow: number }) => row.sourceRow === 2)?.primaryDisposition,
+      'imported',
+      'the corrected row is ready without a separate AI re-analysis',
+    );
     const reopenedInspection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' });
     assert.equal(reopenedInspection.status, 200);
     assert.deepEqual(reopenedInspection.body.reviewDraft.selectedSheetIds, savedReview.selectedSheetIds, 'saved include decisions survive re-analysis');
@@ -553,6 +585,29 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       reopenedInspection.body.analysis.sheets.find((sheet: { sheetId: string }) => sheet.sheetId === 'sheet_2')?.role,
       'transactional',
       're-analysis applies the durable user role instead of replacing it with a new suggestion',
+    );
+    const rejectedCorrection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/spreadsheet-review`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        ...savedReview,
+        selectedSheetIds: ['sheet_1'],
+        sheetMappings: {
+          sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 99 } },
+        },
+      }),
+    });
+    assert.equal(rejectedCorrection.status, 400);
+    assert.deepEqual(rejectedCorrection.body.issues, [{
+      sheetId: 'sheet_1',
+      worksheet: 'Ledger',
+      field: 'selection',
+      message: 'Check the named columns for this sheet and choose them again.',
+    }], 'a failed save provides a plain-language correction instead of replacing the durable mapping');
+    const afterRejectedCorrection = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' });
+    assert.deepEqual(
+      afterRejectedCorrection.body.reviewDraft.sheetMappings,
+      savedReview.sheetMappings,
+      'a rejected correction leaves the last saved mapping in place after reload',
     );
     const actionableRejection = await request(
       aliceSession,

@@ -1,6 +1,6 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
 import { GuidedSpreadsheetAudit } from '@/components/guided-spreadsheet-audit';
-import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, type SheetResolution } from '@/components/guided-spreadsheet-review';
+import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, unresolvedReviewSheets, type GuidedSpreadsheetServerIssue, type SheetResolution } from '@/components/guided-spreadsheet-review';
 import {
   ApiError, bankImportsApi, evidenceApi, transactionsApi,
   type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
@@ -326,6 +326,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [savingReview, setSavingReview] = useState(false);
   const [saveFailure, setSaveFailure] = useState('');
+  const [reviewSaveIssues, setReviewSaveIssues] = useState<GuidedSpreadsheetServerIssue[]>([]);
   const [filingScope, setFilingScope] = useState<string[]>([]);
   const [acknowledgeUnresolved, setAcknowledgeUnresolved] = useState(false);
   const [preTradingStartMode, setPreTradingStartMode] = useState<'retain' | 'exclude'>('exclude');
@@ -432,11 +433,21 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const persistReviewDecision = async (overrides: Parameters<typeof saveReviewDraft>[0] = {}) => {
     setSavingReview(true);
     setSaveFailure('');
+    setReviewSaveIssues([]);
     try {
-      await saveReviewDraft(overrides);
+      const saved = await saveReviewDraft(overrides);
+      setAnalysis(saved.analysis);
+      setFilingScope(saved.reviewDraft?.filingScope ?? []);
+      setAcknowledgeUnresolved(Boolean(saved.reviewDraft?.excludedRowRefs?.length));
+      return saved;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'We could not save that choice. Please try again.';
-      setSaveFailure(message);
+      const issues = (err instanceof ApiError ? err.details?.issues ?? [] : []).map((issue) => ({
+        ...issue,
+        worksheet: issue.worksheet ?? analysis?.sheets.find((sheet) => sheet.sheetId === issue.sheetId)?.displayName,
+      }));
+      setReviewSaveIssues(issues);
+      setSaveFailure(issues[0]?.message ?? message);
       throw err;
     } finally {
       setSavingReview(false);
@@ -584,17 +595,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   };
   const columnCount = activeSheet?.dimensions.columns ?? 0;
   const importableSheets = (analysis?.sheets ?? []).filter((sheet) => sheet.selected || selectedSheetIds.includes(sheet.sheetId));
-  const sheetNeedsNamedColumns = (sheet: NonNullable<SpreadsheetReviewAnalysis>['sheets'][number]) => {
-    const columns = sheet.mapping.columns;
-    return columns.date === undefined
-      || (columns.amount === undefined && columns.debit === undefined && columns.credit === undefined)
-      || (columns.description === undefined && columns.category === undefined);
-  };
-  const questions = (analysis?.sheets ?? []).filter((sheet) => {
-    if (!sheet.reviewRequired && sheet.role !== 'unknown') return false;
-    const resolution = sheetResolutions[sheet.sheetId];
-    return !resolution || ((resolution === 'include_income' || resolution === 'include_expense') && sheetNeedsNamedColumns(sheet));
-  });
+  const questions = unresolvedReviewSheets(analysis?.sheets ?? [], sheetResolutions);
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
   const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
   const confirmationBlockers = confirmationBlockersForReview({
@@ -642,7 +643,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
           <FilePicker disabled={savingReview} accept=".csv,.xlsx,.xls" onPick={(file) => void chooseFile(file, true)} label="Choose replacement workbook" />
         </div>}
       </div>}
-      {saveFailure && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900"><strong>Your last choice was not saved.</strong> {saveFailure} Try again before leaving this review.</div>}
+      {saveFailure && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 space-y-2"><p><strong>Your last choice was not saved.</strong> {saveFailure} Try again before leaving this review.</p><SpreadsheetServerIssues issues={reviewSaveIssues} onShowSheet={(sheetId) => { setActiveSheetId(sheetId); setEditingSheetId(sheetId); }} /></div>}
       <div className={cn("rounded-lg border p-3 text-sm", aiStatus?.status === 'success' || aiStatus?.status === 'partial' ? "border-primary/20 bg-primary/5" : "border-amber-200 bg-amber-50 text-amber-900")}>
         <strong>{aiStatus?.status === 'success' ? 'Suggestions are ready to check.' : 'We used safe local checks instead.'}</strong> Nothing has been added to your records.
       </div>

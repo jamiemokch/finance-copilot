@@ -461,13 +461,14 @@ export function analyseSpreadsheet(
     selectedSheetIds?: string[];
     tradingStartDate?: string | null;
     roleOverrides?: Record<string, SpreadsheetSheetAnalysis['role']>;
+    sheetMappings?: Record<string, SpreadsheetMapping>;
   } = {},
 ): SpreadsheetAnalysis {
   const explicitlySelected = options.selectedSheetIds ? new Set(options.selectedSheetIds) : null;
   const roleOverrides = options.roleOverrides ?? {};
   const seenFingerprints = new Set<string>();
   const sheetAnalyses: SpreadsheetSheetAnalysis[] = workbook.sheets.map((sheet) => {
-    const mapping = inferredMapping(sheet);
+    const mapping = options.sheetMappings?.[sheet.sheetId] ?? inferredMapping(sheet);
     const classification = classifySheet(sheet, mapping);
     const isSelected = explicitlySelected ? explicitlySelected.has(sheet.sheetId) : classification.role === 'transactional' && !classification.reviewRequired;
     const hasRequired = mapping.columns.date !== undefined &&

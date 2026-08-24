@@ -30,11 +30,23 @@ export type GuidedReviewSheet = {
 
 type FieldName = 'date' | 'amount' | 'debit' | 'credit' | 'description' | 'category';
 
-function needsNamedColumns(sheet: GuidedReviewSheet) {
+export function needsNamedColumns(sheet: GuidedReviewSheet) {
   const columns = sheet.mapping.columns;
   return columns.date === undefined
     || (columns.amount === undefined && columns.debit === undefined && columns.credit === undefined)
     || (columns.description === undefined && columns.category === undefined);
+}
+
+export function unresolvedReviewSheets(
+  sheets: GuidedReviewSheet[],
+  resolutions: Record<string, SheetResolution>,
+) {
+  return sheets.filter((sheet) => {
+    const resolution = resolutions[sheet.sheetId];
+    const includesSheet = resolution === 'include_income' || resolution === 'include_expense';
+    const needsAnAnswer = sheet.reviewRequired || sheet.role === 'unknown' || (includesSheet && needsNamedColumns(sheet));
+    return needsAnAnswer && (!resolution || (includesSheet && needsNamedColumns(sheet)));
+  });
 }
 
 export function confirmationBlockersForReview({
@@ -137,12 +149,13 @@ export function GuidedSpreadsheetReview({
   onCorrect: (sheetId: string) => void;
 }) {
   const selected = useMemo(() => new Set(selectedSheetIds), [selectedSheetIds]);
-  const ready = sheets.filter((sheet) => selected.has(sheet.sheetId) && !sheet.reviewRequired && sheet.role === 'transactional');
-  const questions = sheets.filter((sheet) => {
-    if (!sheet.reviewRequired && sheet.role !== 'unknown') return false;
-    const resolution = resolutions[sheet.sheetId];
-    return !resolution || ((resolution === 'include_income' || resolution === 'include_expense') && needsNamedColumns(sheet));
-  });
+  const ready = sheets.filter((sheet) =>
+    selected.has(sheet.sheetId)
+    && !sheet.reviewRequired
+    && sheet.role === 'transactional'
+    && !needsNamedColumns(sheet),
+  );
+  const questions = unresolvedReviewSheets(sheets, resolutions);
   return <div className="space-y-5">
     <section className="rounded-xl border p-4 space-y-3">
       <div>

@@ -3,7 +3,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GuidedSpreadsheetAudit } from './guided-spreadsheet-audit.js';
-import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview } from './guided-spreadsheet-review.js';
+import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, unresolvedReviewSheets } from './guided-spreadsheet-review.js';
 
 const sheets = [
   { sheetId: 'sheet_1', displayName: 'Bank C.A.', dimensions: { rows: 12, columns: 3 }, disposition: 'processed', role: 'transactional' as const, confidence: 88 },
@@ -113,6 +113,57 @@ test('ready sheets explain detected fields and unresolved review blocks confirma
   );
   const checklist = renderToStaticMarkup(<ImportChecklist selectedSheets={[yatsonReviewSheets[3]]} leftOutCount={3} taxYears={['2025-2026']} unresolved={['Answer the question about “Staff cost v2”.']} />);
   assert.match(checklist, /Still needed before import/);
+});
+
+test('a saved Staff cost v2 money-column correction clears the local blocker immediately', () => {
+  const unresolved = yatsonReviewSheets.find((sheet) => sheet.sheetId === 'sheet_staff')!;
+  const resolution = { sheet_staff: 'include_expense' as const };
+  assert.deepEqual(
+    unresolvedReviewSheets([unresolved], resolution).map((sheet) => sheet.displayName),
+    ['Staff cost v2'],
+    'the sheet remains blocked until a money column is saved',
+  );
+
+  const corrected = {
+    ...unresolved,
+    mapping: { ...unresolved.mapping, columns: { ...unresolved.mapping.columns, amount: 2 } },
+  };
+  assert.deepEqual(unresolvedReviewSheets([corrected], resolution), []);
+  assert.deepEqual(
+    confirmationBlockersForReview({
+      unresolvedSheetNames: unresolvedReviewSheets([corrected], resolution).map((sheet) => sheet.displayName),
+      selectedSheetCount: 1,
+      taxYearCount: 1,
+      incompleteRowCount: 0,
+      incompleteRowsAcknowledged: false,
+    }),
+    [],
+    'a durable effective mapping leaves no stale Staff cost blocker',
+  );
+});
+
+test('an incomplete correction stays blocked and a failed save keeps plain-language guidance visible', () => {
+  const unresolved = yatsonReviewSheets.find((sheet) => sheet.sheetId === 'sheet_staff')!;
+  const resolution = { sheet_staff: 'include_expense' as const };
+  const incomplete = {
+    ...unresolved,
+    mapping: { ...unresolved.mapping, columns: { date: 0, description: 1 } },
+  };
+  assert.deepEqual(
+    unresolvedReviewSheets([incomplete], resolution).map((sheet) => sheet.displayName),
+    ['Staff cost v2'],
+  );
+  const failureHtml = renderToStaticMarkup(<SpreadsheetServerIssues
+    issues={[{
+      sheetId: 'sheet_staff',
+      worksheet: 'Staff cost v2',
+      field: 'selection',
+      message: 'Check the named columns for this sheet and choose them again.',
+    }]}
+    onShowSheet={() => undefined}
+  />);
+  assert.match(failureHtml, /Check the named columns for this sheet and choose them again/);
+  assert.match(failureHtml, /Show this sheet/);
 });
 
 test('a server rejection becomes a specific, sheet-linked next step instead of a generic error', () => {
