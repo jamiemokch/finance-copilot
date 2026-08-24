@@ -1347,6 +1347,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     };
     const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis, {
       session: persistedSemanticSession,
+      resetProviderState: detectionMode === "retry_automatic",
       persistSession: persistSemanticSession,
       persistProviderAttempts,
       inFlightKey: semanticClaimToken ? `${semanticRecord.id}:${semanticClaimToken}` : undefined,

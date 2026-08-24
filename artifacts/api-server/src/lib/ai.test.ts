@@ -12,6 +12,7 @@ import {
   SPREADSHEET_PROVIDER_MODEL,
   type SpreadsheetSemanticSession,
 } from './ai.js';
+import type { SpreadsheetProviderAttempt } from './spreadsheet-understanding.js';
 import {
   buildRequestedSpreadsheetContext,
   buildSpreadsheetWorkbookOverview,
@@ -716,6 +717,72 @@ test('a failed semantic session retries to success without replaying prior provi
   assert.equal(retryCalls, 1, 'the explicit retry issues exactly one new provider request');
   assert.equal(retried.providerCalls, 3, 'the durable session retains its real prior provider work count');
   assert.equal(retried.providerAttempts?.length, 3, 'prior attempts are retained rather than duplicated');
+});
+
+test('an explicit retry resets inherited object mode to dated strict mode while preserving historical attempts', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry state sale,17\n'), 'text/csv', 'retry-state.csv');
+  const token = 'retry-state-token';
+  const historicalAttempts: SpreadsheetProviderAttempt[] = [{
+    telemetryVersion: 'spreadsheet-provider-attempt.v1',
+    attemptNumber: 1,
+    routeClass: 'replit_ai_integrations',
+    requestedModel: SPREADSHEET_PROVIDER_MODEL,
+    resolvedModel: SPREADSHEET_PROVIDER_MODEL,
+    model: SPREADSHEET_PROVIDER_MODEL,
+    responseMode: 'json_object',
+    startedAt: '2026-08-24T12:48:28.303Z',
+    durationMs: 10,
+    outcomeCategory: 'success',
+    safeStatus: 'ok',
+    statusCode: null,
+    retryable: false,
+    failurePhase: null,
+  }];
+  const session: SpreadsheetSemanticSession = {
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    contentHash: workbook.contentHash ?? null,
+    stage: 'workbook_overview',
+    continuationToken: token,
+    payload: { continuationToken: token, stage: 'workbook_overview' },
+    contextHistory: [],
+    providerCalls: 1,
+    providerAttempts: historicalAttempts,
+    currentPlan: null,
+  };
+  const originalBaseUrl = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+  process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = 'https://replit-ai-integrations.test/v1';
+  try {
+    const requests: Array<{ model?: string; mode?: string }> = [];
+    const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
+    const client = {
+      chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
+        requests.push({ model: input.model, mode: input.response_format?.type });
+        const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+        return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+      } } },
+    } as unknown as OpenAI;
+    const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheet(workbook), {
+      client,
+      session,
+      resetProviderState: true,
+      retryDelayMs: 0,
+      persistProviderAttempts: async (attempts) => { persistedAttempts.push(structuredClone(attempts)); },
+    });
+    assert.equal(result.status, 'success');
+    assert.deepEqual(requests, [{
+      model: SPREADSHEET_PROVIDER_DATED_MODEL,
+      mode: 'json_schema',
+    }]);
+    assert.deepEqual(result.providerAttempts?.slice(0, 1), historicalAttempts);
+    assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.attemptNumber, attempt.model, attempt.responseMode]), [
+      [1, SPREADSHEET_PROVIDER_MODEL, 'json_object'],
+      [2, SPREADSHEET_PROVIDER_DATED_MODEL, 'json_schema'],
+    ]);
+    assert.deepEqual(persistedAttempts.at(-1)?.slice(0, 1), historicalAttempts);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = originalBaseUrl;
+  }
 });
 
 test('a persisted pending continuation resumes after an interrupted worker without repeating its overview call', async () => {

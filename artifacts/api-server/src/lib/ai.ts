@@ -662,6 +662,7 @@ export async function analyseSpreadsheetWithAI(
     timeoutMs?: number;
     retryDelayMs?: number;
     session?: SpreadsheetSemanticSession | null;
+    resetProviderState?: boolean;
     persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
     persistProviderAttempts?: (attempts: SpreadsheetProviderAttempt[]) => Promise<void>;
     // A durable lease holder must never inherit a stale worker's in-process
@@ -761,7 +762,12 @@ export async function analyseSpreadsheetWithAI(
     const lastProviderAttempt = providerAttempts.at(-1);
     let resolvedModel = lastProviderAttempt?.resolvedModel ?? lastProviderAttempt?.model ?? SPREADSHEET_PROVIDER_MODEL;
     let responseMode = lastProviderAttempt?.responseMode ?? 'json_schema';
-    if (lastProviderAttempt?.outcomeCategory === 'compatibility'
+    if (testOptions?.resetProviderState) {
+      resolvedModel = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL
+        ? SPREADSHEET_PROVIDER_DATED_MODEL
+        : SPREADSHEET_PROVIDER_MODEL;
+      responseMode = 'json_schema';
+    } else if (lastProviderAttempt?.outcomeCategory === 'compatibility'
       && lastProviderAttempt.responseMode === 'json_schema'
       && resolvedModel === SPREADSHEET_PROVIDER_MODEL) {
       resolvedModel = SPREADSHEET_PROVIDER_DATED_MODEL;
