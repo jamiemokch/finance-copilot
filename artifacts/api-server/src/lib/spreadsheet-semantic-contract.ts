@@ -739,7 +739,6 @@ export function validateSpreadsheetImportPlan(plan: SpreadsheetImportPlan, workb
     }
     if (sheetPlan.disposition === 'transactional') {
       if (!sheetPlan.headerRow || !sheetPlan.dataRange) return 'transactional_sheet_requires_header_and_data_range';
-      if (!sheetPlan.rowRules.include.length) return 'transactional_sheet_requires_explicit_include_rules';
       if (!sheetPlan.fields.date.columnId || (!sheetPlan.fields.signedAmount.columnId && !sheetPlan.fields.debit.columnId && !sheetPlan.fields.credit.columnId)) {
         return 'transactional_sheet_requires_date_and_amount';
       }
