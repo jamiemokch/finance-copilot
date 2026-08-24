@@ -30,6 +30,7 @@ import {
   spreadsheetAIResponseSchema,
   spreadsheetAIResponseContract,
   spreadsheetAIResponseJsonSchema,
+  spreadsheetImportPlanSchema,
   validateSpreadsheetImportPlan,
   type SpreadsheetImportPlan,
 } from './spreadsheet-semantic-contract.js';
@@ -344,6 +345,9 @@ export async function analyseSpreadsheetWithAI(
     retryDelayMs?: number;
     session?: SpreadsheetSemanticSession | null;
     persistSession?: (session: SpreadsheetSemanticSession) => Promise<void>;
+    // A durable lease holder must never inherit a stale worker's in-process
+    // promise after its database claim has been reclaimed.
+    inFlightKey?: string;
   },
 ): Promise<SpreadsheetAIEnvelope> {
   const structuralAnalysis = analyseSpreadsheetStructure(workbook);
@@ -415,12 +419,21 @@ export async function analyseSpreadsheetWithAI(
     return { ...cached.envelope, providerCalls: 0 };
   }
   if (cached) spreadsheetAICache.delete(cacheKey);
-  const active = spreadsheetAIInFlight.get(cacheKey);
+  const inFlightKey = testOptions?.inFlightKey ?? cacheKey;
+  const active = spreadsheetAIInFlight.get(inFlightKey);
   if (active) return active;
   const run = (async (): Promise<SpreadsheetAIEnvelope> => {
+    const savedPayload = testOptions?.session?.payload;
+    const hasResumablePayload = Boolean(
+      savedPayload
+      && typeof savedPayload === 'object'
+      && !Array.isArray(savedPayload)
+      && (savedPayload as { continuationToken?: unknown }).continuationToken === testOptions?.session?.continuationToken,
+    );
     const resumable = testOptions?.session?.schemaVersion === SPREADSHEET_SEMANTIC_SCHEMA_VERSION
       && testOptions.session.contentHash === (workbook.contentHash ?? null)
-      && (testOptions.session.stage === 'workbook_overview' || testOptions.session.stage === 'requested_context');
+      && (testOptions.session.stage === 'workbook_overview' || testOptions.session.stage === 'requested_context')
+      && hasResumablePayload;
     let providerCalls = resumable ? testOptions!.session!.providerCalls : 0;
     let token = resumable ? testOptions!.session!.continuationToken : initialToken;
     let payload: unknown = resumable ? testOptions!.session!.payload : {
@@ -531,12 +544,13 @@ export async function analyseSpreadsheetWithAI(
       const outcome = incomplete('failed', reason, {
         reason: abstentionReason, detail: reason, manualRecoveryRequired: true,
       }, calls, token);
-      await checkpoint('incomplete', outcome.semanticPlan ?? null);
+      const persistedPlan = spreadsheetImportPlanSchema.safeParse(outcome.semanticPlan);
+      await checkpoint('incomplete', persistedPlan.success ? persistedPlan.data : null);
       return outcome;
     }
   })();
-  spreadsheetAIInFlight.set(cacheKey, run);
-  try { return await run; } finally { spreadsheetAIInFlight.delete(cacheKey); }
+  spreadsheetAIInFlight.set(inFlightKey, run);
+  try { return await run; } finally { spreadsheetAIInFlight.delete(inFlightKey); }
 }
 
 function buildExtractionPrompt(context: ExtractionContext): string {

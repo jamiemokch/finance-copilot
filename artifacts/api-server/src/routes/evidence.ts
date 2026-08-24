@@ -1235,6 +1235,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     const ai = await analyseSpreadsheetWithAI(workbook, structuralAnalysis, {
       session: persistedSemanticSession,
       persistSession: persistSemanticSession,
+      inFlightKey: semanticClaimToken ? `${semanticRecord.id}:${semanticClaimToken}` : undefined,
     });
     if (semanticClaimToken) {
       const [currentSession] = await db.select({
@@ -1643,6 +1644,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       ),
     )).returning();
     if (!claimed) { res.status(409).json({ error: "This spreadsheet was replaced or is already being processed. Reload the review before trying again." }); return; }
+    const confirmedSourceObjectPath = confirmedEvidence.objectPath;
+    const confirmedSemanticSessionId = typeof persistedDraft.semanticSessionId === "string"
+      ? persistedDraft.semanticSessionId
+      : null;
+    const confirmedSemanticWorkIdentity = typeof persistedDraft.semanticWorkIdentity === "string"
+      ? persistedDraft.semanticWorkIdentity
+      : null;
 
     userDecision = {
       selectedSheetIds: body.data.selectedSheetIds, sheetMappings: mappingsForAudit,
@@ -1652,9 +1660,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       semanticPlanIdentity: body.data.semanticPlanIdentity,
       semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
       sourceContentHash,
-      sourceObjectPath: evidenceItem.objectPath,
-      semanticSessionId: persistedDraft.semanticSessionId ?? null,
-      semanticWorkIdentity: persistedDraft.semanticWorkIdentity ?? null,
+      sourceObjectPath: confirmedSourceObjectPath,
+      semanticSessionId: confirmedSemanticSessionId,
+      semanticWorkIdentity: confirmedSemanticWorkIdentity,
       manualOverrides: (persistedDraft.decisionSources as Record<string, unknown> | undefined)?.manualOverrides ?? {},
       decisionSources: {
         sheetRoleOverrides: "user", selectedSheetIds: "user", sheetMappings: "user",
@@ -1704,9 +1712,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
            duplicateFingerprint: row.duplicateFingerprint, decisionSource: row.decisionSource, mappingRevision: mappingRevision,
            semanticPlanIdentity: body.data.semanticPlanIdentity,
            semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
-           semanticSessionId: persistedDraft.semanticSessionId ?? null,
+            semanticSessionId: confirmedSemanticSessionId,
            sourceContentHash,
-           sourceObjectPath: evidenceItem.objectPath,
+            sourceObjectPath: confirmedSourceObjectPath,
            semanticDisposition: semanticSheets.get(row.sheetId)?.disposition ?? "manual_recovery",
            semanticValidationReason: semanticSheets.get(row.sheetId)?.validationReason ?? "Confirmed user review decision.",
            userResolution: body.data.sheetResolutions[row.sheetId] ?? null,
@@ -1756,13 +1764,13 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
         profileId: profile.id, evidenceId: confirmedEvidence.id, actorUserId: req.user.id, eventType: "spreadsheet_import_confirmed",
         details: {
           contentHash: sourceContentHash,
-          sourceObjectPath: evidenceItem.objectPath,
+          sourceObjectPath: confirmedSourceObjectPath,
           parserVersion: "spreadsheet-parser.v2",
           mappingRevision,
           semanticPlanIdentity: body.data.semanticPlanIdentity,
           semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
-          semanticSessionId: persistedDraft.semanticSessionId ?? null,
-          semanticWorkIdentity: persistedDraft.semanticWorkIdentity ?? null,
+          semanticSessionId: confirmedSemanticSessionId,
+          semanticWorkIdentity: confirmedSemanticWorkIdentity,
           userDecision, dispositionCounts: counts, sheetDispositions: sheetFinalDispositions,
           auditedSourceRows: rowOutcomes.length, importableRows: rowsToWrite.length,
         },

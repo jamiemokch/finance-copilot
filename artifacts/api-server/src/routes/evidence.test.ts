@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -15,11 +16,13 @@ import {
   profilesTable,
   sessionsTable,
   spreadsheetRowOutcomesTable,
+  spreadsheetSemanticSessionsTable,
   transactionsTable,
   usersTable,
 } from '@workspace/db';
 import app from '../app.js';
 import { createSession } from '../lib/auth.js';
+import { invalidateSpreadsheetAICache } from '../lib/ai.js';
 import { ObjectStorageService } from '../lib/objectStorage.js';
 
 if (process.env.EVIDENCE_TEST_DATABASE !== '1') {
@@ -943,6 +946,160 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       eq(spreadsheetRowOutcomesTable.primaryDisposition, 'duplicate'),
     ));
     assert.deepEqual(duplicateOutcome.secondaryFindings, ['prior_profile_record']);
+
+    // Hold the first real semantic provider call open, reclaim its expired
+    // database lease, and prove its later checkpoint cannot replace the
+    // newer session's completed plan.
+    const savedAiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    const savedAiBaseUrl = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    let providerServer: ReturnType<typeof createServer> | undefined;
+    let releaseFirstProvider: (() => void) | undefined;
+    try {
+      let resolveFirstProviderStarted: (() => void) | undefined;
+      const firstProviderStarted = new Promise<void>((resolve) => { resolveFirstProviderStarted = resolve; });
+      const firstProviderRelease = new Promise<void>((resolve) => { releaseFirstProvider = resolve; });
+      let providerCalls = 0;
+      let expectedContinuationToken = "";
+      const providerContinuationTokens: unknown[] = [];
+      providerServer = createServer(async (providerRequest, providerResponse) => {
+        const body = await new Promise<string>((resolve, reject) => {
+          let raw = '';
+          providerRequest.setEncoding('utf8');
+          providerRequest.on('data', (chunk) => { raw += chunk; });
+          providerRequest.once('end', () => resolve(raw));
+          providerRequest.once('error', reject);
+        });
+        const requestBody = JSON.parse(body) as { messages: Array<{ content: string }> };
+        const payload = JSON.parse(requestBody.messages.at(-1)?.content ?? '{}') as { continuationToken: string };
+        providerContinuationTokens.push(payload.continuationToken);
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          resolveFirstProviderStarted?.();
+          await firstProviderRelease;
+        }
+        const response = {
+          schemaVersion: 'spreadsheet-semantic.v2',
+          stage: 'final_plan',
+          request: null,
+          plan: {
+            schemaVersion: 'spreadsheet-semantic.v2',
+            status: 'complete',
+            continuationToken: expectedContinuationToken || payload.continuationToken,
+            sheets: [{
+              sheetId: 'sheet_1',
+              disposition: 'transactional',
+              decisionSource: 'ai',
+              validationReason: 'Dated movements are present in the bounded structural review.',
+              purpose: 'Movement ledger',
+              headerRow: 1,
+              dataRange: { startRow: 2, endRow: 2 },
+              rowRules: { include: [{ startRow: 2, endRow: 2, reason: 'One source movement.' }], exclude: [] },
+              fields: {
+                date: { columnId: 'col_A', confidence: 95, rationale: 'Bounded header and value structure.' },
+                description: { columnId: 'col_B', confidence: 95, rationale: 'Bounded header and value structure.' },
+                signedAmount: { columnId: 'col_C', confidence: 95, rationale: 'Bounded header and value structure.' },
+                debit: { columnId: null, confidence: 0, rationale: 'A signed amount column is present.' },
+                credit: { columnId: null, confidence: 0, rationale: 'A signed amount column is present.' },
+                category: { columnId: null, confidence: 0, rationale: 'Category is not needed to parse movements.' },
+              },
+              transactionSemantics: { direction: 'mixed', rationale: 'Direction is determined from signed values.' },
+              duplicateOrOverlap: [],
+              unresolvedQuestionIds: [],
+            }],
+            unresolvedQuestions: [],
+            abstention: null,
+            summary: 'A bounded semantic review is ready for confirmation.',
+          },
+        };
+        providerResponse.writeHead(200, { 'content-type': 'application/json' });
+        providerResponse.end(JSON.stringify({
+          id: `test-semantic-${providerCalls}`,
+          object: 'chat.completion',
+          created: 0,
+          model: 'test-semantic-provider',
+          choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(response) }, finish_reason: 'stop' }],
+        }));
+      });
+      await new Promise<void>((resolve) => providerServer!.listen(0, '127.0.0.1', resolve));
+      const providerPort = (providerServer.address() as AddressInfo).port;
+      process.env.AI_INTEGRATIONS_OPENAI_API_KEY = 'test-semantic-key';
+      process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = `http://127.0.0.1:${providerPort}/v1`;
+      invalidateSpreadsheetAICache();
+      spreadsheetBuffer = Buffer.from('Date,Description,Amount\n06/04/2025,Reclaim-safe movement,31.00\n');
+
+      const raceUpload = await upload(aliceSession, alicePrimary, 'semantic-reclaim-workbook');
+      const raceRegistration = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence`, {
+        method: 'POST',
+        body: JSON.stringify({
+          filename: 'semantic-reclaim.csv',
+          objectPath: raceUpload.body.objectPath,
+          mimeType: 'text/csv',
+          evidenceType: 'ledger',
+        }),
+      });
+      assert.equal(raceRegistration.status, 201);
+      const raceEvidenceId = raceRegistration.body.id as string;
+      const staleDetect = request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, { method: 'POST' });
+      await firstProviderStarted;
+
+      const [activeSession] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(
+        eq(spreadsheetSemanticSessionsTable.profileId, alicePrimary),
+        eq(spreadsheetSemanticSessionsTable.evidenceId, raceEvidenceId),
+      ));
+      assert.equal(activeSession.status, 'working');
+      assert.ok(activeSession.claimToken);
+      expectedContinuationToken = activeSession.continuationToken;
+      const activeLeaseConflict = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, { method: 'POST' });
+      assert.equal(activeLeaseConflict.status, 409, 'an active lease prevents a concurrent provider request');
+      assert.equal(providerCalls, 1, 'the active lease did not issue duplicate provider work');
+
+      await db.update(spreadsheetSemanticSessionsTable).set({
+        leaseExpiresAt: new Date(0),
+      }).where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+      const reclaimedDetect = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, { method: 'POST' });
+      assert.equal(reclaimedDetect.status, 200);
+      assert.equal(reclaimedDetect.body.aiStatus.status, 'success', JSON.stringify(reclaimedDetect.body.aiStatus));
+      assert.equal(providerCalls, 2, 'the reclaimed lease performs its own bounded provider call');
+      assert.equal(providerContinuationTokens[1], expectedContinuationToken, 'a reclaimed worker resumes with the saved continuation token');
+      const [reclaimedSession] = await db.select().from(spreadsheetSemanticSessionsTable)
+        .where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+      assert.equal(reclaimedSession.status, 'complete', JSON.stringify(reclaimedSession.currentPlan));
+      assert.notEqual(reclaimedSession.claimToken, activeSession.claimToken);
+      assert.equal(reclaimedSession.providerCalls, 1);
+      const reclaimedPlan = JSON.stringify(reclaimedSession.currentPlan);
+
+      releaseFirstProvider?.();
+      const staleDetectResult = await staleDetect;
+      assert.equal(staleDetectResult.status, 500, 'a stale worker cannot return an importable semantic result');
+      const [afterStaleCompletion] = await db.select().from(spreadsheetSemanticSessionsTable)
+        .where(eq(spreadsheetSemanticSessionsTable.id, activeSession.id));
+      assert.equal(afterStaleCompletion.status, 'complete');
+      assert.equal(afterStaleCompletion.claimToken, reclaimedSession.claimToken);
+      assert.equal(afterStaleCompletion.providerCalls, 1, 'the stale worker cannot add durable semantic progress');
+      assert.equal(JSON.stringify(afterStaleCompletion.currentPlan), reclaimedPlan, 'the stale worker cannot overwrite the reclaimed semantic plan');
+
+      const reopenedRace = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, { method: 'POST' });
+      assert.equal(reopenedRace.status, 200);
+      assert.equal(providerCalls, 2, 'a completed durable session resumes without another provider call');
+      const raceEvents = await db.select().from(evidenceAuditEventsTable).where(and(
+        eq(evidenceAuditEventsTable.profileId, alicePrimary),
+        eq(evidenceAuditEventsTable.evidenceId, raceEvidenceId),
+      ));
+      const eventTypes = raceEvents.map((event) => event.eventType);
+      assert.ok(eventTypes.includes('spreadsheet_semantic_session_reclaimed'));
+      assert.ok(eventTypes.includes('spreadsheet_semantic_session_fenced'));
+      assert.ok(eventTypes.includes('spreadsheet_semantic_session_completed'));
+    } finally {
+      releaseFirstProvider?.();
+      invalidateSpreadsheetAICache();
+      if (savedAiKey === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+      else process.env.AI_INTEGRATIONS_OPENAI_API_KEY = savedAiKey;
+      if (savedAiBaseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+      else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = savedAiBaseUrl;
+      if (providerServer) {
+        await new Promise<void>((resolve, reject) => providerServer!.close((error) => error ? reject(error) : resolve()));
+      }
+    }
   } finally {
     ObjectStorageService.prototype.saveContent = originalSaveContent;
     ObjectStorageService.prototype.getObjectEntityFile = originalGetFile;

@@ -26,3 +26,9 @@ Private bytes may be physically deduplicated only within the same authenticated 
 **Why:** An unguessable object path and same-user byte reuse are storage optimisations, not authorization. A path-only download or a user-only upload record can otherwise cross the selected business boundary.
 
 **How to apply:** Create or verify the profile-to-upload binding at direct/presigned upload time, require it again at every evidence mutation, and serve evidence through the profile-and-evidence route rather than a path-only private-object URL.
+
+Spreadsheet semantic analysis may resume only from a self-describing checkpoint: the persisted payload must contain the same continuation token as the durable session. An empty initialization payload is a new analysis, not a resumable overview.
+
+**Why:** A fresh claimed session is already labelled `workbook_overview` but begins with an empty payload. Treating that placeholder as resumable omits the token the AI must echo, so a recovery/reclaim path can incorrectly turn an otherwise valid review into a malformed response.
+
+**How to apply:** Build and checkpoint a full overview payload on a first attempt or reset. Resume provider work only after checking the payload’s continuation token, and scope any process-local in-flight promise to the durable claim token so a reclaimed worker does not inherit a stale worker’s result.
