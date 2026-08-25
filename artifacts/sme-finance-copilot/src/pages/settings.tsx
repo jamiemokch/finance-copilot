@@ -31,6 +31,13 @@ function currentUkTaxYearDates() {
   };
 }
 
+function selectedTaxYearDates(taxYear: string) {
+  const match = /^(\d{4})\/(\d{2})$/.exec(taxYear);
+  if (!match) return currentUkTaxYearDates();
+  const startYear = Number(match[1]);
+  return { start: `${startYear}-04-06`, end: `${startYear + 1}-04-05` };
+}
+
 export default function Settings() {
   const {
     profiles, activeProfileId, setActiveProfileId,
@@ -261,6 +268,9 @@ export default function Settings() {
                     key={yr}
                     onClick={() => {
                       setTaxYear(yr);
+                      const coverage = selectedTaxYearDates(yr);
+                      setCoverageStartDate(coverage.start);
+                      setCoverageEndDate(coverage.end);
                       if (activeProfile?.otherTaxableIncomeTaxYear !== yr) setOtherTaxableIncome('');
                     }}
                     className={`px-4 py-2 rounded-lg border-2 text-sm font-medium transition-all cursor-pointer ${

@@ -40,7 +40,7 @@ test('fails closed when a record is unclassified or cannot map to a filing box',
     tx({ id: 'unmapped', accountingCategory: 'crypto_spaceship' }),
   ], context);
   assert.equal(pack.filingReady, false);
-  assert.deepEqual(pack.blockers.map((item) => item.code), ['record_needs_classification', 'record_needs_tax_category']);
+  assert.deepEqual(pack.blockers.map((item) => item.code), ['record_needs_classification', 'record_needs_tax_category', 'no_confirmed_records']);
 });
 
 test('shows actual-expense and trading-allowance scenarios without silently choosing', () => {
@@ -51,4 +51,11 @@ test('shows actual-expense and trading-allowance scenarios without silently choo
   assert.equal(pack.decision.recommendedMethod, 'trading_allowance');
   assert.equal(pack.decision.selectedMethod, null);
   assert.deepEqual(pack.decision.scenarios.map((scenario) => scenario.taxableProfit), [4_800, 4_000]);
+});
+
+test('blocks an empty ledger instead of presenting zero figures as filing-ready', () => {
+  const pack = buildTaxFilingPack([], context);
+  assert.equal(pack.recordCount, 0);
+  assert.equal(pack.filingReady, false);
+  assert.equal(pack.blockers.some((blocker) => blocker.code === 'no_confirmed_records'), true);
 });

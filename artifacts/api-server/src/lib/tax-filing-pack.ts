@@ -113,6 +113,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
   const boxAmount = (box: Sa103sBox) => boxes.find((entry) => entry.box === box)!.amount;
   const turnover = money(boxAmount('9') + boxAmount('10'));
   const actualExpenses = money(boxes.filter((entry) => Number(entry.box) >= 11).reduce((sum, entry) => sum + entry.amount, 0));
+  const mappedRecordCount = trace.filter((item) => item.status === 'mapped').length;
   const tradingAllowance = Math.min(1_000, turnover);
   const actualProfit = money(turnover - actualExpenses);
   const allowanceProfit = money(Math.max(0, turnover - tradingAllowance));
@@ -120,6 +121,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
   const shortFormThreshold = context.taxYear === '2025/26' ? 90_000 : context.taxYear === '2024/25' ? 85_000 : null;
 
   if (periodEnd !== period.end) blockers.push({ code: 'tax_year_incomplete', message: `Records currently stop at ${periodEnd}; the tax year ends ${period.end}.` });
+  if (mappedRecordCount === 0) blockers.push({ code: 'no_confirmed_records', message: 'No confirmed income or expense records are available for this tax year. Do not confirm £0 figures; add or recover the records first.' });
   if (!context.businessDescription?.trim()) blockers.push({ code: 'business_description_missing', message: 'Add a plain-language business description.' });
   if (context.accountingPeriodConfirmed !== true) blockers.push({ code: 'accounting_period_unconfirmed', message: 'Confirm the accounting period.' });
   if (context.recordsCompleteConfirmed !== true) blockers.push({ code: 'records_unconfirmed', message: 'Confirm the records are complete.' });
@@ -150,6 +152,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
       warning: 'The two methods cannot be claimed together. Confirm the chosen method before filing.',
     },
     boxes,
+    recordCount: mappedRecordCount,
     calculated: { box20TotalAllowableExpenses: actualExpenses, box21NetProfit: Math.max(0, actualProfit), box22NetLoss: Math.max(0, -actualProfit) },
     trace,
     blockers,

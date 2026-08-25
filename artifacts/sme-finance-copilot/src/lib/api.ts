@@ -877,6 +877,7 @@ export interface APIIncomeTaxBand {
 export interface APIIncomeTaxEstimate {
   status: 'complete' | 'incomplete';
   taxYear: string;
+  recordCount: number;
   accountingBasis: 'cash' | 'accrual';
   businessProfitInput: number;
   otherTaxableIncome: number | null;

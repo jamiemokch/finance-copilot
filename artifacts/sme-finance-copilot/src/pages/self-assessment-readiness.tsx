@@ -238,7 +238,7 @@ export default function SelfAssessmentReadiness() {
   };
 
   const downloadPack = () => {
-    if (!filingPack || !activeProfile) return;
+    if (!filingPack || !activeProfile || filingPack.recordCount === 0) return;
     const blob = new Blob([JSON.stringify(filingPack, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -394,12 +394,18 @@ export default function SelfAssessmentReadiness() {
         </div>
         {filingPack && (
           <div className="mt-5 space-y-5">
+            {filingPack.recordCount === 0 && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+                <p className="font-medium">No confirmed records are available for {filingPack.taxYear}.</p>
+                <p className="mt-1">Do not confirm the £0 figures. Add or recover your records first; this page cannot create financial data.</p>
+              </div>
+            )}
             <div className={`rounded-lg border p-4 ${filingPack.filingReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
               <p className="font-medium">{filingPack.filingReady ? 'Ready for final human filing review' : `${filingPack.blockers.length} item${filingPack.blockers.length === 1 ? '' : 's'} to resolve`}</p>
               <p className="mt-1 text-sm text-muted-foreground">{filingPack.disclaimer}</p>
               {filingPack.blockers.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">{filingPack.blockers.map((blocker, index) => <li key={`${blocker.code}-${blocker.recordId ?? index}`}>{blocker.message}</li>)}</ul>}
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            {filingPack.recordCount > 0 && <div className="grid gap-4 md:grid-cols-2">
               <Card className="p-4">
                 <p className="text-sm font-medium">Tax optimisation check</p>
                 <p className="mt-2 text-sm text-muted-foreground">{filingPack.decision.explanation}</p>
@@ -411,9 +417,9 @@ export default function SelfAssessmentReadiness() {
                 <p className="text-sm">Box 21 profit: {money(filingPack.calculated.box21NetProfit)}</p>
                 <p className="text-sm">Box 22 loss: {money(filingPack.calculated.box22NetLoss)}</p>
               </Card>
-            </div>
+            </div>}
             <div className="flex justify-end">
-              <Button variant="outline" onClick={downloadPack}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
+              <Button variant="outline" onClick={downloadPack} disabled={filingPack.recordCount === 0}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
             </div>
           </div>
         )}
