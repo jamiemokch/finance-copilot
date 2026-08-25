@@ -326,6 +326,60 @@ function validateProposalSemantics(proposal: SpreadsheetUnderstandingProposal, a
   return null;
 }
 
+function isProviderRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeProviderJsonText(value: string): string {
+  let normalized = value.trim();
+  for (let pass = 0; pass < 2; pass += 1) {
+    const fenced = normalized.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fenced) normalized = fenced[1].trim();
+    try {
+      const parsed = JSON.parse(normalized) as unknown;
+      if (typeof parsed === 'string') {
+        normalized = parsed.trim();
+        continue;
+      }
+      return JSON.stringify(parsed);
+    } catch {
+      return normalized;
+    }
+  }
+  return normalized;
+}
+
+/**
+ * Normalizes provider/SDK representation differences without interpreting or
+ * repairing semantic content. The returned string is still subject to the
+ * unchanged JSON, wire-envelope, Zod, continuation, and semantic validators.
+ */
+export function normalizeSpreadsheetProviderResponse(response: unknown): string {
+  const choices = isProviderRecord(response) && Array.isArray(response.choices) ? response.choices : [];
+  const firstChoice = isProviderRecord(choices[0]) ? choices[0] : null;
+  const message = firstChoice && isProviderRecord(firstChoice.message) ? firstChoice.message : null;
+  const parsed = message && Object.hasOwn(message, 'parsed') ? message.parsed : undefined;
+  if (parsed !== undefined) {
+    return typeof parsed === 'string' ? normalizeProviderJsonText(parsed) : JSON.stringify(parsed);
+  }
+  const content = message?.content;
+  if (typeof content === 'string') return normalizeProviderJsonText(content);
+  if (Array.isArray(content)) {
+    const textParts = content.flatMap((part) => {
+      if (typeof part === 'string') return [part];
+      if (isProviderRecord(part) && typeof part.text === 'string') return [part.text];
+      return [];
+    });
+    if (textParts.length > 0) return normalizeProviderJsonText(textParts.join(''));
+    return JSON.stringify(content);
+  }
+  if (isProviderRecord(content) && typeof content.text === 'string') {
+    return normalizeProviderJsonText(content.text);
+  }
+  if (content !== undefined && content !== null) return JSON.stringify(content);
+  return '';
+}
+
 export async function providerCallWithTimeout(
   client: OpenAI,
   payload: string,
@@ -436,7 +490,7 @@ export async function providerCallWithTimeout(
           // SDK create invisible additional provider work underneath that cap.
           maxRetries: 0,
         } as never);
-      const content = response.choices[0]?.message?.content ?? '';
+      const content = normalizeSpreadsheetProviderResponse(response);
       const responseFailure = options.classifyResponse?.(content);
       await options.onAttempt?.({
         telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,

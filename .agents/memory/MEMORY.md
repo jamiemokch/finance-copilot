@@ -17,3 +17,4 @@
 - [Replit spreadsheet provider compatibility](replit-spreadsheet-provider.md) — verified alias-only strict policy with a nested wire envelope for managed-route constraints
 - [Spreadsheet semantic execution epochs](spreadsheet-semantic-execution-epochs.md) — automatic retries must be fresh fenced executions, not resumed exhausted sessions
 - [OIDC auth cache safety](oidc-auth-cache-safety.md) — identity reads must bypass caches so a valid callback session cannot leave the client on Welcome
+- [Spreadsheet AI test cache isolation](spreadsheet-ai-test-cache-isolation.md) — semantic tests share a content-hash cache; unique fixtures or explicit invalidation prevent false successes

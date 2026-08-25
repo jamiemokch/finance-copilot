@@ -6,6 +6,7 @@ import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet } f
 import {
   analyseSpreadsheetWithAI,
   detectColumnSchema,
+  normalizeSpreadsheetProviderResponse,
   providerCallWithTimeout,
   resetManagedSpreadsheetProviderPolicyForTests,
   runSpreadsheetProviderCompatibilityCheck,
@@ -126,6 +127,59 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
       return true;
     },
   );
+});
+
+test('structured SDK response variants normalize before the unchanged strict response validation', async () => {
+  const token = 'normalization-token';
+  const wireResponse = { response: finalResponse(token, [semanticSheet('sheet_1', 'transactional')]) };
+  const serialized = JSON.stringify(wireResponse);
+  const variants: unknown[] = [
+    { choices: [{ message: { content: serialized } }] },
+    { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] },
+    { choices: [{ message: { content: null, parsed: wireResponse } }] },
+    { choices: [{ message: { content: JSON.stringify(serialized) } }] },
+    { choices: [{ message: { content: `\`\`\`json\n${serialized}\n\`\`\`` } }] },
+    { choices: [{ message: { content: wireResponse } }] },
+  ];
+  for (const variant of variants) {
+    assert.deepEqual(JSON.parse(normalizeSpreadsheetProviderResponse(variant)), wireResponse);
+  }
+
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,SDK normalization fixture,37\n'), 'text/csv', 'normalization.csv');
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: {
+      chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+        const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as { continuationToken?: string };
+        const dynamicWireResponse = {
+          response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+        };
+        return {
+          choices: [{
+            message: {
+              content: [{ type: 'text', text: JSON.stringify(dynamicWireResponse) }],
+            },
+          }],
+        };
+      } } },
+    } as unknown as OpenAI,
+    retryDelayMs: 0,
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
+});
+
+test('unfixable provider text still produces the existing invalid-json contract failure', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Unfixable response fixture,41\n'), 'text/csv', 'unfixable-response.csv');
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client: {
+      chat: { completions: { create: async () => ({ choices: [{ message: { content: 'not-json' } }] }) } },
+    } as unknown as OpenAI,
+    retryDelayMs: 0,
+  });
+  const diagnostic = result.providerAttempts?.find((attempt) => attempt.outcomeCategory === 'contract_invalid')?.diagnostic;
+  assert.equal(result.status, 'failed');
+  assert.equal(diagnostic?.validationStage, 'json_parse');
+  assert.ok(diagnostic?.issues.some((issue) => issue.code === 'invalid_json'));
 });
 
 test('a provider timeout aborts the upstream request and records one bounded attempt', async () => {
