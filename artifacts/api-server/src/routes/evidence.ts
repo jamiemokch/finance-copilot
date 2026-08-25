@@ -1287,6 +1287,23 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       reclaimed = true;
     } else if (detectionMode === "retry_automatic" && semanticRecord.status === "incomplete") {
       if (semanticRecord.automaticRetryCount >= MAX_AUTOMATIC_RETRY_EXECUTIONS) {
+        const previousAiStatus = savedState?.aiStatus;
+        const safePreviousAiStatus = previousAiStatus && typeof previousAiStatus === "object" && !Array.isArray(previousAiStatus)
+          ? previousAiStatus as Record<string, unknown>
+          : {};
+        await db.update(evidenceItemsTable).set({
+          mappingSchema: {
+            ...(savedState ?? {}),
+            aiStatus: {
+              ...safePreviousAiStatus,
+              recoveryState: "automatic_unavailable",
+              automaticRetryExhausted: true,
+            },
+          } as Record<string, unknown>,
+        }).where(and(
+          eq(evidenceItemsTable.id, evidenceItem.id),
+          eq(evidenceItemsTable.profileId, profile.id),
+        ));
         await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_retry_limit_reached", {
           semanticSessionId: semanticRecord.id,
           semanticWorkIdentity: semanticRecord.workIdentity,

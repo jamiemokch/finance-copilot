@@ -991,8 +991,21 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
           providerRequest.once('end', () => resolve(raw));
           providerRequest.once('error', reject);
         });
-        const requestBody = JSON.parse(body) as { messages: Array<{ content: string }> };
-        const payload = JSON.parse(requestBody.messages.at(-1)?.content ?? '{}') as { continuationToken: string };
+        const requestBody = JSON.parse(body) as {
+          input?: unknown;
+          messages?: unknown;
+        };
+        const chatMessages = Array.isArray(requestBody.messages)
+          ? requestBody.messages as Array<{ content?: unknown }>
+          : [];
+        const payloadText = typeof requestBody.input === 'string'
+          ? requestBody.input
+          : typeof requestBody.input === 'object' && requestBody.input !== null
+            ? JSON.stringify(requestBody.input)
+            : typeof chatMessages.at(-1)?.content === 'string'
+              ? chatMessages.at(-1)!.content as string
+              : '{}';
+        const payload = JSON.parse(payloadText) as { continuationToken: string };
         providerContinuationTokens.push(payload.continuationToken);
         providerCalls += 1;
         if (providerCalls === 1) {
@@ -1034,13 +1047,31 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
           },
         };
         providerResponse.writeHead(200, { 'content-type': 'application/json' });
-        providerResponse.end(JSON.stringify({
-          id: `test-semantic-${providerCalls}`,
-          object: 'chat.completion',
-          created: 0,
-          model: 'test-semantic-provider',
-          choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(response) }, finish_reason: 'stop' }],
-        }));
+        providerResponse.end(JSON.stringify(typeof requestBody.input === 'string'
+          ? {
+            id: `test-semantic-${providerCalls}`,
+            object: 'response',
+            status: 'completed',
+            output: [{
+              id: `test-semantic-message-${providerCalls}`,
+              type: 'message',
+              role: 'assistant',
+              status: 'completed',
+              content: [{
+                type: 'output_text',
+                text: JSON.stringify({ response }),
+                annotations: [],
+              }],
+            }],
+            output_text: JSON.stringify({ response }),
+          }
+          : {
+            id: `test-semantic-${providerCalls}`,
+            object: 'chat.completion',
+            created: 0,
+            model: 'test-semantic-provider',
+            choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(response) }, finish_reason: 'stop' }],
+          }));
       });
       await new Promise<void>((resolve) => providerServer!.listen(0, '127.0.0.1', resolve));
       const providerPort = (providerServer.address() as AddressInfo).port;
@@ -1189,6 +1220,17 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
        assert.equal(cappedRetry.body.code, 'automatic_retry_limit_reached');
        assert.equal(cappedRetry.body.recoveryState, 'manual_recovery_required');
        assert.equal(providerCalls, providerCallsBeforeCap, 'the capped retry never contacts the provider');
+        const resumedAfterCap = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, {
+          method: 'POST',
+        });
+        assert.equal(resumedAfterCap.status, 200, JSON.stringify(resumedAfterCap.body));
+        assert.equal(resumedAfterCap.body.aiStatus.automaticRetryExhausted, true, 'a resumed review retains the exhausted retry state');
+        assert.equal(providerCalls, providerCallsBeforeCap, 'resuming an exhausted review does not contact the provider');
+        const manualRecoveryAfterCap = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${raceEvidenceId}/detect-schema`, {
+          method: 'POST', body: JSON.stringify({ mode: 'manual_recovery' }),
+        });
+        assert.equal(manualRecoveryAfterCap.status, 200, JSON.stringify(manualRecoveryAfterCap.body));
+        assert.notEqual(manualRecoveryAfterCap.body.aiStatus.automaticRetryExhausted, true, 'manual recovery replaces the exhausted retry state');
        const executionsAfterCap = await db.select().from(spreadsheetSemanticExecutionsTable).where(
          eq(spreadsheetSemanticExecutionsTable.semanticSessionId, activeSession.id),
        );

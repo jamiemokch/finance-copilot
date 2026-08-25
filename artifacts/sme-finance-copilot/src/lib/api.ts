@@ -398,6 +398,7 @@ export type SpreadsheetInspectionResponse = {
     sampledSheetIds?: string[];
     continuationToken?: string | null;
     recoveryState?: 'automatic_ready' | 'automatic_unavailable' | 'manual_recovery';
+    automaticRetryExhausted?: boolean;
     providerCalls?: number;
     providerAttempts?: Array<{
       telemetryVersion: 'spreadsheet-provider-attempt.v1';

@@ -4,6 +4,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GuidedSpreadsheetAudit } from './guided-spreadsheet-audit.js';
 import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, unresolvedReviewSheets } from './guided-spreadsheet-review.js';
+import { AutomaticReviewRecoveryActions } from './automatic-review-recovery.js';
 
 const sheets = [
   { sheetId: 'sheet_1', displayName: 'Bank C.A.', dimensions: { rows: 12, columns: 3 }, disposition: 'processed', role: 'transactional' as const, confidence: 88 },
@@ -114,6 +115,17 @@ test('automatic-review failure can suppress all worksheet question cards until m
     onCorrect={() => undefined}
   />);
   assert.equal(html, '');
+});
+
+test('an exhausted automatic review shows manual recovery without a stale retry action', () => {
+  const html = renderToStaticMarkup(<AutomaticReviewRecoveryActions
+    retryAvailable={false}
+    saving={false}
+    onRetry={() => undefined}
+    onManualRecovery={() => undefined}
+  />);
+  assert.doesNotMatch(html, /retry-automatic-spreadsheet-review|Retry automatic review/);
+  assert.match(html, /start-manual-spreadsheet-recovery|Start manual recovery/);
 });
 
 test('ready sheets explain detected fields and unresolved review blocks confirmation locally', () => {

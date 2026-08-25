@@ -1,4 +1,5 @@
 import { Badge, Button, Card, Input, Label, Select } from '@/components/ui';
+import { AutomaticReviewRecoveryActions } from '@/components/automatic-review-recovery';
 import { GuidedSpreadsheetAudit } from '@/components/guided-spreadsheet-audit';
 import { GuidedSpreadsheetReview, ImportChecklist, SpreadsheetServerIssues, confirmationBlockersForReview, unresolvedReviewSheets, type GuidedSpreadsheetServerIssue, type SheetResolution } from '@/components/guided-spreadsheet-review';
 import {
@@ -6,6 +7,9 @@ import {
   type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
 } from '@/lib/api';
 import {
+  automaticReviewCanRetry,
+  automaticReviewRetryLimitConflict,
+  automaticReviewRetryIsExhausted,
   automaticReviewShouldClearAnalysis,
   automaticReviewUnavailableReason,
 } from '@/lib/spreadsheet-review-status';
@@ -375,6 +379,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const replaceWithAutomaticUnavailable = (
     message: string,
     failureCategory: NonNullable<NonNullable<Awaited<ReturnType<typeof evidenceApi.detectSchema>>['aiStatus']>['failureCategory']> = 'provider_unavailable',
+    retryLimitReached = false,
   ) => {
     setAnalysis(null);
     setAiStatus({
@@ -382,6 +387,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       reason: message,
       failureCategory,
       recoveryState: 'automatic_unavailable',
+      automaticRetryExhausted: retryLimitReached,
       providerCalls: 0,
       providerAttempts: [],
     });
@@ -626,6 +632,8 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     } catch (err) {
       replaceWithAutomaticUnavailable(
         err instanceof Error ? err.message : 'Automatic review could not be retried. No records were imported.',
+        'provider_unavailable',
+        automaticReviewRetryLimitConflict(err),
       );
       setStage('review');
     }
@@ -680,6 +688,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const automaticReviewReady = aiStatus?.recoveryState === 'automatic_ready' || aiStatus?.status === 'success';
   const manualRecoveryEnabled = aiStatus?.recoveryState === 'manual_recovery';
   const reviewEnabled = automaticReviewReady || manualRecoveryEnabled;
+  const automaticRetryLimitReached = automaticReviewRetryIsExhausted(aiStatus);
   const unavailableReason = automaticReviewUnavailableReason(aiStatus);
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
   const hasCoverage = validCoverageDate(analysis?.coverage.startDate ?? null) && validCoverageDate(analysis?.coverage.endDate ?? null);
@@ -699,11 +708,15 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
     {stage === 'inspecting' && <div className="py-10 text-center text-primary"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />Inspecting every sheet and preparing review-safe suggestions for {filename || 'your upload'}…<p className="mt-2 text-xs text-muted-foreground">Automatic review uses bounded attempts and will safely stop without importing records if it cannot finish.</p></div>}
     {stage === 'review' && !analysis && !reviewEnabled && <div data-testid="spreadsheet-automatic-review-unavailable" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 space-y-3">
       <div className="flex gap-2"><AlertCircle className="w-5 h-5 shrink-0 mt-0.5" /><div><p className="font-semibold">{unavailableReason}</p><p className="mt-1">Nothing was imported. Automatic review is unavailable for this workbook until a new attempt succeeds.</p></div></div>
-      <p className="text-xs">You can retry automatic review, or explicitly choose manual recovery to select sheets and columns yourself.</p>
-      <div className="flex flex-wrap gap-2">
-        <Button data-testid="retry-automatic-spreadsheet-review" size="sm" disabled={savingReview} onClick={() => void retryAutomaticReview()}>Retry automatic review</Button>
-        <Button data-testid="start-manual-spreadsheet-recovery" size="sm" variant="outline" disabled={savingReview} onClick={() => void startManualRecovery()}>Start manual recovery</Button>
-      </div>
+       <p className="text-xs">{automaticRetryLimitReached
+         ? 'The safe automatic retry limit has been reached for this unchanged workbook. Continue with manual recovery to select sheets and columns yourself.'
+         : 'You can retry automatic review, or explicitly choose manual recovery to select sheets and columns yourself.'}</p>
+      <AutomaticReviewRecoveryActions
+        retryAvailable={automaticReviewCanRetry(aiStatus)}
+        saving={savingReview}
+        onRetry={() => void retryAutomaticReview()}
+        onManualRecovery={() => void startManualRecovery()}
+      />
     </div>}
     {stage === 'review' && analysis && <div className="space-y-5">
        {importError && <div role="alert" className={cn(
@@ -748,11 +761,17 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
            ? 'Check the summary below before you confirm.'
            : manualRecoveryEnabled
              ? 'Choose each sheet and its columns yourself. Nothing is added until the final confirmation.'
-              : `${unavailableReason} No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.`}
-         {!reviewEnabled && <div className="mt-3 flex flex-wrap gap-2">
-           <Button data-testid="retry-automatic-spreadsheet-review" size="sm" disabled={savingReview} onClick={() => void retryAutomaticReview()}>Retry automatic review</Button>
-           <Button data-testid="start-manual-spreadsheet-recovery" size="sm" variant="outline" disabled={savingReview} onClick={() => void startManualRecovery()}>Start manual recovery</Button>
-         </div>}
+              : automaticRetryLimitReached
+                ? `${unavailableReason} No records were imported. Start manual sheet recovery instead.`
+                : `${unavailableReason} No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.`}
+          {!reviewEnabled && <div className="mt-3">
+            <AutomaticReviewRecoveryActions
+              retryAvailable={automaticReviewCanRetry(aiStatus)}
+              saving={savingReview}
+              onRetry={() => void retryAutomaticReview()}
+              onManualRecovery={() => void startManualRecovery()}
+            />
+          </div>}
       </div>
        {reviewEnabled && <>
         <GuidedSpreadsheetReview
