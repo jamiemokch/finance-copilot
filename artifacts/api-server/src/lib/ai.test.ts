@@ -138,6 +138,8 @@ test('structured SDK response variants normalize before the unchanged strict res
     { choices: [{ message: { content: serialized } }] },
     { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] },
     { choices: [{ message: { content: null, parsed: wireResponse } }] },
+    { output_text: serialized },
+    { output_parsed: wireResponse },
     { choices: [{ message: { content: JSON.stringify(serialized) } }] },
     { choices: [{ message: { content: `\`\`\`json\n${serialized}\n\`\`\`` } }] },
     { choices: [{ message: { content: wireResponse } }] },
@@ -871,6 +873,46 @@ test('provider receives the complete nested strict JSON schema contract', async 
   assert.equal(defs.sheetPlan?.additionalProperties, false);
   assert.equal(defs.fields?.additionalProperties, false);
   assert.equal(defs.request?.additionalProperties, false);
+});
+
+test('managed provider uses Responses structured output and normalizes its output_text', async () => {
+  const token = 'managed-responses-token';
+  const expected = { response: finalResponse(token, [semanticSheet('sheet_1', 'transactional')]) };
+  const payload = JSON.stringify({ continuationToken: token });
+  let request: Record<string, unknown> | undefined;
+  let chatCalls = 0;
+  const client = {
+    responses: {
+      create: async (input: Record<string, unknown>) => {
+        request = input;
+        return { output_text: JSON.stringify(expected) };
+      },
+    },
+    chat: {
+      completions: {
+        create: async () => {
+          chatCalls += 1;
+          throw new Error('managed calls must use the Responses API');
+        },
+      },
+    },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, payload, {
+    routeClass: 'replit_ai_integrations',
+    maxProviderCalls: 1,
+    retryDelayMs: 0,
+  });
+
+  assert.deepEqual(JSON.parse(result.content), expected);
+  assert.equal(chatCalls, 0);
+  assert.equal(request?.input, payload);
+  assert.equal(typeof request?.instructions, 'string');
+  assert.equal(request?.max_output_tokens, 4_000);
+  const format = (request?.text as { format?: { type?: string; strict?: boolean; schema?: Record<string, unknown> } } | undefined)?.format;
+  assert.equal(format?.type, 'json_schema');
+  assert.equal(format?.strict, true);
+  assert.equal(format?.schema, spreadsheetAIResponseJsonSchema);
 });
 
 test('a provider-success contract-invalid response gets one bounded repair pass and is revalidated', async () => {
