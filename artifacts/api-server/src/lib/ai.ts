@@ -333,7 +333,10 @@ function isProviderRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeProviderJsonText(value: string): string {
   let normalized = value.trim();
-  for (let pass = 0; pass < 2; pass += 1) {
+  // A managed SDK can return a JSON document, a fenced document, or one
+  // JSON-string wrapper around either. Keep this bounded: the adapter unwraps
+  // transport representation only; it never repairs semantic content.
+  for (let pass = 0; pass < 3; pass += 1) {
     const fenced = normalized.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
     if (fenced) normalized = fenced[1].trim();
     try {
@@ -352,90 +355,160 @@ function normalizeProviderJsonText(value: string): string {
 
 function normalizeProviderJsonValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  const normalized = typeof value === 'string'
-    ? normalizeProviderJsonText(value)
-    : JSON.stringify(value);
-  return normalized.trim() ? normalized : null;
+  if (typeof value === 'string') {
+    const normalized = normalizeProviderJsonText(value);
+    return normalized.trim() ? normalized : null;
+  }
+  try {
+    const normalized = JSON.stringify(value);
+    return typeof normalized === 'string' && normalized.trim() ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
-function normalizeResponsesOutput(output: unknown): string | null {
-  if (!Array.isArray(output)) return null;
-  for (const item of output) {
-    if (!isProviderRecord(item)) continue;
-    const itemParsed = Object.hasOwn(item, 'parsed') ? item.parsed : undefined;
-    const normalizedItemParsed = normalizeProviderJsonValue(itemParsed);
-    if (normalizedItemParsed) return normalizedItemParsed;
+type ProviderResponseTerminalState = 'incomplete' | 'refusal' | 'empty';
 
-    const content = item.content;
-    if (typeof content === 'string') {
-      const normalizedContent = normalizeProviderJsonValue(content);
-      if (normalizedContent) return normalizedContent;
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
+type ProviderResponseAdapterResult = {
+  content: string;
+  terminalState: ProviderResponseTerminalState | null;
+};
 
-    const parsedPart = content.find((part) =>
-      isProviderRecord(part) && Object.hasOwn(part, 'parsed') && part.parsed !== null,
-    );
-    if (isProviderRecord(parsedPart)) {
-      const normalizedParsed = normalizeProviderJsonValue(parsedPart.parsed);
-      if (normalizedParsed) return normalizedParsed;
-    }
-    const textParts = content.flatMap((part) => {
-      if (typeof part === 'string') return [part];
-      if (isProviderRecord(part) && typeof part.text === 'string') return [part.text];
-      return [];
-    });
-    if (textParts.length > 0) {
-      const normalizedText = normalizeProviderJsonValue(textParts.join(''));
-      if (normalizedText) return normalizedText;
-    }
+function isJsonDocument(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function appendProviderTextCandidate(candidates: string[], value: unknown) {
+  if (typeof value !== 'string') return;
+  const normalized = normalizeProviderJsonValue(value);
+  if (normalized) candidates.push(normalized);
+}
+
+function appendProviderParsedCandidate(candidates: string[], value: unknown) {
+  const normalized = normalizeProviderJsonValue(value);
+  if (normalized) candidates.push(normalized);
+}
+
+function contentHasRefusal(content: unknown): boolean {
+  if (isProviderRecord(content)) {
+    return content.type === 'refusal' || typeof content.refusal === 'string';
+  }
+  return Array.isArray(content) && content.some(contentHasRefusal);
+}
+
+function responsesOutputHasRefusal(output: unknown): boolean {
+  if (!Array.isArray(output)) return false;
+  return output.some((item) => isProviderRecord(item) && (
+    item.type === 'refusal'
+    || typeof item.refusal === 'string'
+    || contentHasRefusal(item.content)
+  ));
+}
+
+function managedResponsesTerminalState(response: Record<string, unknown>): ProviderResponseTerminalState | null {
+  if (responsesOutputHasRefusal(response.output)) return 'refusal';
+  const status = response.status;
+  if (
+    status === 'incomplete'
+    || status === 'failed'
+    || status === 'cancelled'
+    || response.incomplete_details !== null && response.incomplete_details !== undefined
+    || response.error !== null && response.error !== undefined
+  ) {
+    return 'incomplete';
   }
   return null;
 }
 
+function collectContentCandidates(candidates: string[], content: unknown) {
+  if (typeof content === 'string') {
+    appendProviderTextCandidate(candidates, content);
+    return;
+  }
+  if (isProviderRecord(content)) {
+    if (Object.hasOwn(content, 'parsed')) appendProviderParsedCandidate(candidates, content.parsed);
+    appendProviderTextCandidate(candidates, content.text);
+    return;
+  }
+  if (Array.isArray(content)) {
+    const textParts: string[] = [];
+    for (const part of content) {
+      if (typeof part === 'string') {
+        textParts.push(part);
+        appendProviderTextCandidate(candidates, part);
+        continue;
+      }
+      if (!isProviderRecord(part)) continue;
+      if (Object.hasOwn(part, 'parsed')) appendProviderParsedCandidate(candidates, part.parsed);
+      if (typeof part.text === 'string') {
+        textParts.push(part.text);
+        appendProviderTextCandidate(candidates, part.text);
+      }
+    }
+    // Responses can stream a single JSON document through more than one text
+    // part. Preserve the individual candidates and also try their bounded,
+    // same-message concatenation; never combine across provider messages.
+    if (textParts.length > 1) appendProviderTextCandidate(candidates, textParts.join(''));
+  }
+}
+
+function collectResponsesOutputCandidates(candidates: string[], output: unknown) {
+  if (!Array.isArray(output)) return;
+  for (const item of output) {
+    if (!isProviderRecord(item)) continue;
+    if (Object.hasOwn(item, 'parsed')) appendProviderParsedCandidate(candidates, item.parsed);
+    collectContentCandidates(candidates, item.content);
+  }
+}
+
+function collectChatChoiceCandidates(candidates: string[], choices: unknown) {
+  if (!Array.isArray(choices)) return;
+  for (const choice of choices) {
+    if (!isProviderRecord(choice) || !isProviderRecord(choice.message)) continue;
+    const message = choice.message;
+    if (Object.hasOwn(message, 'parsed')) appendProviderParsedCandidate(candidates, message.parsed);
+    collectContentCandidates(candidates, message.content);
+  }
+}
+
+/**
+ * Adapts supported provider/SDK envelopes without interpreting semantic
+ * content. Refusals and incomplete Responses results are terminal; otherwise
+ * every fixed parsed/text carrier is collected, empty candidates are discarded,
+ * and a JSON-syntax candidate is preferred before unchanged validation.
+ */
+function adaptSpreadsheetProviderResponse(response: unknown): ProviderResponseAdapterResult {
+  const responseRecord = isProviderRecord(response) ? response : null;
+  if (responseRecord) {
+    const terminalState = managedResponsesTerminalState(responseRecord);
+    if (terminalState) return { content: '', terminalState };
+  }
+
+  const candidates: string[] = [];
+  if (responseRecord && Object.hasOwn(responseRecord, 'output_parsed')) {
+    appendProviderParsedCandidate(candidates, responseRecord.output_parsed);
+  }
+  if (responseRecord) appendProviderTextCandidate(candidates, responseRecord.output_text);
+  if (responseRecord) collectResponsesOutputCandidates(candidates, responseRecord.output);
+  if (responseRecord) collectChatChoiceCandidates(candidates, responseRecord.choices);
+
+  const content = candidates.find(isJsonDocument) ?? candidates[0] ?? '';
+  return { content, terminalState: content ? null : 'empty' };
+}
+
 /**
  * Normalizes provider/SDK representation differences without interpreting or
- * repairing semantic content. The returned string is still subject to the
- * unchanged JSON, wire-envelope, Zod, continuation, and semantic validators.
+ * repairing semantic content. Only a non-empty candidate is returned, and it
+ * is still subject to the unchanged JSON, wire-envelope, Zod, continuation,
+ * and semantic validators.
  */
 export function normalizeSpreadsheetProviderResponse(response: unknown): string {
-  const responseRecord = isProviderRecord(response) ? response : null;
-  const outputParsed = responseRecord && Object.hasOwn(responseRecord, 'output_parsed')
-    ? responseRecord.output_parsed
-    : undefined;
-  const normalizedOutputParsed = normalizeProviderJsonValue(outputParsed);
-  if (normalizedOutputParsed) {
-    return normalizedOutputParsed;
-  }
-  const outputText = responseRecord?.output_text;
-  const normalizedOutputText = normalizeProviderJsonValue(outputText);
-  if (normalizedOutputText) return normalizedOutputText;
-  const normalizedResponsesOutput = normalizeResponsesOutput(responseRecord?.output);
-  if (normalizedResponsesOutput) return normalizedResponsesOutput;
-  const choices = isProviderRecord(response) && Array.isArray(response.choices) ? response.choices : [];
-  const firstChoice = isProviderRecord(choices[0]) ? choices[0] : null;
-  const message = firstChoice && isProviderRecord(firstChoice.message) ? firstChoice.message : null;
-  const parsed = message && Object.hasOwn(message, 'parsed') ? message.parsed : undefined;
-  if (parsed !== undefined) {
-    return typeof parsed === 'string' ? normalizeProviderJsonText(parsed) : JSON.stringify(parsed);
-  }
-  const content = message?.content;
-  if (typeof content === 'string') return normalizeProviderJsonText(content);
-  if (Array.isArray(content)) {
-    const textParts = content.flatMap((part) => {
-      if (typeof part === 'string') return [part];
-      if (isProviderRecord(part) && typeof part.text === 'string') return [part.text];
-      return [];
-    });
-    if (textParts.length > 0) return normalizeProviderJsonText(textParts.join(''));
-    return JSON.stringify(content);
-  }
-  if (isProviderRecord(content) && typeof content.text === 'string') {
-    return normalizeProviderJsonText(content.text);
-  }
-  if (content !== undefined && content !== null) return JSON.stringify(content);
-  return '';
+  return adaptSpreadsheetProviderResponse(response).content;
 }
 
 type ProviderResponseFingerprintPath = SpreadsheetProviderResponseShapeFingerprint['containers'][number]['path'];
@@ -1513,6 +1586,7 @@ export function buildSpreadsheetResponseShapeDiagnostic(
 }
 
 function parseSpreadsheetProviderResponse(content: string) {
+  if (!content.trim()) throw new Error('schema_invalid');
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) throw new Error('response_too_large');
   let raw: unknown;
   try {
@@ -1552,6 +1626,12 @@ function responseContractFailure(
     ...options,
     providerResponseShapeFingerprint,
   });
+  if (!content.trim()) {
+    return {
+      reason: 'schema_invalid',
+      diagnostic: buildDiagnostic(undefined, 'json_parse', { contractIssue: 'invalid_json' }),
+    };
+  }
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
     return {
       reason: 'response_too_large',

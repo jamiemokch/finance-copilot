@@ -81,11 +81,19 @@ function completedResponsesEnvelope(id: string, payload: Record<string, unknown>
     metadata: {},
     model: 'gpt-5.4-mini',
     output: [{
+      id: `${id}-reasoning`,
+      type: 'reasoning',
+      summary: [],
+    }, {
       id: `${id}-message`,
       type: 'message',
       role: 'assistant',
       status: 'completed',
       content: [{
+        type: 'output_text',
+        text: '   ',
+        annotations: [],
+      }, {
         type: 'output_text',
         text: outputText,
         annotations: [],
@@ -109,6 +117,7 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
   let spreadsheetBuffer = Buffer.from('Date,Description,Amount\n06/04/2025,Fresh acceptance review,42.50\n');
   let providerCalls = 0;
   let receivedStrictJsonSchema = false;
+  let receivedNativeInputText = false;
   const originalSaveContent = ObjectStorageService.prototype.saveContent;
   const originalGetFile = ObjectStorageService.prototype.getObjectEntityFile;
   const savedAiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
@@ -158,6 +167,17 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
         input?: unknown;
         text?: { format?: { type?: unknown; strict?: unknown; schema?: unknown } };
       };
+      receivedNativeInputText = Array.isArray(requestBody.input)
+        && requestBody.input.some((item) => (
+          item && typeof item === 'object' && !Array.isArray(item)
+          && (item as { role?: unknown }).role === 'user'
+          && Array.isArray((item as { content?: unknown }).content)
+          && (item as { content: unknown[] }).content.some((part) => (
+            part && typeof part === 'object' && !Array.isArray(part)
+            && (part as { type?: unknown }).type === 'input_text'
+            && typeof (part as { text?: unknown }).text === 'string'
+          ))
+        ));
       const inputText = typeof requestBody.input === 'string'
         ? requestBody.input
         : Array.isArray(requestBody.input)
@@ -252,6 +272,7 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     assert.equal((review.body.aiStatus as { status?: string } | undefined)?.status, 'success');
     assert.equal(providerCalls, 1, 'the fresh review uses the normal provider path exactly once');
     assert.equal(receivedStrictJsonSchema, true, 'the acceptance mock only accepts the managed strict JSON schema request');
+    assert.equal(receivedNativeInputText, true, 'the acceptance mock only accepts the native managed input_text envelope');
     assert.equal(review.body.userDecision, null, 'review does not manufacture a confirmation decision');
 
     const [semanticSession] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(

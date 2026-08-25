@@ -21,4 +21,10 @@ For this managed route, emit the existing semantic JSON through a native Respons
 
 **How to apply:** Preserve the exact payload bytes and strict `text.format` schema; only change the outer Responses input representation. Keep local acceptance coverage for an empty aggregate `output_text` with the strict payload in message content.
 
+Treat Responses extraction as one bounded adapter, not a sequence of one-path patches: collect all fixed parsed/text carriers, discard empty candidates, prefer a JSON-syntax candidate, and block incomplete or refusal terminal states before contract parsing.
+
+**Why:** Envelope field types can become more complete while still carrying no usable JSON; first-path extraction mistakes a malformed convenience field for the actual structured payload.
+
+**How to apply:** Support top-level parsed/text values, every message item's parsed/text content, and bounded same-message text fragments. Do not serialize unknown provider fields, persist values, loosen the contract, or let an empty/refused/incomplete response reach JSON parsing.
+
 Release verification uses two separate data-free managed-route gates: the safe abstain probe and a positive final-plan probe. The positive probe has a fixed two-row synthetic ledger and must validate a complete, parser-bounded plan before a release is accepted.

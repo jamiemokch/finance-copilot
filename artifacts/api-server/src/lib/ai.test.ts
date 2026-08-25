@@ -164,26 +164,54 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   );
 });
 
-test('structured SDK response variants normalize before the unchanged strict response validation', async () => {
+test('provider adapter normalizes every supported non-empty structured output carrier before unchanged validation', async () => {
   const token = 'normalization-token';
   const wireResponse = { response: finalResponse(token, [semanticSheet('sheet_1', 'transactional')]) };
   const serialized = JSON.stringify(wireResponse);
   const variants: unknown[] = [
-    { choices: [{ message: { content: serialized } }] },
-    { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] },
-    { choices: [{ message: { content: null, parsed: wireResponse } }] },
-    { output_text: serialized },
     { output_parsed: wireResponse },
+    { output_text: serialized },
+    { output_text: JSON.stringify(serialized) },
+    { output_text: `\`\`\`json\n${serialized}\n\`\`\`` },
     {
-      output_text: null,
+      output_text: '   ',
       output: [{
+        type: 'message',
+        parsed: wireResponse,
+        content: [],
+      }],
+    },
+    {
+      output_text: 'not-json',
+      output: [{
+        type: 'reasoning',
+        content: [],
+      }, {
+        type: 'message',
+        content: [{ type: 'output_text', text: '  ' }, { type: 'output_text', parsed: wireResponse }],
+      }, {
         type: 'message',
         content: [{ type: 'output_text', text: serialized }],
       }],
     },
-    { choices: [{ message: { content: JSON.stringify(serialized) } }] },
-    { choices: [{ message: { content: `\`\`\`json\n${serialized}\n\`\`\`` } }] },
-    { choices: [{ message: { content: wireResponse } }] },
+    {
+      output: [{
+        type: 'message',
+        content: [
+          { type: 'output_text', text: serialized.slice(0, Math.floor(serialized.length / 2)) },
+          { type: 'output_text', text: serialized.slice(Math.floor(serialized.length / 2)) },
+        ],
+      }],
+    },
+    { choices: [{ message: { content: serialized } }] },
+    { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] },
+    { choices: [{ message: { content: null, parsed: wireResponse } }] },
+    {
+      choices: [
+        { message: { content: 'not-json' } },
+        { message: { content: [{ type: 'text', text: serialized }] } },
+      ],
+    },
   ];
   for (const variant of variants) {
     assert.deepEqual(JSON.parse(normalizeSpreadsheetProviderResponse(variant)), wireResponse);
@@ -210,6 +238,66 @@ test('structured SDK response variants normalize before the unchanged strict res
   });
   assert.equal(result.status, 'success');
   assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
+});
+
+test('provider adapter keeps empty, refusal, and incomplete Responses terminal states away from the JSON parser', async () => {
+  const token = 'terminal-state-token';
+  const wireResponse = { response: finalResponse(token, [semanticSheet('sheet_1', 'transactional')]) };
+  const serialized = JSON.stringify(wireResponse);
+  const terminalResponses: Array<{ name: string; response: unknown }> = [
+    {
+      name: 'empty',
+      response: {
+        status: 'completed',
+        output_text: '  ',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '\n\t' }] }],
+      },
+    },
+    {
+      name: 'refusal',
+      response: {
+        status: 'completed',
+        output_text: serialized,
+        output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'synthetic refusal' }] }],
+      },
+    },
+    {
+      name: 'incomplete',
+      response: {
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output_text: serialized,
+        output: [{ type: 'message', content: [{ type: 'output_text', text: serialized }] }],
+      },
+    },
+  ];
+
+  for (const terminal of terminalResponses) {
+    assert.equal(normalizeSpreadsheetProviderResponse(terminal.response), '', terminal.name);
+    let classifiedContent: string | undefined;
+    let responseCalls = 0;
+    const client = {
+      responses: {
+        create: async () => {
+          responseCalls += 1;
+          return terminal.response;
+        },
+      },
+      chat: { completions: { create: async () => { throw new Error('terminal Responses states must not use chat'); } } },
+    } as unknown as OpenAI;
+    await providerCallWithTimeout(client, JSON.stringify({ continuationToken: token }), {
+      routeClass: 'replit_ai_integrations',
+      maxProviderCalls: 1,
+      classifyResponse: (content) => {
+        classifiedContent = content;
+        return content
+          ? null
+          : { outcomeCategory: 'contract_invalid', safeStatus: 'contract_invalid', failurePhase: 'response_validation' };
+      },
+    });
+    assert.equal(classifiedContent, '', terminal.name);
+    assert.equal(responseCalls, 1, terminal.name);
+  }
 });
 
 test('managed Responses message output normalizes with an empty output_text without recording values', () => {
