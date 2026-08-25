@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getAuthUser } from './api.js';
-import { getAuthSurface, getLogoutUrl } from './auth-routing.js';
+import { getAuthSurface, getLoginUrl, getLogoutUrl } from './auth-routing.js';
 
 test('callback session user is consumed and routes the app away from Welcome', async () => {
   const originalFetch = globalThis.fetch;
@@ -63,4 +63,45 @@ test('logout uses the server session-clear route and unauthenticated routing ret
     }),
     'welcome',
   );
+});
+
+test('logout → Welcome → Get Started → callback reload returns to the authenticated app', async () => {
+  assert.equal(getLogoutUrl('/'), '/api/logout?returnTo=%2F');
+  assert.equal(getLoginUrl('/'), '/api/login?returnTo=%2F');
+  assert.equal(
+    getAuthSurface({
+      location: '/',
+      isLoading: false,
+      isAuthenticated: false,
+      profilesCount: 0,
+      profilesLoaded: false,
+      profileLoadError: false,
+    }),
+    'welcome',
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    user: { id: 'user-after-login-return', name: 'Signed-in user' },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  try {
+    const user = await getAuthUser();
+    assert.equal(
+      getAuthSurface({
+        location: '/',
+        isLoading: false,
+        isAuthenticated: user !== null,
+        profilesCount: 1,
+        profilesLoaded: true,
+        profileLoadError: false,
+      }),
+      'dashboard',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

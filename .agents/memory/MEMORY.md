@@ -19,3 +19,4 @@
 - [OIDC auth cache safety](oidc-auth-cache-safety.md) — identity reads must bypass caches so a valid callback session cannot leave the client on Welcome
 - [Spreadsheet AI test cache isolation](spreadsheet-ai-test-cache-isolation.md) — semantic tests share a content-hash cache; unique fixtures or explicit invalidation prevent false successes
 - [Provider response shape fingerprints](provider-response-shape-fingerprints.md) — extraction diagnostics capture fixed paths, allowlisted SDK keys, JSON types, and capped array counts only
+- [Replit preview OIDC origin](replit-preview-oidc-origin.md) — development callbacks must use the browser-visible preview domain, not an API proxy hop

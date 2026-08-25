@@ -10,7 +10,7 @@ import {
   type APIReconciliationException, type APIReconciliationWorkflowTask,
   type APIReconciliationCoverageCheck,
 } from './api';
-import { getLogoutUrl } from './auth-routing';
+import { getLoginUrl, getLogoutUrl } from './auth-routing';
 
 const ACTIVE_PROFILE_STORAGE_KEY = 'sme-finance-copilot.active-profile-id';
 
@@ -1188,7 +1188,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(() => {
     const base = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL?.replace(/\/+$/, '') ?? '';
-    window.location.href = `/api/login?returnTo=${encodeURIComponent(base || '/')}`;
+    window.location.href = getLoginUrl(base);
   }, []);
 
   const logout = useCallback(() => {

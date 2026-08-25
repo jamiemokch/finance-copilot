@@ -6,6 +6,11 @@ export type AuthSurface =
   | 'dashboard'
   | 'app';
 
+export function getLoginUrl(baseUrl = ''): string {
+  const base = baseUrl.replace(/\/+$/, '');
+  return `/api/login?returnTo=${encodeURIComponent(base || '/')}`;
+}
+
 export function getLogoutUrl(baseUrl = ''): string {
   const base = baseUrl.replace(/\/+$/, '');
   return `/api/logout?returnTo=${encodeURIComponent(base || '/')}`;

@@ -19,17 +19,11 @@ import {
   SESSION_TTL,
   type SessionData,
 } from '../lib/auth';
+import { getAuthOrigin } from '../lib/auth-origin';
 
 const OIDC_COOKIE_TTL = 10 * 60 * 1000;
 
 const router: IRouter = Router();
-
-function getOrigin(req: Request): string {
-  const proto = req.headers['x-forwarded-proto'] || 'https';
-  const host =
-    req.headers['x-forwarded-host'] || req.headers['host'] || 'localhost';
-  return `${proto}://${host}`;
-}
 
 function setSessionCookie(res: Response, sid: string) {
   res.cookie(SESSION_COOKIE, sid, {
@@ -133,7 +127,7 @@ router.get('/auth/user', (req: Request, res: Response) => {
 
 router.get('/login', async (req: Request, res: Response) => {
   const config = await getOidcConfig();
-  const callbackUrl = `${getOrigin(req)}/api/callback`;
+  const callbackUrl = `${getAuthOrigin(req.headers)}/api/callback`;
 
   const returnTo = getSafeReturnTo(req.query.returnTo);
 
@@ -164,7 +158,7 @@ router.get('/login', async (req: Request, res: Response) => {
 // parameters not expressed in the schema.
 router.get('/callback', async (req: Request, res: Response) => {
   const config = await getOidcConfig();
-  const callbackUrl = `${getOrigin(req)}/api/callback`;
+  const callbackUrl = `${getAuthOrigin(req.headers)}/api/callback`;
 
   const codeVerifier = req.cookies?.code_verifier;
   const nonce = req.cookies?.nonce;
@@ -228,7 +222,7 @@ router.get('/callback', async (req: Request, res: Response) => {
 
 router.get('/logout', async (req: Request, res: Response) => {
   const config = await getOidcConfig();
-  const origin = getOrigin(req);
+  const origin = getAuthOrigin(req.headers);
   const returnTo = getSafeReturnTo(req.query.returnTo);
   const postLogoutRedirectUrl = new URL(returnTo, `${origin}/`).href;
 
