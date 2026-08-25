@@ -1,0 +1,153 @@
+From 82bb8e5bf4a0a9bfe27bd929b8f1dbeb8558b38a Mon Sep 17 00:00:00 2001
+From: Jamie <jamie@JamiedeMacBook-Pro.local>
+Date: Tue, 25 Aug 2026 23:19:12 +0100
+Subject: [PATCH] Fail closed on empty tax records
+
+---
+ .../api-server/src/lib/tax-filing-pack.test.ts     |  9 ++++++++-
+ artifacts/api-server/src/lib/tax-filing-pack.ts    |  3 +++
+ artifacts/sme-finance-copilot/src/lib/api.ts       |  1 +
+ .../src/pages/self-assessment-readiness.tsx        | 14 ++++++++++----
+ .../sme-finance-copilot/src/pages/settings.tsx     | 10 ++++++++++
+ 5 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/artifacts/api-server/src/lib/tax-filing-pack.test.ts b/artifacts/api-server/src/lib/tax-filing-pack.test.ts
+index deb2cab..048fee3 100644
+--- a/artifacts/api-server/src/lib/tax-filing-pack.test.ts
++++ b/artifacts/api-server/src/lib/tax-filing-pack.test.ts
+@@ -40,7 +40,7 @@ test('fails closed when a record is unclassified or cannot map to a filing box',
+     tx({ id: 'unmapped', accountingCategory: 'crypto_spaceship' }),
+   ], context);
+   assert.equal(pack.filingReady, false);
+-  assert.deepEqual(pack.blockers.map((item) => item.code), ['record_needs_classification', 'record_needs_tax_category']);
++  assert.deepEqual(pack.blockers.map((item) => item.code), ['record_needs_classification', 'record_needs_tax_category', 'no_confirmed_records']);
+ });
+ 
+ test('shows actual-expense and trading-allowance scenarios without silently choosing', () => {
+@@ -52,3 +52,10 @@ test('shows actual-expense and trading-allowance scenarios without silently choo
+   assert.equal(pack.decision.selectedMethod, null);
+   assert.deepEqual(pack.decision.scenarios.map((scenario) => scenario.taxableProfit), [4_800, 4_000]);
+ });
++
++test('blocks an empty ledger instead of presenting zero figures as filing-ready', () => {
++  const pack = buildTaxFilingPack([], context);
++  assert.equal(pack.recordCount, 0);
++  assert.equal(pack.filingReady, false);
++  assert.equal(pack.blockers.some((blocker) => blocker.code === 'no_confirmed_records'), true);
++});
+diff --git a/artifacts/api-server/src/lib/tax-filing-pack.ts b/artifacts/api-server/src/lib/tax-filing-pack.ts
+index 4d074e4..6314935 100644
+--- a/artifacts/api-server/src/lib/tax-filing-pack.ts
++++ b/artifacts/api-server/src/lib/tax-filing-pack.ts
+@@ -113,6 +113,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
+   const boxAmount = (box: Sa103sBox) => boxes.find((entry) => entry.box === box)!.amount;
+   const turnover = money(boxAmount('9') + boxAmount('10'));
+   const actualExpenses = money(boxes.filter((entry) => Number(entry.box) >= 11).reduce((sum, entry) => sum + entry.amount, 0));
++  const mappedRecordCount = trace.filter((item) => item.status === 'mapped').length;
+   const tradingAllowance = Math.min(1_000, turnover);
+   const actualProfit = money(turnover - actualExpenses);
+   const allowanceProfit = money(Math.max(0, turnover - tradingAllowance));
+@@ -120,6 +121,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
+   const shortFormThreshold = context.taxYear === '2025/26' ? 90_000 : context.taxYear === '2024/25' ? 85_000 : null;
+ 
+   if (periodEnd !== period.end) blockers.push({ code: 'tax_year_incomplete', message: `Records currently stop at ${periodEnd}; the tax year ends ${period.end}.` });
++  if (mappedRecordCount === 0) blockers.push({ code: 'no_confirmed_records', message: 'No confirmed income or expense records are available for this tax year. Do not confirm £0 figures; add or recover the records first.' });
+   if (!context.businessDescription?.trim()) blockers.push({ code: 'business_description_missing', message: 'Add a plain-language business description.' });
+   if (context.accountingPeriodConfirmed !== true) blockers.push({ code: 'accounting_period_unconfirmed', message: 'Confirm the accounting period.' });
+   if (context.recordsCompleteConfirmed !== true) blockers.push({ code: 'records_unconfirmed', message: 'Confirm the records are complete.' });
+@@ -150,6 +152,7 @@ export function buildTaxFilingPack(transactions: Transaction[], context: FilingP
+       warning: 'The two methods cannot be claimed together. Confirm the chosen method before filing.',
+     },
+     boxes,
++    recordCount: mappedRecordCount,
+     calculated: { box20TotalAllowableExpenses: actualExpenses, box21NetProfit: Math.max(0, actualProfit), box22NetLoss: Math.max(0, -actualProfit) },
+     trace,
+     blockers,
+diff --git a/artifacts/sme-finance-copilot/src/lib/api.ts b/artifacts/sme-finance-copilot/src/lib/api.ts
+index 52f6117..4b6d9a8 100644
+--- a/artifacts/sme-finance-copilot/src/lib/api.ts
++++ b/artifacts/sme-finance-copilot/src/lib/api.ts
+@@ -877,6 +877,7 @@ export interface APIIncomeTaxBand {
+ export interface APIIncomeTaxEstimate {
+   status: 'complete' | 'incomplete';
+   taxYear: string;
++  recordCount: number;
+   accountingBasis: 'cash' | 'accrual';
+   businessProfitInput: number;
+   otherTaxableIncome: number | null;
+diff --git a/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx b/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
+index 9b48082..90c3340 100644
+--- a/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
++++ b/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
+@@ -238,7 +238,7 @@ export default function SelfAssessmentReadiness() {
+   };
+ 
+   const downloadPack = () => {
+-    if (!filingPack || !activeProfile) return;
++    if (!filingPack || !activeProfile || filingPack.recordCount === 0) return;
+     const blob = new Blob([JSON.stringify(filingPack, null, 2)], { type: 'application/json' });
+     const url = URL.createObjectURL(blob);
+     const anchor = document.createElement('a');
+@@ -394,12 +394,18 @@ export default function SelfAssessmentReadiness() {
+         </div>
+         {filingPack && (
+           <div className="mt-5 space-y-5">
++            {filingPack.recordCount === 0 && (
++              <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
++                <p className="font-medium">No confirmed records are available for {filingPack.taxYear}.</p>
++                <p className="mt-1">Do not confirm the £0 figures. Add or recover your records first; this page cannot create financial data.</p>
++              </div>
++            )}
+             <div className={`rounded-lg border p-4 ${filingPack.filingReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
+               <p className="font-medium">{filingPack.filingReady ? 'Ready for final human filing review' : `${filingPack.blockers.length} item${filingPack.blockers.length === 1 ? '' : 's'} to resolve`}</p>
+               <p className="mt-1 text-sm text-muted-foreground">{filingPack.disclaimer}</p>
+               {filingPack.blockers.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">{filingPack.blockers.map((blocker, index) => <li key={`${blocker.code}-${blocker.recordId ?? index}`}>{blocker.message}</li>)}</ul>}
+             </div>
+-            <div className="grid gap-4 md:grid-cols-2">
++            {filingPack.recordCount > 0 && <div className="grid gap-4 md:grid-cols-2">
+               <Card className="p-4">
+                 <p className="text-sm font-medium">Tax optimisation check</p>
+                 <p className="mt-2 text-sm text-muted-foreground">{filingPack.decision.explanation}</p>
+@@ -411,9 +417,9 @@ export default function SelfAssessmentReadiness() {
+                 <p className="text-sm">Box 21 profit: {money(filingPack.calculated.box21NetProfit)}</p>
+                 <p className="text-sm">Box 22 loss: {money(filingPack.calculated.box22NetLoss)}</p>
+               </Card>
+-            </div>
++            </div>}
+             <div className="flex justify-end">
+-              <Button variant="outline" onClick={downloadPack}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
++              <Button variant="outline" onClick={downloadPack} disabled={filingPack.recordCount === 0}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
+             </div>
+           </div>
+         )}
+diff --git a/artifacts/sme-finance-copilot/src/pages/settings.tsx b/artifacts/sme-finance-copilot/src/pages/settings.tsx
+index 6f326a6..88883a0 100644
+--- a/artifacts/sme-finance-copilot/src/pages/settings.tsx
++++ b/artifacts/sme-finance-copilot/src/pages/settings.tsx
+@@ -31,6 +31,13 @@ function currentUkTaxYearDates() {
+   };
+ }
+ 
++function selectedTaxYearDates(taxYear: string) {
++  const match = /^(\d{4})\/(\d{2})$/.exec(taxYear);
++  if (!match) return currentUkTaxYearDates();
++  const startYear = Number(match[1]);
++  return { start: `${startYear}-04-06`, end: `${startYear + 1}-04-05` };
++}
++
+ export default function Settings() {
+   const {
+     profiles, activeProfileId, setActiveProfileId,
+@@ -261,6 +268,9 @@ export default function Settings() {
+                     key={yr}
+                     onClick={() => {
+                       setTaxYear(yr);
++                      const coverage = selectedTaxYearDates(yr);
++                      setCoverageStartDate(coverage.start);
++                      setCoverageEndDate(coverage.end);
+                       if (activeProfile?.otherTaxableIncomeTaxYear !== yr) setOtherTaxableIncome('');
+                     }}
+                     className={`px-4 py-2 rounded-lg border-2 text-sm font-medium transition-all cursor-pointer ${
+-- 
+2.39.5 (Apple Git-154)
+
