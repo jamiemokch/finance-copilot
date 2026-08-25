@@ -14,6 +14,7 @@ import {
 } from "./spreadsheet.js";
 
 export const SPREADSHEET_SEMANTIC_V3_SCHEMA_VERSION = "spreadsheet-semantic.v3" as const;
+export const SPREADSHEET_SEMANTIC_V3_MAX_OUTPUT_TOKENS = 8_000;
 const MAX_SHEETS_IN_REQUEST = 25;
 const MAX_SAMPLE_ROWS_PER_SHEET = 4;
 const MAX_SAMPLE_COLUMNS_PER_SHEET = 12;
@@ -306,10 +307,17 @@ export async function analyseSpreadsheetWithSemanticV3(
   try {
     const response = await client.responses.create({
       model: SPREADSHEET_PROVIDER_MODEL,
-      max_output_tokens: 2_000,
+      max_output_tokens: SPREADSHEET_SEMANTIC_V3_MAX_OUTPUT_TOKENS,
       input: [{ role: "user", content: [{ type: "input_text", text: serialized }] }],
       text: { format: { type: "json_schema", name: "spreadsheet_semantic_v3_response", strict: true, schema: responseJsonSchema } },
     } as never, { signal: controller.signal } as never);
+    if (response.status === "incomplete") {
+      return unavailable(
+        "Automatic review stopped because the bounded output limit was reached.",
+        "response_contract_invalid",
+        [safeAttempt(startedAt, startedMs, "incomplete", "response_validation")],
+      );
+    }
     const candidate = normalizeSpreadsheetProviderResponse(response);
     if (!candidate.trim()) {
       return unavailable("Automatic review returned no usable semantic result.", "response_contract_invalid", [safeAttempt(startedAt, startedMs, "contract_invalid", "response_validation")]);

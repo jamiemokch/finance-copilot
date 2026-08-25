@@ -4,6 +4,7 @@ import { inspectSpreadsheet } from "./spreadsheet.js";
 import {
   analyseSpreadsheetWithSemanticV3,
   buildSpreadsheetSemanticV3Input,
+  SPREADSHEET_SEMANTIC_V3_MAX_OUTPUT_TOKENS,
 } from "./spreadsheet-semantic-v3.js";
 
 function workbookWithRows(count: number) {
@@ -63,10 +64,13 @@ test("semantic v3 sends a bounded summary and applies its mapping to every local
   assert.equal(requests.length, 1, "v3 makes exactly one provider request");
   const request = requests[0] as {
     model?: string;
+    max_output_tokens?: number;
     input?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
     text?: { format?: { type?: string; strict?: boolean; schema?: unknown } };
   };
   assert.equal(request.model, "gpt-5.4-mini");
+  assert.equal(SPREADSHEET_SEMANTIC_V3_MAX_OUTPUT_TOKENS, 8_000);
+  assert.equal(request.max_output_tokens, 8_000);
   assert.equal(request.input?.[0]?.content?.[0]?.type, "input_text");
   assert.equal(request.text?.format?.type, "json_schema");
   assert.equal(request.text?.format?.strict, true);
@@ -118,4 +122,25 @@ test("semantic v3 refuses a valid incomplete response and does not create any fi
   // This module has no database imports or write calls: only confirmation is
   // allowed to persist Financial Memory, inbox, or source-row outcomes.
   assert.equal(result.providerCalls, 1);
+});
+
+test("semantic v3 classifies an incomplete bounded response before parsing truncated JSON", async () => {
+  const workbook = workbookWithRows(3);
+  const requests: unknown[] = [];
+  const result = await analyseSpreadsheetWithSemanticV3(workbook, {
+    client: mockClient(() => ({
+      status: "incomplete",
+      output_text: '{"schemaVersion":"spreadsheet-semantic.v3","status":"complete","sheets":[',
+    }), requests),
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "Automatic review stopped because the bounded output limit was reached.");
+  assert.equal(result.failureCategory, "response_contract_invalid");
+  assert.equal(result.semanticPlan.status, "incomplete");
+  assert.equal(result.providerCalls, 1);
+  assert.equal(result.providerAttempts.length, 1);
+  assert.equal(result.providerAttempts[0]?.outcomeCategory, "incomplete");
+  assert.equal(result.providerAttempts[0]?.failurePhase, "response_validation");
 });
