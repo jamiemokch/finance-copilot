@@ -2,7 +2,7 @@ import { Link, useLocation } from 'wouter';
 import {
   LayoutDashboard, WalletCards, Lightbulb, Settings,
   Menu, X, Bot, CheckSquare, UploadCloud, User, MessageSquare,
-  RotateCcw, BookOpen,
+  RotateCcw, BookOpen, LogOut,
   Calculator,
   ClipboardCheck,
 } from 'lucide-react';
@@ -16,7 +16,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
-  const { inboxItems, activeProfileId, businessIdeas, profiles, setActiveProfileId, resetDemoData } = useStore();
+  const { inboxItems, activeProfileId, businessIdeas, profiles, setActiveProfileId, resetDemoData, logout } = useStore();
   const pendingInbox = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
   const newIdeas = businessIdeas.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
 
@@ -179,6 +179,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <Settings className="w-4 h-4" />
             Profile & Settings
           </Link>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start gap-3 px-3 py-2.5 text-sm font-medium cursor-pointer"
+            onClick={() => {
+              setSidebarOpen(false);
+              logout();
+            }}
+          >
+            <LogOut className="w-4 h-4" />
+            Log out
+          </Button>
           <p className="text-[10px] text-muted-foreground px-3 py-1 flex items-center gap-1.5">
             <MessageSquare className="w-3 h-3 opacity-50" />
             Copilot available bottom-right

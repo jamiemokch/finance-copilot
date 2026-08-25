@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getAuthUser } from './api.js';
-import { getAuthSurface } from './auth-routing.js';
+import { getAuthSurface, getLogoutUrl } from './auth-routing.js';
 
 test('callback session user is consumed and routes the app away from Welcome', async () => {
   const originalFetch = globalThis.fetch;
@@ -48,4 +48,19 @@ test('callback session user is consumed and routes the app away from Welcome', a
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('logout uses the server session-clear route and unauthenticated routing returns to Welcome', () => {
+  assert.equal(getLogoutUrl('/'), '/api/logout?returnTo=%2F');
+  assert.equal(
+    getAuthSurface({
+      location: '/dashboard',
+      isLoading: false,
+      isAuthenticated: false,
+      profilesCount: 0,
+      profilesLoaded: false,
+      profileLoadError: false,
+    }),
+    'welcome',
+  );
 });
