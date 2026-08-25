@@ -642,7 +642,13 @@ export async function providerCallWithTimeout(
           model: resolvedModel,
           max_output_tokens: SPREADSHEET_AI_LIMITS.maxOutputTokens,
           instructions: systemInstruction,
-          input: payload,
+          // The managed Responses route must receive a native input_text
+          // message. Passing the same JSON as a bare input string can yield an
+          // otherwise-complete envelope whose text fields are empty.
+          input: [{
+            role: 'user',
+            content: [{ type: 'input_text', text: payload }],
+          }],
           text: {
             format: {
               type: 'json_schema',

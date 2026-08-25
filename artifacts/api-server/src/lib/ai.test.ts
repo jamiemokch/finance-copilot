@@ -1003,11 +1003,11 @@ test('managed provider normalizes full Responses envelopes for output_text and o
     { name: 'output_text', response: completedResponsesEnvelope('responses-output-text', expected) },
     { name: 'output_parsed', response: completedResponsesEnvelope('responses-output-parsed', expected, expected) },
     {
-      name: 'output_message_when_output_text_is_empty',
+      name: 'output_message_when_output_text_is_empty_string',
       response: {
         object: 'response',
         status: 'completed',
-        output_text: null,
+        output_text: '',
         output: [{
           type: 'message',
           role: 'assistant',
@@ -1046,7 +1046,10 @@ test('managed provider normalizes full Responses envelopes for output_text and o
 
     assert.deepEqual(JSON.parse(result.content), expected, variant.name);
     assert.equal(chatCalls, 0, variant.name);
-    assert.equal(request?.input, payload, variant.name);
+    assert.deepEqual(request?.input, [{
+      role: 'user',
+      content: [{ type: 'input_text', text: payload }],
+    }], variant.name);
     assert.equal(typeof request?.instructions, 'string', variant.name);
     assert.equal(request?.max_output_tokens, 4_000, variant.name);
     const format = (request?.text as { format?: { type?: string; strict?: boolean; schema?: Record<string, unknown> } } | undefined)?.format;

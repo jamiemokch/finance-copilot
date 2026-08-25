@@ -72,7 +72,9 @@ function completedResponsesEnvelope(id: string, payload: Record<string, unknown>
     created_at: 0,
     completed_at: 0,
     status: 'completed',
-    output_text: outputText,
+    // Match the managed live envelope: the aggregate convenience field may be
+    // empty while the completed message carries the strict JSON payload.
+    output_text: '',
     error: null,
     incomplete_details: null,
     instructions: null,
@@ -156,7 +158,22 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
         input?: unknown;
         text?: { format?: { type?: unknown; strict?: unknown; schema?: unknown } };
       };
-      const input = typeof requestBody.input === 'string' ? JSON.parse(requestBody.input) as { continuationToken?: string } : {};
+      const inputText = typeof requestBody.input === 'string'
+        ? requestBody.input
+        : Array.isArray(requestBody.input)
+          ? requestBody.input.flatMap((item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+            const content = (item as { content?: unknown }).content;
+            if (!Array.isArray(content)) return [];
+            return content.flatMap((part) => (
+              part && typeof part === 'object' && !Array.isArray(part)
+                && typeof (part as { text?: unknown }).text === 'string'
+                ? [(part as { text: string }).text]
+                : []
+            ));
+          }).join('')
+          : '';
+      const input = inputText ? JSON.parse(inputText) as { continuationToken?: string } : {};
       receivedStrictJsonSchema = requestBody.text?.format?.type === 'json_schema'
         && requestBody.text.format.strict === true
         && typeof requestBody.text.format.schema === 'object'

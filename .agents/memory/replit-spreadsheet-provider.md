@@ -15,4 +15,10 @@ Managed Responses replies can expose a null top-level `output_text` while the st
 
 **How to apply:** Keep extraction paths explicitly allowlisted in the data-free shape fingerprint and use the message-content representation only as a response-envelope adapter. The existing JSON, wire-envelope, Zod, continuation, parser-bounds, and semantic-plan validation gates remain mandatory.
 
+For this managed route, emit the existing semantic JSON through a native Responses `input_text` user message rather than a bare `input` string.
+
+**Why:** The route could return an otherwise completed Responses envelope with empty text fields when given the bare-string representation.
+
+**How to apply:** Preserve the exact payload bytes and strict `text.format` schema; only change the outer Responses input representation. Keep local acceptance coverage for an empty aggregate `output_text` with the strict payload in message content.
+
 Release verification uses two separate data-free managed-route gates: the safe abstain probe and a positive final-plan probe. The positive probe has a fixed two-row synthetic ledger and must validate a complete, parser-bounded plan before a release is accepted.
