@@ -8,18 +8,23 @@ import {
   db,
   evidenceAuditEventsTable,
   evidenceItemsTable,
+  inboxItemsTable,
   pool,
   profilesTable,
   sessionsTable,
   spreadsheetSemanticExecutionsTable,
   spreadsheetSemanticProviderAttemptsTable,
   spreadsheetSemanticSessionsTable,
+  spreadsheetRowOutcomesTable,
   transactionsTable,
   usersTable,
 } from '@workspace/db';
 import app from '../app.js';
 import { createSession } from '../lib/auth.js';
-import { invalidateSpreadsheetAICache } from '../lib/ai.js';
+import {
+  invalidateSpreadsheetAICache,
+  resetDirectSpreadsheetProviderForTests,
+} from '../lib/ai.js';
 import { ObjectStorageService } from '../lib/objectStorage.js';
 
 if (process.env.EVIDENCE_TEST_DATABASE !== '1') {
@@ -107,7 +112,7 @@ function completedResponsesEnvelope(id: string, payload: Record<string, unknown>
   };
 }
 
-test('development acceptance reviews fresh spreadsheet evidence without confirmation writes', async () => {
+test('local direct Responses review awaits confirmation before durable financial outcomes', async () => {
   const suffix = randomUUID().replaceAll('-', '');
   const userId = `spreadsheet-acceptance-${suffix}`;
   let profileId = '';
@@ -118,10 +123,14 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
   let providerCalls = 0;
   let receivedStrictJsonSchema = false;
   let receivedNativeInputText = false;
+  let receivedDirectAuthorization = false;
+  let receivedResponsesPath = false;
   const originalSaveContent = ObjectStorageService.prototype.saveContent;
   const originalGetFile = ObjectStorageService.prototype.getObjectEntityFile;
   const savedAiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
   const savedAiBaseUrl = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+  const savedDirectKey = process.env.OPENAI_API_KEY;
+  const savedDirectBaseUrl = process.env.DIRECT_OPENAI_BASE_URL;
 
   ObjectStorageService.prototype.saveContent = async () => `/objects/uploads/spreadsheet-acceptance-${randomUUID()}`;
   ObjectStorageService.prototype.getObjectEntityFile = async () => ({
@@ -167,6 +176,8 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
         input?: unknown;
         text?: { format?: { type?: unknown; strict?: unknown; schema?: unknown } };
       };
+      receivedDirectAuthorization = providerRequest.headers.authorization === 'Bearer test-direct-semantic-key';
+      receivedResponsesPath = providerRequest.url === '/v1/responses';
       receivedNativeInputText = Array.isArray(requestBody.input)
         && requestBody.input.some((item) => (
           item && typeof item === 'object' && !Array.isArray(item)
@@ -243,8 +254,11 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     });
     await new Promise<void>((resolve) => providerServer!.listen(0, '127.0.0.1', resolve));
     const providerPort = (providerServer.address() as AddressInfo).port;
-    process.env.AI_INTEGRATIONS_OPENAI_API_KEY = 'test-semantic-key';
-    process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = `http://127.0.0.1:${providerPort}/v1`;
+    process.env.OPENAI_API_KEY = 'test-direct-semantic-key';
+    process.env.DIRECT_OPENAI_BASE_URL = `http://127.0.0.1:${providerPort}/v1`;
+    delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    resetDirectSpreadsheetProviderForTests();
     invalidateSpreadsheetAICache();
 
     appServer = app.listen(0);
@@ -270,9 +284,11 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     });
     assert.equal(review.status, 200, JSON.stringify(review.body));
     assert.equal((review.body.aiStatus as { status?: string } | undefined)?.status, 'success');
-    assert.equal(providerCalls, 1, 'the fresh review uses the normal provider path exactly once');
-    assert.equal(receivedStrictJsonSchema, true, 'the acceptance mock only accepts the managed strict JSON schema request');
-    assert.equal(receivedNativeInputText, true, 'the acceptance mock only accepts the native managed input_text envelope');
+    assert.equal(providerCalls, 1, 'the fresh review calls the direct provider exactly once');
+    assert.equal(receivedResponsesPath, true, 'the review uses the direct Responses endpoint');
+    assert.equal(receivedDirectAuthorization, true, 'the review uses the dedicated direct credential');
+    assert.equal(receivedStrictJsonSchema, true, 'the direct request retains strict JSON schema');
+    assert.equal(receivedNativeInputText, true, 'the direct request uses native input_text');
     assert.equal(review.body.userDecision, null, 'review does not manufacture a confirmation decision');
 
     const [semanticSession] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(
@@ -291,6 +307,9 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     ));
     assert.equal(attempts.length, 1, 'the successful review records bounded provider telemetry');
     assert.equal(attempts[0]?.telemetryVersion, 'spreadsheet-provider-attempt.v1');
+    assert.equal(attempts[0]?.routeClass, 'direct_openai');
+    assert.equal(attempts[0]?.responseMode, 'json_schema');
+    assert.equal(attempts[0]?.retryable, false);
     assert.equal(attempts[0]?.failurePhase, null);
 
     const [storedEvidence] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceId));
@@ -300,6 +319,16 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
       0,
       'the acceptance review never writes Financial Memory before confirmation',
     );
+    assert.equal(
+      (await db.select().from(inboxItemsTable).where(eq(inboxItemsTable.profileId, profileId))).length,
+      0,
+      'the review does not create inbox state before confirmation',
+    );
+    assert.equal(
+      (await db.select().from(spreadsheetRowOutcomesTable).where(eq(spreadsheetRowOutcomesTable.profileId, profileId))).length,
+      0,
+      'the review does not create imported-row outcomes before confirmation',
+    );
     const auditEvents = await db.select().from(evidenceAuditEventsTable).where(and(
       eq(evidenceAuditEventsTable.profileId, profileId),
       eq(evidenceAuditEventsTable.evidenceId, evidenceId),
@@ -308,10 +337,15 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     assert.equal(auditEvents.some((event) => event.eventType === 'spreadsheet_confirmed'), false);
   } finally {
     invalidateSpreadsheetAICache();
+    resetDirectSpreadsheetProviderForTests();
     if (savedAiKey === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
     else process.env.AI_INTEGRATIONS_OPENAI_API_KEY = savedAiKey;
     if (savedAiBaseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
     else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = savedAiBaseUrl;
+    if (savedDirectKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedDirectKey;
+    if (savedDirectBaseUrl === undefined) delete process.env.DIRECT_OPENAI_BASE_URL;
+    else process.env.DIRECT_OPENAI_BASE_URL = savedDirectBaseUrl;
     if (providerServer) {
       await new Promise<void>((resolve, reject) => providerServer!.close((error) => error ? reject(error) : resolve()));
     }

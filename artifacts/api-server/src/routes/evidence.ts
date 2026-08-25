@@ -17,7 +17,7 @@ import { z } from "zod";
 import { requireProfile } from "./profiles.js";
 import { scanProfile } from "./reconciliation.js";
 import {
-  analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, detectColumnSchema, invalidateSpreadsheetAICache,
+  analyseSpreadsheetWithAI, extractFromImageFile, extractFromText, isConfigured, isSpreadsheetDirectProviderConfigured, detectColumnSchema, invalidateSpreadsheetAICache,
   type SpreadsheetSemanticSession,
   type ExtractionContext, type ExtractedData, type MappingSchema,
 } from "../lib/ai.js";
@@ -601,7 +601,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/process", async (req, res
       res.json(updated);
       return;
     }
-    if (!isConfigured() && evidenceItem.workflowVersion >= 2) {
+    if (!isSpreadsheetDirectProviderConfigured() && evidenceItem.workflowVersion >= 2) {
       const [updated] = await db.update(evidenceItemsTable).set({
         status: "needs_review",
         reviewState: "review_required",

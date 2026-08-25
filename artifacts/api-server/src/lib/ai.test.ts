@@ -9,6 +9,7 @@ import {
   fingerprintSpreadsheetProviderResponse,
   normalizeSpreadsheetProviderResponse,
   providerCallWithTimeout,
+  resetDirectSpreadsheetProviderForTests,
   resetManagedSpreadsheetProviderPolicyForTests,
   runSpreadsheetProviderCompatibilityCheck,
   runSpreadsheetProviderPositiveSemanticCompatibilityCheck,
@@ -58,14 +59,44 @@ function failingClient(responses: Array<() => Promise<never>>): OpenAI {
 }
 
 function scriptedClient(responder: (payload: Record<string, unknown>) => unknown): OpenAI {
+  let calls = 0;
   return {
-    chat: {
-      completions: {
-        create: async (input: { messages: Array<{ content: string }> }) => ({
-          choices: [{ message: { content: JSON.stringify(responder(JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>)) } }],
-        }),
+    responses: {
+      create: async (input: Record<string, unknown>) => {
+        calls += 1;
+        const payload = payloadFromResponsesInput(input);
+        return completedResponsesEnvelope(
+          `direct-scripted-${calls}`,
+          { response: responder(payload) as Record<string, unknown> },
+        );
       },
     },
+    chat: { completions: { create: async () => { throw new Error('spreadsheet semantics must not use Chat Completions'); } } },
+  } as unknown as OpenAI;
+}
+
+function payloadFromResponsesInput(input: Record<string, unknown>): Record<string, unknown> {
+  const message = Array.isArray(input.input) ? input.input.at(-1) : null;
+  const content = message && typeof message === 'object' && !Array.isArray(message)
+    ? (message as { content?: unknown }).content
+    : null;
+  const text = Array.isArray(content)
+    ? content.find((part) => part && typeof part === 'object' && !Array.isArray(part)
+      && (part as { type?: unknown }).type === 'input_text'
+      && typeof (part as { text?: unknown }).text === 'string') as { text?: string } | undefined
+    : undefined;
+  return JSON.parse(text?.text ?? '{}') as Record<string, unknown>;
+}
+
+function directResponsesClient(
+  responder: (input: Record<string, unknown>, requestOptions?: { signal?: AbortSignal; maxRetries?: number }) => Promise<unknown> | unknown,
+): OpenAI {
+  return {
+    responses: {
+      create: async (input: Record<string, unknown>, requestOptions?: { signal?: AbortSignal; maxRetries?: number }) =>
+        responder(input, requestOptions),
+    },
+    chat: { completions: { create: async () => { throw new Error('spreadsheet semantics must not use Chat Completions'); } } },
   } as unknown as OpenAI;
 }
 
@@ -219,22 +250,19 @@ test('provider adapter normalizes every supported non-empty structured output ca
 
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,SDK normalization fixture,37\n'), 'text/csv', 'normalization.csv');
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
-    client: {
-      chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
-        const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as { continuationToken?: string };
-        const dynamicWireResponse = {
-          response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
-        };
-        return {
-          choices: [{
-            message: {
-              content: [{ type: 'text', text: JSON.stringify(dynamicWireResponse) }],
-            },
-          }],
-        };
-      } } },
-    } as unknown as OpenAI,
-    retryDelayMs: 0,
+    client: directResponsesClient((input) => {
+      const payload = payloadFromResponsesInput(input);
+      const dynamicWireResponse = {
+        response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+      };
+      return {
+        status: 'completed',
+        output: [{
+          type: 'message',
+          content: [{ type: 'output_text', text: JSON.stringify(dynamicWireResponse) }],
+        }],
+      };
+    }),
   });
   assert.equal(result.status, 'success');
   assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
@@ -298,6 +326,109 @@ test('provider adapter keeps empty, refusal, and incomplete Responses terminal s
     assert.equal(classifiedContent, '', terminal.name);
     assert.equal(responseCalls, 1, terminal.name);
   }
+});
+
+test('empty, refusal, and incomplete direct Responses output each fail closed after one attempt', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Terminal response fixture,37\n'), 'text/csv', 'terminal-direct.csv');
+  const terminalResponses: Array<{ name: string; response: unknown }> = [
+    { name: 'empty', response: { status: 'completed', output_text: '', output: [] } },
+    { name: 'refusal', response: { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] } },
+    { name: 'incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] } },
+  ];
+  for (const terminal of terminalResponses) {
+    let calls = 0;
+    let chatCalls = 0;
+    const client = directResponsesClient(() => {
+      calls += 1;
+      return terminal.response;
+    });
+    (client.chat.completions.create as unknown as () => Promise<never>) = async () => {
+      chatCalls += 1;
+      throw new Error('Chat Completions fallback is forbidden');
+    };
+    const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+      client,
+      inFlightKey: `terminal-direct-${terminal.name}`,
+    });
+    assert.equal(result.status, 'failed', terminal.name);
+    assert.equal(result.providerCalls, 1, terminal.name);
+    assert.equal(calls, 1, terminal.name);
+    assert.equal(chatCalls, 0, terminal.name);
+    assert.equal(result.providerAttempts?.[0]?.routeClass, 'direct_openai', terminal.name);
+  }
+});
+
+test('a direct Responses timeout aborts once and never falls back', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Direct timeout fixture,38\n'), 'text/csv', 'direct-timeout.csv');
+  let calls = 0;
+  let observedSignal: AbortSignal | undefined;
+  let chatCalls = 0;
+  const client = directResponsesClient((_input, requestOptions) => {
+    calls += 1;
+    observedSignal = requestOptions?.signal;
+    assert.equal(requestOptions?.maxRetries, 0);
+    return new Promise<never>((_resolve, reject) => {
+      observedSignal?.addEventListener('abort', () => reject(observedSignal?.reason), { once: true });
+    });
+  });
+  (client.chat.completions.create as unknown as () => Promise<never>) = async () => {
+    chatCalls += 1;
+    throw new Error('Chat Completions fallback is forbidden');
+  };
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    timeoutMs: 5,
+    inFlightKey: 'direct-timeout',
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 1);
+  assert.equal(calls, 1);
+  assert.equal(observedSignal?.aborted, true);
+  assert.equal(chatCalls, 0);
+  assert.equal(result.providerAttempts?.[0]?.retryable, false);
+});
+
+test('managed credentials cannot enable spreadsheet semantics when the dedicated direct credential is absent', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Missing credential fixture,39\n'), 'text/csv', 'missing-direct-key.csv');
+  const savedDirectKey = process.env.OPENAI_API_KEY;
+  const savedManagedKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+  try {
+    delete process.env.OPENAI_API_KEY;
+    process.env.AI_INTEGRATIONS_OPENAI_API_KEY = 'managed-only-must-not-route-spreadsheets';
+    resetDirectSpreadsheetProviderForTests();
+    const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+      inFlightKey: 'missing-direct-credential',
+    });
+    assert.equal(result.status, 'incomplete');
+    assert.equal(result.providerCalls, 0);
+    assert.equal(result.failureCategory, undefined);
+    assert.match(result.reason ?? '', /AI analysis is unavailable/i);
+  } finally {
+    if (savedDirectKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedDirectKey;
+    if (savedManagedKey === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    else process.env.AI_INTEGRATIONS_OPENAI_API_KEY = savedManagedKey;
+    resetDirectSpreadsheetProviderForTests();
+  }
+});
+
+test('direct provider failures never expose dedicated credentials or raw provider text', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,No secret leakage fixture,40\n'), 'text/csv', 'direct-privacy.csv');
+  const directCredential = 'direct-secret-never-persist';
+  const rawProviderText = 'private-provider-response-never-persist';
+  const client = directResponsesClient(() => {
+    const error = new Error(`${directCredential} ${rawProviderText}`) as Error & { status?: number };
+    error.status = 503;
+    throw error;
+  });
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
+    client,
+    inFlightKey: 'direct-privacy',
+  });
+  const persistedShape = JSON.stringify(result);
+  assert.equal(result.status, 'failed');
+  assert.equal(persistedShape.includes(directCredential), false);
+  assert.equal(persistedShape.includes(rawProviderText), false);
 });
 
 test('managed Responses message output normalizes with an empty output_text without recording values', () => {
@@ -476,10 +607,11 @@ test('provider response fingerprints keep only allowlisted extraction shape meta
 test('unfixable provider text still produces the existing invalid-json contract failure', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Unfixable response fixture,41\n'), 'text/csv', 'unfixable-response.csv');
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
-    client: {
-      chat: { completions: { create: async () => ({ choices: [{ message: { content: 'not-json' } }] }) } },
-    } as unknown as OpenAI,
-    retryDelayMs: 0,
+    client: directResponsesClient(() => ({
+      status: 'completed',
+      output_text: 'not-json',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'not-json' }] }],
+    })),
   });
   const diagnostic = result.providerAttempts?.find((attempt) => attempt.outcomeCategory === 'contract_invalid')?.diagnostic;
   assert.equal(result.status, 'failed');
@@ -489,16 +621,16 @@ test('unfixable provider text still produces the existing invalid-json contract 
     {
       path: '$',
       type: 'object',
-      keys: ['choices'],
-      valueTypes: [{ key: 'choices', type: 'array' }],
-      arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+      keys: ['output', 'output_text'],
+      valueTypes: [{ key: 'output', type: 'array' }, { key: 'output_text', type: 'string' }],
+      arrayLengths: [{ path: '$.output', length: 1, truncated: false }],
     },
     {
       path: '$.choices',
-      type: 'array',
+      type: 'not_available',
       keys: [],
       valueTypes: [],
-      arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+      arrayLengths: [],
     },
   ]);
   assert.equal(JSON.stringify(diagnostic?.providerResponseShapeFingerprint).includes('not-json'), false);
@@ -926,32 +1058,32 @@ test('the manual compatibility probe refuses an unset environment without making
   assert.equal(calls, 0);
 });
 
-test('AI fallback telemetry reports both retry and timeout attempts', async () => {
+test('direct spreadsheet semantic failures are terminal after one attempt', async () => {
   const workbook = inspectSpreadsheet(Buffer.from([
     'Date,Description,Amount',
     '06/04/2025,Consulting payment,125.00',
   ].join('\n')), 'text/csv', 'ledger.csv');
   const analysis = analyseSpreadsheet(workbook);
-  const client = failingClient([
-    async () => {
-      const error = new Error('rate limited') as Error & { status?: number };
-      error.status = 429;
-      throw error;
-    },
-    async () => new Promise<never>(() => undefined),
-  ]);
+  let calls = 0;
+  const client = directResponsesClient(async (_input, requestOptions) => {
+    calls += 1;
+    assert.equal(requestOptions?.maxRetries, 0, 'the direct SDK disables retries');
+    const error = new Error('rate limited') as Error & { status?: number };
+    error.status = 429;
+    throw error;
+  });
 
   const result = await analyseSpreadsheetWithAI(workbook, analysis, {
     client,
     timeoutMs: 5,
-    retryDelayMs: 0,
   });
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.reason, 'Automatic review timed out waiting for a response. No records were imported.');
-  assert.equal(result.providerCalls, 2);
-  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited', 'timeout']);
-  assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'replit_ai_integrations' || attempt.routeClass === 'direct_openai'), true);
+  assert.equal(result.reason, 'AI analysis could not complete.');
+  assert.equal(calls, 1);
+  assert.equal(result.providerCalls, 1);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.outcomeCategory), ['rate_limited']);
+  assert.equal(result.providerAttempts?.every((attempt) => attempt.routeClass === 'direct_openai' && attempt.retryable === false), true);
   assert.equal(result.analysis?.sheets.every((sheet) => !sheet.selected), true, 'a provider failure is never an import plan');
   assert.deepEqual(result.analysis?.sheets.map((sheet) => sheet.mapping.columns), [{}], 'manual recovery must not receive locally inferred column defaults');
 });
@@ -1059,21 +1191,28 @@ test('AI can request bounded follow-up context and return an all-sheet semantic 
 test('provider receives the complete nested strict JSON schema contract', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,10\n'), 'text/csv', 'contract.csv');
   let request: Record<string, unknown> | undefined;
-  const client = {
-    chat: { completions: { create: async (input: Record<string, unknown>) => {
-      request = input;
-      const payload = JSON.parse((input.messages as Array<{ content: string }>).at(-1)?.content ?? '{}') as Record<string, unknown>;
-      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
-    } } },
-  } as unknown as OpenAI;
-  await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  const responseFormat = request?.response_format as { type?: string; json_schema?: { strict?: boolean; schema?: Record<string, unknown> } };
-  assert.equal(responseFormat.type, 'json_schema');
-  assert.equal(responseFormat.json_schema?.strict, true);
-  assert.equal(Array.isArray(responseFormat.json_schema?.schema?.anyOf), false);
-  const responseSchema = (responseFormat.json_schema?.schema?.properties as Record<string, { anyOf?: unknown }> | undefined)?.response;
+  let chatCalls = 0;
+  const client = directResponsesClient((input, requestOptions) => {
+    request = input;
+    assert.equal(requestOptions?.maxRetries, 0);
+    assert.equal(input.model, SPREADSHEET_PROVIDER_MODEL);
+    const payload = payloadFromResponsesInput(input);
+    return completedResponsesEnvelope('direct-contract', {
+      response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+    });
+  });
+  (client.chat.completions.create as unknown as () => Promise<never>) = async () => {
+    chatCalls += 1;
+    throw new Error('Chat Completions fallback is forbidden');
+  };
+  await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client });
+  const responseFormat = (request?.text as { format?: { type?: string; strict?: boolean; schema?: Record<string, unknown> } } | undefined)?.format;
+  assert.equal(responseFormat?.type, 'json_schema');
+  assert.equal(responseFormat?.strict, true);
+  assert.equal(Array.isArray(responseFormat?.schema?.anyOf), false);
+  const responseSchema = (responseFormat?.schema?.properties as Record<string, { anyOf?: unknown }> | undefined)?.response;
   assert.equal(Array.isArray(responseSchema?.anyOf), true);
-  const defs = responseFormat.json_schema?.schema?.$defs as Record<string, Record<string, unknown>>;
+  const defs = responseFormat?.schema?.$defs as Record<string, Record<string, unknown>>;
   assert.equal(defs.requestContextResponse?.additionalProperties, false);
   assert.equal(defs.finalPlanResponse?.additionalProperties, false);
   assert.equal(defs.abstainResponse?.additionalProperties, false);
@@ -1081,6 +1220,11 @@ test('provider receives the complete nested strict JSON schema contract', async 
   assert.equal(defs.sheetPlan?.additionalProperties, false);
   assert.equal(defs.fields?.additionalProperties, false);
   assert.equal(defs.request?.additionalProperties, false);
+  assert.deepEqual(request?.input, [{
+    role: 'user',
+    content: [{ type: 'input_text', text: (request?.input as Array<{ content: Array<{ text: string }> }>)[0]?.content[0]?.text }],
+  }]);
+  assert.equal(chatCalls, 0);
 });
 
 test('managed provider normalizes full Responses envelopes for output_text and output_parsed', async () => {
@@ -1147,45 +1291,26 @@ test('managed provider normalizes full Responses envelopes for output_text and o
   }
 });
 
-test('a provider-success contract-invalid response gets one bounded repair pass and is revalidated', async () => {
-  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Private consulting payment,10\n'), 'text/csv', 'repair.csv');
+test('a contract-invalid direct response fails closed without a repair request', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Private consulting payment,10\n'), 'text/csv', 'invalid-contract.csv');
   let calls = 0;
-  let repairPayload: Record<string, unknown> | undefined;
-  const client = {
-    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
-      calls += 1;
-      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-      if (calls === 1) {
-        const invalid = {
-          ...finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
-          unexpectedField: true,
-        };
-        return { choices: [{ message: { content: JSON.stringify(invalid) } }] };
-      }
-      repairPayload = payload;
-      const returned = payload.returnedSemanticContent as { plan?: { continuationToken?: string } };
-      return {
-        choices: [{
-          message: {
-            content: JSON.stringify(finalResponse(String(returned.plan?.continuationToken), [semanticSheet('sheet_1', 'transactional')])),
-          },
-        }],
-      };
-    } } },
-  } as unknown as OpenAI;
-
-  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  assert.equal(result.status, 'success');
-  assert.equal(calls, 2);
-  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
-    ['contract_invalid', 'response_validation'],
-    ['success', null],
+  const client = directResponsesClient((input) => {
+    calls += 1;
+    const payload = payloadFromResponsesInput(input);
+    return completedResponsesEnvelope('invalid-contract', {
+      response: {
+        ...finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+        unexpectedField: true,
+      },
+    });
+  });
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 1);
+  assert.equal(calls, 1, 'contract failure never triggers a re-prompt or repair');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.routeClass, attempt.responseMode, attempt.outcomeCategory, attempt.failurePhase]), [
+    ['direct_openai', 'json_schema', 'contract_invalid', 'response_validation'],
   ]);
-  assert.equal(repairPayload?.stage, 'repair_response_contract');
-  assert.match(JSON.stringify(repairPayload), /returnedSemanticContent/);
-  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
-  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
-  assert.doesNotMatch(JSON.stringify(repairPayload), /Private consulting payment/);
 });
 
 test('contract-invalid responses retain a bounded shape diagnostic without persisting provider values', async () => {
@@ -1195,37 +1320,29 @@ test('contract-invalid responses retain a bounded shape diagnostic without persi
   const sensitiveToken = 'PRIVATE_PROVIDER_TOKEN_DO_NOT_PERSIST';
   const sensitiveAmount = '917.23';
   const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
-  const client = {
-    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
-      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as { continuationToken?: string };
-      return {
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              response: {
-                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-                stage: 'final_plan',
-                request: null,
-                plan: {
-                  schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-                  status: 'complete',
-                  continuationToken: payload.continuationToken ?? 'token_missing',
-                  sheets: [],
-                  unresolvedQuestions: [],
-                  abstention: null,
-                  summary: sensitiveDescription,
-                  [sensitiveToken]: {
-                    counterparty: sensitiveName,
-                    amount: sensitiveAmount,
-                  },
-                },
-              },
-            }),
+  const client = directResponsesClient((input) => {
+    const payload = payloadFromResponsesInput(input);
+    return completedResponsesEnvelope('privacy-shape-only', {
+      response: {
+        schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+        stage: 'final_plan',
+        request: null,
+        plan: {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          status: 'complete',
+          continuationToken: payload.continuationToken ?? 'token_missing',
+          sheets: [],
+          unresolvedQuestions: [],
+          abstention: null,
+          summary: sensitiveDescription,
+          [sensitiveToken]: {
+            counterparty: sensitiveName,
+            amount: sensitiveAmount,
           },
-        }],
-      };
-    } } },
-  } as unknown as OpenAI;
+        },
+      },
+    });
+  });
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client,
@@ -1253,62 +1370,21 @@ test('contract-invalid responses retain a bounded shape diagnostic without persi
   }
 });
 
-test('repair remains on the verified strict policy even when historical attempts used object mode', async () => {
-  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Strict repair,13\n'), 'text/csv', 'strict-repair.csv');
-  const requests: Array<{ model?: string; mode?: string }> = [];
+test('malformed direct output remains unavailable and cannot become an import plan', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'malformed-direct-response.csv');
   let calls = 0;
-  const client = {
-    chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
-      calls += 1;
-      requests.push({ model: input.model, mode: input.response_format?.type });
-      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-       if (calls === 1) {
-        return {
-          choices: [{
-            message: {
-              content: JSON.stringify({
-                ...finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
-                unexpectedField: true,
-              }),
-            },
-          }],
-        };
-      }
-      const returned = payload.returnedSemanticContent as { plan?: { continuationToken?: string } };
-      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(returned.plan?.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
-    } } },
-  } as unknown as OpenAI;
-
-  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  assert.equal(result.status, 'success');
-  assert.deepEqual(requests, [
-    { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
-    { model: SPREADSHEET_PROVIDER_MODEL, mode: 'json_schema' },
-  ]);
-  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.responseMode, attempt.outcomeCategory, attempt.failurePhase]), [
-    ['json_schema', 'contract_invalid', 'response_validation'],
-    ['json_schema', 'success', null],
-  ]);
-});
-
-test('a contract-invalid repair result remains unavailable and cannot become an import plan', async () => {
-  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'repair-failure.csv');
-  let calls = 0;
-  const client = {
-    chat: { completions: { create: async () => {
-      calls += 1;
-      return { choices: [{ message: { content: JSON.stringify(calls === 1 ? { invalid: true } : { stillInvalid: true }) } }] };
-    } } },
-  } as unknown as OpenAI;
-
-  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  const client = directResponsesClient(() => {
+    calls += 1;
+    return { status: 'completed', output_text: '{"invalid":true}' };
+  });
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client });
   assert.equal(result.status, 'failed');
   assert.equal(result.reason, 'AI returned a response that did not pass the protected spreadsheet contract.');
-  assert.equal(result.providerCalls, 2);
+  assert.equal(result.providerCalls, 1);
+  assert.equal(calls, 1);
   assert.equal((result.semanticPlan as { status?: string }).status, 'incomplete');
   assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
     ['contract_invalid', 'response_validation'],
-    ['contract_invalid', 'repair_validation'],
   ]);
 });
 
@@ -1316,19 +1392,16 @@ test('a failed semantic session retries to success without replaying prior provi
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry-only sale,17\n'), 'text/csv', 'retry-after-contract-failure.csv');
   const checkpoints: SpreadsheetSemanticSession[] = [];
   let failedCalls = 0;
-  const failedClient = {
-    chat: { completions: { create: async () => {
-      failedCalls += 1;
-      return { choices: [{ message: { content: JSON.stringify(failedCalls === 1 ? { invalid: true } : { stillInvalid: true }) } }] };
-    } } },
-  } as unknown as OpenAI;
+  const failedClient = directResponsesClient(() => {
+    failedCalls += 1;
+    return { status: 'completed', output_text: JSON.stringify({ invalid: true }) };
+  });
   const first = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client: failedClient,
-    retryDelayMs: 0,
     persistSession: async (session) => { checkpoints.push(structuredClone(session)); },
   });
   assert.equal(first.status, 'failed');
-  assert.equal(failedCalls, 2, 'one invalid response and one repair attempt are bounded');
+  assert.equal(failedCalls, 1, 'an invalid response is terminal without repair');
   const failedSession = checkpoints.at(-1);
   assert.ok(failedSession, 'the failed state is durable before an explicit retry');
 
@@ -1339,7 +1412,6 @@ test('a failed semantic session retries to success without replaying prior provi
   });
   const retried = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client: retryClient,
-    retryDelayMs: 0,
     session: {
       ...failedSession,
       stage: 'workbook_overview',
@@ -1355,8 +1427,8 @@ test('a failed semantic session retries to success without replaying prior provi
   assert.equal(retried.status, 'success');
   assert.equal(retryCalls, 1, 'the explicit retry issues exactly one new provider request');
   assert.equal(retried.providerCalls, 1, 'the new execution receives a fresh provider-call budget');
-  assert.equal(retried.providerAttempts?.length, 3, 'prior attempts are retained rather than duplicated');
-  assert.equal(retried.providerAttempts?.at(-1)?.attemptNumber, 3, 'attempt ordinals remain globally auditable across executions');
+  assert.equal(retried.providerAttempts?.length, 2, 'prior attempts are retained rather than duplicated');
+  assert.equal(retried.providerAttempts?.at(-1)?.attemptNumber, 2, 'attempt ordinals remain globally auditable across executions');
 });
 
 test('a five-call execution permits exactly one remaining provider request and never starts repair', async () => {
@@ -1379,16 +1451,13 @@ test('a five-call execution permits exactly one remaining provider request and n
     failurePhase: null,
   }));
   let calls = 0;
-  const client = {
-    chat: { completions: { create: async () => {
-      calls += 1;
-      return { choices: [{ message: { content: JSON.stringify({ invalid: true }) } }] };
-    } } },
-  } as unknown as OpenAI;
+  const client = directResponsesClient(() => {
+    calls += 1;
+    return { status: 'completed', output_text: JSON.stringify({ invalid: true }) };
+  });
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client,
-    retryDelayMs: 0,
     session: {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       contentHash: workbook.contentHash ?? null,
@@ -1431,18 +1500,15 @@ test('a retryable failure with one call remaining cannot overshoot the execution
     failurePhase: null,
   }));
   let calls = 0;
-  const client = {
-    chat: { completions: { create: async () => {
-      calls += 1;
-      const error = new Error('synthetic upstream failure') as Error & { status?: number };
-      error.status = 500;
-      throw error;
-    } } },
-  } as unknown as OpenAI;
+  const client = directResponsesClient(() => {
+    calls += 1;
+    const error = new Error('synthetic upstream failure') as Error & { status?: number };
+    error.status = 500;
+    throw error;
+  });
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client,
-    retryDelayMs: 0,
     session: {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       contentHash: workbook.contentHash ?? null,
@@ -1464,7 +1530,7 @@ test('a retryable failure with one call remaining cannot overshoot the execution
   assert.equal(result.providerCalls, 6, 'the execution stops at its six-call budget');
   assert.equal(result.providerAttempts?.length, 6);
   assert.equal(result.providerAttempts?.at(-1)?.attemptNumber, 6);
-  assert.equal(result.providerAttempts?.at(-1)?.retryable, true);
+  assert.equal(result.providerAttempts?.at(-1)?.retryable, false);
   assert.equal(result.providerAttempts?.at(-1)?.failurePhase, 'provider_request');
   assert.equal(result.providerAttempts?.some((attempt) => attempt.failurePhase === 'repair_validation'), false, 'no repair call starts after the retryable boundary failure');
 });
@@ -1501,18 +1567,18 @@ test('an explicit retry replaces inherited object mode with alias-only strict po
   };
   const requests: Array<{ model?: string; mode?: string }> = [];
   const persistedAttempts: SpreadsheetProviderAttempt[][] = [];
-  const client = {
-      chat: { completions: { create: async (input: { model?: string; response_format?: { type?: string }; messages: Array<{ content: string }> }) => {
-        requests.push({ model: input.model, mode: input.response_format?.type });
-        const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-        return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
-      } } },
-  } as unknown as OpenAI;
+  const client = directResponsesClient((input) => {
+    const format = (input.text as { format?: { type?: string } } | undefined)?.format;
+    requests.push({ model: input.model as string | undefined, mode: format?.type });
+    const payload = payloadFromResponsesInput(input);
+    return completedResponsesEnvelope('explicit-retry-direct', {
+      response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]),
+    });
+  });
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheet(workbook), {
     client,
     session,
     resetProviderState: true,
-    retryDelayMs: 0,
     persistProviderAttempts: async (attempts) => { persistedAttempts.push(structuredClone(attempts)); },
   });
   assert.equal(result.status, 'success');
@@ -1576,35 +1642,28 @@ test('a whole-review deadline checkpoints safe continuation state and starts no 
   const checkpoints: SpreadsheetSemanticSession[] = [];
   let nowMs = 0;
   let calls = 0;
-  const client = {
-    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
-      calls += 1;
-      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-      nowMs = 51;
-      return {
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-              stage: 'request_context',
-              request: {
-                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-                continuationToken: String(payload.continuationToken),
-                allowedSheetIds: ['sheet_1'],
-                requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 2, startColumn: 1, endColumn: 3, chunk: 0, reason: 'Need bounded structure.' }],
-              },
-              plan: null,
-            }),
-          },
-        }],
-      };
-    } } },
-  } as unknown as OpenAI;
+  const client = directResponsesClient((input) => {
+    calls += 1;
+    const payload = payloadFromResponsesInput(input);
+    nowMs = 51;
+    return completedResponsesEnvelope('deadline-direct', {
+      response: {
+        schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+        stage: 'request_context',
+        request: {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          continuationToken: String(payload.continuationToken),
+          allowedSheetIds: ['sheet_1'],
+          requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 2, startColumn: 1, endColumn: 3, chunk: 0, reason: 'Need bounded structure.' }],
+        },
+        plan: null,
+      },
+    });
+  });
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
     client,
     reviewTimeoutMs: 50,
-    retryDelayMs: 0,
     now: () => nowMs,
     persistSession: async (session) => { checkpoints.push(structuredClone(session)); },
   });

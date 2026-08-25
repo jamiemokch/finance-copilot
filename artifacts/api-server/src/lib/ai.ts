@@ -1,6 +1,7 @@
 /**
  * OpenAI integration for SME Finance Copilot.
- * Uses Replit-managed AI Integrations proxy with direct key as fallback.
+ * Uses the managed integration for general assistant features. Spreadsheet
+ * semantics intentionally use a dedicated direct OpenAI Responses route.
  *
  * - Evidence extraction: context-aware, structured accounting fields, VAT metadata.
  * - Business ideas: real AI generation grounded in live financial data.
@@ -50,9 +51,12 @@ const FINANCE_COPILOT_MODEL = 'gpt-5.4-mini';
 export const SPREADSHEET_PROVIDER_MODEL = FINANCE_COPILOT_MODEL;
 export const SPREADSHEET_PROVIDER_TELEMETRY_VERSION = 'spreadsheet-provider-attempt.v1' as const;
 export const SPREADSHEET_PROVIDER_POLICY = {
+  routeClass: 'direct_openai' as const,
   requestedModel: SPREADSHEET_PROVIDER_MODEL,
   resolvedModel: SPREADSHEET_PROVIDER_MODEL,
   responseMode: 'json_schema' as const,
+  transport: 'responses' as const,
+  maxAttemptsPerRequest: 1,
 } as const;
 
 export type SpreadsheetProviderFailureCategory =
@@ -96,6 +100,7 @@ export const SPREADSHEET_AI_LIMITS = {
 } as const;
 
 let _client: OpenAI | null = null;
+let _directSpreadsheetClient: OpenAI | null = null;
 const spreadsheetAICache = new Map<string, { expiresAt: number; envelope: SpreadsheetAIEnvelope }>();
 const spreadsheetAIInFlight = new Map<string, Promise<SpreadsheetAIEnvelope>>();
 let managedProviderPolicyCheck: {
@@ -129,7 +134,7 @@ export function invalidateSpreadsheetAICache(contentHash?: string) {
 function getClient(): OpenAI {
   if (!_client) {
     const baseURL = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
-    const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+    const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
     if (!apiKey) throw new Error('No OpenAI API key configured');
     _client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
@@ -137,7 +142,35 @@ function getClient(): OpenAI {
 }
 
 export function isConfigured(): boolean {
-  return Boolean(process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY);
+  return Boolean(process.env.AI_INTEGRATIONS_OPENAI_API_KEY);
+}
+
+/**
+ * Spreadsheet semantics never reuse the managed integration client. Production
+ * uses the official OpenAI endpoint; an explicit loopback base URL is accepted
+ * only in the isolated local test process.
+ */
+function getDirectSpreadsheetClient(): OpenAI {
+  if (!_directSpreadsheetClient) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new SpreadsheetProviderFailure('provider_unavailable');
+    const testBaseURL = process.env.NODE_ENV === 'test'
+      ? process.env.DIRECT_OPENAI_BASE_URL
+      : undefined;
+    _directSpreadsheetClient = new OpenAI({
+      apiKey,
+      ...(testBaseURL ? { baseURL: testBaseURL } : {}),
+    });
+  }
+  return _directSpreadsheetClient;
+}
+
+export function isSpreadsheetDirectProviderConfigured(): boolean {
+  return Boolean(process.env.OPENAI_API_KEY);
+}
+
+export function resetDirectSpreadsheetProviderForTests() {
+  _directSpreadsheetClient = null;
 }
 
 // ─── Evidence Extraction ──────────────────────────────────────────────────────
@@ -623,6 +656,7 @@ export async function providerCallWithTimeout(
     initialResolvedModel?: string;
     initialResponseMode?: SpreadsheetProviderAttempt['responseMode'];
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
+    spreadsheetDirectOnly?: boolean;
     allowJsonObjectFallback?: boolean;
     timeoutReason?: 'timeout' | 'review_deadline';
     classifyResponse?: (
@@ -640,14 +674,23 @@ export async function providerCallWithTimeout(
 }> {
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
   const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
-  const maxProviderCalls = options.maxProviderCalls ?? SPREADSHEET_AI_LIMITS.maxProviderCalls;
+  const spreadsheetDirectOnly = options.spreadsheetDirectOnly === true;
+  const maxProviderCalls = spreadsheetDirectOnly
+    ? 1
+    : options.maxProviderCalls ?? SPREADSHEET_AI_LIMITS.maxProviderCalls;
   const timeoutReason = options.timeoutReason ?? 'timeout';
   const requestedModel = SPREADSHEET_PROVIDER_POLICY.requestedModel;
   let providerCalls = 0;
   let lastError: unknown;
-  let responseMode: SpreadsheetProviderAttempt['responseMode'] = options.initialResponseMode ?? 'json_schema';
-  let resolvedModel = options.initialResolvedModel ?? requestedModel;
-  const routeClass: SpreadsheetProviderAttempt['routeClass'] = options.routeClass ?? (process.env.AI_INTEGRATIONS_OPENAI_BASE_URL
+  let responseMode: SpreadsheetProviderAttempt['responseMode'] = spreadsheetDirectOnly
+    ? SPREADSHEET_PROVIDER_POLICY.responseMode
+    : options.initialResponseMode ?? 'json_schema';
+  let resolvedModel = spreadsheetDirectOnly
+    ? SPREADSHEET_PROVIDER_POLICY.resolvedModel
+    : options.initialResolvedModel ?? requestedModel;
+  const routeClass: SpreadsheetProviderAttempt['routeClass'] = spreadsheetDirectOnly
+    ? SPREADSHEET_PROVIDER_POLICY.routeClass
+    : options.routeClass ?? (process.env.AI_INTEGRATIONS_OPENAI_BASE_URL
     ? 'replit_ai_integrations'
     : 'direct_openai');
   const classifyFailure = (error: unknown) => {
@@ -707,17 +750,21 @@ export async function providerCallWithTimeout(
         // SDK create invisible additional provider work underneath that cap.
         maxRetries: 0,
       } as never;
-      const useManagedResponsesStructuredOutput = routeClass === 'replit_ai_integrations'
-        && responseMode === 'json_schema'
-        && typeof client.responses?.create === 'function';
-      const response = useManagedResponsesStructuredOutput
+      const useResponsesStructuredOutput = (
+        spreadsheetDirectOnly
+        || routeClass === 'replit_ai_integrations'
+      ) && responseMode === 'json_schema' && typeof client.responses?.create === 'function';
+      if (spreadsheetDirectOnly && !useResponsesStructuredOutput) {
+        throw new Error('direct_responses_unavailable');
+      }
+      const response = useResponsesStructuredOutput
         ? await client.responses.create({
           model: resolvedModel,
           max_output_tokens: SPREADSHEET_AI_LIMITS.maxOutputTokens,
           instructions: systemInstruction,
-          // The managed Responses route must receive a native input_text
-          // message. Passing the same JSON as a bare input string can yield an
-          // otherwise-complete envelope whose text fields are empty.
+          // Responses must receive a native input_text message. Passing the
+          // same JSON as a bare input string can yield an otherwise-complete
+          // envelope whose text fields are empty.
           input: [{
             role: 'user',
             content: [{ type: 'input_text', text: payload }],
@@ -790,13 +837,24 @@ export async function providerCallWithTimeout(
         outcomeCategory: failure.outcomeCategory,
         safeStatus: failure.safeStatus,
         statusCode: failure.status,
-        retryable: !timedOut && (failure.retryable || (failure.providerSchemaInvalid && responseMode === 'json_schema' && Boolean(options.allowJsonObjectFallback))),
+         retryable: !spreadsheetDirectOnly && !timedOut && (
+           failure.retryable
+           || (failure.providerSchemaInvalid && responseMode === 'json_schema' && Boolean(options.allowJsonObjectFallback))
+         ),
         failurePhase: 'provider_request',
       });
       if (timedOut && timeoutReason === 'review_deadline') {
         const deadlineFailure = new SpreadsheetProviderFailure(failure.category, 'review_deadline');
         deadlineFailure.providerCalls = providerCalls;
         throw deadlineFailure;
+      }
+      if (spreadsheetDirectOnly) {
+        const providerFailure = new SpreadsheetProviderFailure(
+          failure.category,
+          timedOut || failure.timeout ? 'timeout' : undefined,
+        );
+        providerFailure.providerCalls = providerCalls;
+        throw providerFailure;
       }
       // Managed spreadsheet review uses a verified strict-schema policy only.
       // JSON-object remains an opt-in compatibility boundary for non-managed
@@ -1842,9 +1900,9 @@ export async function analyseSpreadsheetWithAI(
       };
     }
   }
-  if (!testOptions?.client && !isConfigured()) {
+  if (!testOptions?.client && !isSpreadsheetDirectProviderConfigured()) {
     return incomplete('incomplete', 'AI analysis is unavailable. Choose a specific sheet to review manually before importing.', {
-      reason: 'provider_unavailable', detail: 'The semantic interpreter is unavailable.', manualRecoveryRequired: true,
+      reason: 'provider_unavailable', detail: 'The direct semantic interpreter is unavailable.', manualRecoveryRequired: true,
     });
   }
   if (tooLarge) {
@@ -1852,30 +1910,7 @@ export async function analyseSpreadsheetWithAI(
       reason: 'operational_limit', detail: 'The workbook exceeds the bounded interpretation limit.', manualRecoveryRequired: true,
     });
   }
-  let providerPolicy = SPREADSHEET_PROVIDER_POLICY;
-  if (!testOptions?.client) {
-    try {
-      providerPolicy = await verifiedManagedSpreadsheetProviderPolicy();
-    } catch (error) {
-      const failureCategory = error instanceof SpreadsheetProviderFailure
-        ? error.category
-        : 'provider_unavailable';
-      const reason = failureCategory === 'model_unavailable'
-        ? 'Automatic review is unavailable because the configured review model is not available.'
-        : failureCategory === 'provider_schema_invalid'
-          ? 'Automatic review is unavailable because the provider rejected the review format.'
-          : failureCategory === 'response_contract_invalid'
-            ? 'Automatic review is unavailable because the provider contract check did not pass.'
-            : 'Automatic review is temporarily unavailable. No records were imported.';
-      return incomplete('incomplete', reason, {
-        reason: failureCategory === 'provider_schema_invalid' || failureCategory === 'response_contract_invalid'
-          ? 'provider_schema_invalid'
-          : 'provider_unavailable',
-        detail: reason,
-        manualRecoveryRequired: true,
-      }, 0, initialToken, [], failureCategory);
-    }
-  }
+  const semanticClient = testOptions?.client ?? getDirectSpreadsheetClient();
   const overview = buildSpreadsheetWorkbookOverview(workbook);
   const executionCacheScope = testOptions?.session
     ? `${testOptions.session.executionId ?? "legacy"}:${testOptions.session.executionNumber ?? 0}`
@@ -1918,10 +1953,11 @@ export async function analyseSpreadsheetWithAI(
     const attemptOffset = hasSession
       ? testOptions!.session!.attemptOffset ?? Math.max(0, providerAttempts.length - providerCalls)
       : 0;
-    // Every new provider call begins with the verified strict policy. Historic
-    // attempts remain audit history only; they never select model or object mode.
-    let resolvedModel: string = providerPolicy.resolvedModel;
-    let responseMode: SpreadsheetProviderAttempt['responseMode'] = providerPolicy.responseMode;
+    // Every new provider call begins with the fixed direct strict policy.
+    // Historic attempts remain audit history only; they never select model,
+    // provider route, or object mode.
+    let resolvedModel: string = SPREADSHEET_PROVIDER_POLICY.resolvedModel;
+    let responseMode: SpreadsheetProviderAttempt['responseMode'] = SPREADSHEET_PROVIDER_POLICY.responseMode;
     let token = resumable ? testOptions!.session!.continuationToken : initialToken;
     let payload: unknown = resumable ? testOptions!.session!.payload : {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
@@ -1943,7 +1979,7 @@ export async function analyseSpreadsheetWithAI(
       payload,
       contextHistory,
       providerCalls,
-        providerAttempts,
+      providerAttempts,
       currentPlan,
     });
     try {
@@ -1960,14 +1996,14 @@ export async function analyseSpreadsheetWithAI(
             reason: 'operational_limit', detail: 'The hierarchy reached the maximum provider-call limit.', manualRecoveryRequired: true,
           }, providerCalls, token, providerAttempts);
         }
-        const remainingProviderCalls = SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls - providerCalls;
-        const result = await providerCallWithTimeout(testOptions?.client ?? getClient(), JSON.stringify(payload), {
+        const result = await providerCallWithTimeout(semanticClient, JSON.stringify(payload), {
           ...providerTimeout,
-          retryDelayMs: testOptions?.retryDelayMs,
-          maxProviderCalls: Math.min(SPREADSHEET_SEMANTIC_LIMITS.maxCallsPerStage, remainingProviderCalls),
+          maxProviderCalls: 1,
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
+          routeClass: SPREADSHEET_PROVIDER_POLICY.routeClass,
+          spreadsheetDirectOnly: true,
           classifyResponse: (content, responseShapeFingerprint) => {
             const failure = responseContractFailure(content, workbook, token, responseShapeFingerprint);
             return failure
@@ -1992,40 +2028,10 @@ export async function analyseSpreadsheetWithAI(
             reason: 'operational_limit', detail: 'The provider-call budget was exhausted.', manualRecoveryRequired: true,
           }, providerCalls, token, providerAttempts);
         }
-        let responseContent = result.content;
+        const responseContent = result.content;
         const initialFailure = responseContractFailure(responseContent, workbook, token, result.responseShapeFingerprint);
         if (initialFailure) {
-          const repairPayload = repairPayloadForContract(responseContent);
-          if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
-          const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
-            ...timeoutForNextProviderCall(),
-            retryDelayMs: testOptions?.retryDelayMs,
-            maxProviderCalls: 1,
-            attemptOffset: attemptOffset + providerCalls,
-            initialResolvedModel: resolvedModel,
-            initialResponseMode: responseMode,
-            classifyResponse: (content, responseShapeFingerprint) => {
-              const failure = responseContractFailure(content, workbook, token, responseShapeFingerprint);
-              return failure
-                ? {
-                  outcomeCategory: 'contract_invalid',
-                  safeStatus: 'contract_invalid',
-                  failurePhase: 'repair_validation',
-                  diagnostic: failure.diagnostic,
-                }
-                : null;
-            },
-            onAttempt: async (attempt) => {
-              providerAttempts = [...providerAttempts, attempt];
-              await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
-            },
-          });
-          providerCalls += repaired.providerCalls;
-          resolvedModel = repaired.resolvedModel;
-          responseMode = repaired.responseMode;
-          const repairedFailure = responseContractFailure(repaired.content, workbook, token, repaired.responseShapeFingerprint);
-          if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls || repairedFailure) throw new Error('schema_invalid');
-          responseContent = repaired.content;
+          throw new SpreadsheetProviderFailure('response_contract_invalid');
         }
         const parsed = parseSpreadsheetProviderResponse(responseContent);
         if (parsed.stage === 'request_context') {
