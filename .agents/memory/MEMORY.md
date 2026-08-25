@@ -21,3 +21,4 @@
 - [Provider response shape fingerprints](provider-response-shape-fingerprints.md) — extraction diagnostics capture fixed paths, allowlisted SDK keys, JSON types, and capped array counts only
 - [Replit preview OIDC origin](replit-preview-oidc-origin.md) — development callbacks must use the browser-visible preview domain, not an API proxy hop
 - [Direct spreadsheet semantic provider](direct-spreadsheet-semantic-provider.md) — spreadsheet semantics use a dedicated direct Responses route and fail closed; managed AI remains for other features
+- [Spreadsheet semantic v3](spreadsheet-semantic-v3.md) — new reviews use one bounded direct request and local full-workbook application; v2 is inactive

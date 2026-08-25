@@ -152,7 +152,7 @@ export function isConfigured(): boolean {
  * uses the official OpenAI endpoint; an explicit loopback base URL is accepted
  * only in the isolated local test process.
  */
-function getDirectSpreadsheetClient(): OpenAI {
+export function getDirectSpreadsheetClient(): OpenAI {
   if (!_directSpreadsheetClient) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new SpreadsheetProviderFailure('provider_unavailable');
