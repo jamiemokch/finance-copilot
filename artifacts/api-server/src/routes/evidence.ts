@@ -952,9 +952,12 @@ router.patch("/profiles/:profileId/evidence/:evidenceId/spreadsheet-review", asy
     const state = (evidenceItem.mappingSchema as Record<string, unknown> | null) ?? {};
     const savedPlan = parsePersistedSpreadsheetSemanticPlan(state.aiProposal);
     const savedRecoveryState = (state.aiStatus as { recoveryState?: unknown } | undefined)?.recoveryState;
+    const optionalV3ManualReview = savedPlan?.schemaVersion === "spreadsheet-semantic.v3"
+      && savedRecoveryState === "automatic_unavailable";
     if ((savedRecoveryState === "automatic_unavailable"
       || (savedPlan?.status !== "complete"))
-      && savedRecoveryState !== "manual_recovery") {
+      && savedRecoveryState !== "manual_recovery"
+      && !optionalV3ManualReview) {
       res.status(409).json({
         error: "Choose manual recovery or retry automatic review before saving sheet choices.",
         issues: [{ field: "selection", message: "Automatic review is unavailable. Select “Start manual recovery” before choosing worksheet mappings." }],
@@ -1194,10 +1197,34 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     const savedAiStatus = savedState?.aiStatus as { status?: unknown; recoveryState?: unknown } | null | undefined;
     if (savedState?.deterministicFindings && savedState.mappingSchema
       && savedAiStatus?.recoveryState === "automatic_unavailable" && !detectionMode) {
+      // Rehydrate older unavailable v3 reviews from the already-uploaded file
+      // without retrying semantics. This keeps the manual path usable for
+      // evidence stored before the deterministic fallback was persisted.
+      const fallbackWorkbook = inspectSpreadsheet(buffer, evidenceItem.mimeType, evidenceItem.filename);
+      const fallbackAnalysis = analyseSpreadsheet(fallbackWorkbook, {
+        semanticMode: "deterministic",
+        decisionSource: "deterministic",
+      });
+      const fallbackPrimarySheet = fallbackAnalysis.sheets.find((sheet) => sheet.selected) ?? fallbackAnalysis.sheets[0];
+      const fallbackMappingSchema: MappingSchema = fallbackPrimarySheet ? {
+        headerRow: fallbackPrimarySheet.mapping.headerRow ?? 0,
+        columns: fallbackPrimarySheet.mapping.columns,
+        dateFormat: null,
+        currency: "GBP",
+        confidence: fallbackPrimarySheet.confidence,
+        notes: ["Deterministic parser suggestions are ready to review or correct manually."],
+      } : {
+        headerRow: 0,
+        columns: {},
+        dateFormat: null,
+        currency: "GBP",
+        confidence: 0,
+        notes: ["Choose a sheet and its named columns before importing."],
+      };
       res.json({
-        mappingSchema: savedState.mappingSchema,
+        mappingSchema: fallbackMappingSchema,
         previewRows: [],
-        analysis: savedState.deterministicFindings,
+        analysis: fallbackAnalysis,
         aiProposal: savedState.aiProposal ?? null,
         aiStatus: savedState.aiStatus,
         userDecision: savedState.userDecision ?? null,
@@ -1213,8 +1240,8 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       sheetRoleOverrides?: Record<string, "transactional" | "non_transactional" | "mixed" | "unknown">;
       sheetMappings?: Record<string, MappingSchema>;
     } | null | undefined;
-    // No local heuristic is allowed to select a sheet or establish its role in
-    // the normal path. This is a complete, all-sheet structural audit only.
+    // Always build the complete deterministic review locally. Semantic AI is an
+    // optional enhancement layered on top of this safe fallback.
     const structuralAnalysis = analyseSpreadsheetStructure(workbook);
     if (workbook.totalParserRows === 0) { res.status(400).json({ error: "The spreadsheet contains no rows" }); return; }
     const sourceContentHash = workbook.contentHash ?? createHash("sha256").update(buffer).digest("hex");
@@ -1222,7 +1249,12 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     // not create or resume the legacy continuation/session protocol below.
     if (newSpreadsheetSemanticV3ReviewsAreActive()) {
       const v3 = await analyseSpreadsheetWithSemanticV3(workbook);
-      const v3PrimarySheet = v3.analysis.sheets.find((sheet) => sheet.selected) ?? v3.analysis.sheets[0];
+      const deterministicAnalysis = analyseSpreadsheet(workbook, {
+        semanticMode: "deterministic",
+        decisionSource: "deterministic",
+      });
+      const reviewAnalysis = v3.status === "success" ? v3.analysis : deterministicAnalysis;
+      const v3PrimarySheet = reviewAnalysis.sheets.find((sheet) => sheet.selected) ?? reviewAnalysis.sheets[0];
       const v3MappingSchema: MappingSchema = v3PrimarySheet ? {
       headerRow: v3PrimarySheet.mapping.headerRow ?? 0,
       columns: v3PrimarySheet.mapping.columns,
@@ -1239,7 +1271,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       const v3State = {
       schemaVersion: "spreadsheet-review.v1",
       mappingSchema: v3MappingSchema,
-      deterministicFindings: v3.analysis,
+      deterministicFindings: reviewAnalysis,
       semanticWorkbookOverview: v3.semanticOverview,
       aiProposal: v3.semanticPlan,
       semanticSession: null,
@@ -1279,7 +1311,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       )).returning();
       if (!storedV3State) { res.status(409).json({ error: "This spreadsheet is still being processed" }); return; }
       await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_inspected", {
-      contentHash: workbook.contentHash, parserVersion: v3.analysis.parserVersion, sheetCount: workbook.sheets.length,
+      contentHash: workbook.contentHash, parserVersion: reviewAnalysis.parserVersion, sheetCount: workbook.sheets.length,
       totalParserRows: workbook.totalParserRows, aiStatus: v3.status, fallbackReason: v3.reason ?? null,
       recoveryState: v3State.aiStatus.recoveryState, providerAttemptCount: v3.providerAttempts.length,
       semanticSchemaVersion: "spreadsheet-semantic.v3",
@@ -1287,7 +1319,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
       res.json({
       mappingSchema: v3MappingSchema,
       previewRows: v3PrimarySheet?.previewRows.map((row) => row.values) ?? [],
-      analysis: v3.analysis,
+      analysis: reviewAnalysis,
       semanticWorkbookOverview: v3.semanticOverview,
       aiProposal: v3.semanticPlan,
       aiStatus: v3State.aiStatus,
@@ -1936,7 +1968,9 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       ? persistedPlan
       : null;
     const recoveryState = (importState.aiStatus as { recoveryState?: unknown } | undefined)?.recoveryState;
-    if (!semanticPlan && recoveryState !== "manual_recovery") {
+    const optionalV3ManualReview = persistedPlan?.schemaVersion === "spreadsheet-semantic.v3"
+      && recoveryState === "automatic_unavailable";
+    if (!semanticPlan && recoveryState !== "manual_recovery" && !optionalV3ManualReview) {
       res.status(409).json({
         error: "Choose manual recovery or retry automatic review before importing.",
         issues: [{ field: "selection", message: "Automatic review is unavailable. Start manual recovery and save your choices before importing." }],
@@ -1961,7 +1995,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
     for (const sheetId of selected) {
       const planned = semanticSheets.get(sheetId);
       const resolution = body.data.sheetResolutions[sheetId];
-      if (!semanticPlan && resolution !== "include_income" && resolution !== "include_expense") {
+      if (!semanticPlan && !optionalV3ManualReview && resolution !== "include_income" && resolution !== "include_expense") {
         res.status(400).json({
           error: "This import needs an explicit manual recovery decision.",
           issues: [{ sheetId, field: "selection", message: "AI review is incomplete. Choose “include as income” or “include as expense” for this saved manual recovery before importing." }],
@@ -2225,7 +2259,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
       sheetResolutions: body.data.sheetResolutions, excludedRowRefs: body.data.excludedRowRefs, preTradingStartMode: body.data.preTradingStartMode,
       outsideScopeMode: body.data.outsideScopeMode,
       semanticPlanIdentity: body.data.semanticPlanIdentity,
-      semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
+      semanticSchemaVersion: persistedPlan?.schemaVersion ?? "manual-recovery",
       sourceContentHash,
       sourceObjectPath: confirmedSourceObjectPath,
       semanticSessionId: confirmedSemanticSessionId,
@@ -2278,7 +2312,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
           reason: row.reason, rawValueReference: row.rawValueReference, normalizedValueReference: row.normalizedValueReference,
            duplicateFingerprint: row.duplicateFingerprint, decisionSource: row.decisionSource, mappingRevision: mappingRevision,
            semanticPlanIdentity: body.data.semanticPlanIdentity,
-           semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
+           semanticSchemaVersion: persistedPlan?.schemaVersion ?? "manual-recovery",
             semanticSessionId: confirmedSemanticSessionId,
            sourceContentHash,
             sourceObjectPath: confirmedSourceObjectPath,
@@ -2335,7 +2369,7 @@ router.post("/profiles/:profileId/evidence/:evidenceId/confirm-spreadsheet", asy
           parserVersion: "spreadsheet-parser.v2",
           mappingRevision,
           semanticPlanIdentity: body.data.semanticPlanIdentity,
-          semanticSchemaVersion: semanticPlan?.schemaVersion ?? "manual-recovery",
+          semanticSchemaVersion: persistedPlan?.schemaVersion ?? "manual-recovery",
           semanticSessionId: confirmedSemanticSessionId,
           semanticWorkIdentity: confirmedSemanticWorkIdentity,
           userDecision, dispositionCounts: counts, sheetDispositions: sheetFinalDispositions,

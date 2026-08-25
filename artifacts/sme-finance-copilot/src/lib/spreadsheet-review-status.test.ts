@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   automaticReviewCanRetry,
+  automaticReviewAllowsManualMapping,
   automaticReviewRetryLimitConflict,
   automaticReviewRetryIsExhausted,
   automaticReviewShouldClearAnalysis,
@@ -40,17 +41,31 @@ test('recognises only the server retry-limit conflict as exhausted automatic rev
   assert.equal(automaticReviewCanRetry({ recoveryState: 'automatic_unavailable' }), true);
 });
 
-test('a timed-out automatic review replaces stale analysis with the safe retry state', () => {
+test('an unavailable automatic review keeps deterministic mapping available', () => {
   const status = {
     failureCategory: 'transport_failure' as const,
     reason: 'Automatic review timed out waiting for a response. No records were imported.',
     recoveryState: 'automatic_unavailable' as const,
   };
 
-  assert.equal(automaticReviewShouldClearAnalysis(status), true);
+  assert.equal(automaticReviewShouldClearAnalysis(status), false);
+  assert.equal(automaticReviewAllowsManualMapping(status), true);
   assert.equal(
     automaticReviewUnavailableReason(status),
     'Automatic review timed out waiting for a response. No records were imported.',
+  );
+});
+
+test('a contract-invalid automatic suggestion remains an editable manual review', () => {
+  const status = {
+    failureCategory: 'response_contract_invalid' as const,
+    recoveryState: 'automatic_unavailable' as const,
+  };
+  assert.equal(automaticReviewShouldClearAnalysis(status), false);
+  assert.equal(automaticReviewAllowsManualMapping(status), true);
+  assert.equal(
+    automaticReviewUnavailableReason(status),
+    'Automatic suggestions are unavailable right now.',
   );
 });
 

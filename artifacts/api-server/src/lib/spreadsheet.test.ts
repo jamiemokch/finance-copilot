@@ -97,6 +97,35 @@ test('workbook understanding keeps reference tabs out of the default import and 
   assert.equal(analysis.sheets[2]?.reviewRequired, true);
 });
 
+test('deterministic review keeps selected sheets and editable column suggestions when semantic AI is unavailable', () => {
+  const workbook = inspectSpreadsheet(Buffer.from([
+    'Date,Description,Amount',
+    '06/04/2025,Manual review sale,125.00',
+    '07/04/2025,Manual review expense,-42.00',
+  ].join('\n')), 'text/csv', 'manual-fallback.csv');
+  const analysis = analyseSpreadsheet(workbook, {
+    semanticMode: 'deterministic',
+    decisionSource: 'deterministic',
+  });
+  const sheet = analysis.sheets[0];
+  assert.equal(sheet?.selected, true);
+  assert.equal(sheet?.mapping.columns.date, 0);
+  assert.equal(sheet?.mapping.columns.description, 1);
+  assert.equal(sheet?.mapping.columns.amount, 2);
+  assert.deepEqual(analysis.taxYears, ['2025-2026']);
+
+  const manuallyCorrected = analyseSpreadsheet(workbook, {
+    selectedSheetIds: ['sheet_1'],
+    roleOverrides: { sheet_1: 'transactional' },
+    sheetMappings: {
+      sheet_1: { headerRow: 0, columns: { date: 0, description: 1, amount: 2 } },
+    },
+    decisionSource: 'user',
+  });
+  assert.equal(manuallyCorrected.sheets[0]?.disposition, 'processed');
+  assert.equal(manuallyCorrected.sheets[0]?.rows.filter((row) => row.primaryDisposition === 'imported').length, 2);
+});
+
 test('the exact 17-sheet Yatson workbook keeps references hidden and proposes only structured money sheets', () => {
   const workbook = XLSX.utils.book_new();
   for (const name of ['Master data', 'Query', 'FS', 'TB', 'Queries']) {

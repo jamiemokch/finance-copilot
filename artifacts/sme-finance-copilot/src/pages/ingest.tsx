@@ -7,10 +7,10 @@ import {
   type APIEvidenceItem, type BankCsvMapping, type BankImportBatch, type BankImportRow, type FinancialAccount, type SpreadsheetImportError, type SpreadsheetReviewAnalysis,
 } from '@/lib/api';
 import {
+  automaticReviewAllowsManualMapping,
   automaticReviewCanRetry,
   automaticReviewRetryLimitConflict,
   automaticReviewRetryIsExhausted,
-  automaticReviewShouldClearAnalysis,
   automaticReviewUnavailableReason,
 } from '@/lib/spreadsheet-review-status';
 import { useStore, type EvidenceItem } from '@/lib/store';
@@ -348,11 +348,9 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const resumed = useRef(false);
 
   const applyInspection = (detected: Awaited<ReturnType<typeof evidenceApi.detectSchema>>) => {
-    const automaticUnavailable = automaticReviewShouldClearAnalysis(detected.aiStatus);
-    // An automatic retry result must replace—not sit behind—any older review.
-    // Structural findings are retained server-side for manual recovery, but are
-    // deliberately not mounted as worksheet questions until the user opts in.
-    const nextAnalysis = automaticUnavailable ? null : detected.analysis ?? null;
+    // Semantic suggestions are optional. The server always returns the
+    // deterministic parser review, including reusable sheet/mapping defaults.
+    const nextAnalysis = detected.analysis ?? null;
     setAnalysis(nextAnalysis);
     setAiStatus(detected.aiStatus ?? null);
     setImportError(detected.lastImportError ?? null);
@@ -391,13 +389,6 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
       providerCalls: 0,
       providerAttempts: [],
     });
-    setSheetMappings({});
-    setSelectedSheetIds([]);
-    setSheetRoleOverrides({});
-    setSheetResolutions({});
-    setActiveSheetId('');
-    setEditingSheetId('');
-    setCheckingSheetId('');
     setImportError(null);
     setReviewSaveIssues([]);
   };
@@ -687,7 +678,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
   const questions = unresolvedReviewSheets(analysis?.sheets ?? [], sheetResolutions);
   const automaticReviewReady = aiStatus?.recoveryState === 'automatic_ready' || aiStatus?.status === 'success';
   const manualRecoveryEnabled = aiStatus?.recoveryState === 'manual_recovery';
-  const reviewEnabled = automaticReviewReady || manualRecoveryEnabled;
+  const reviewEnabled = automaticReviewAllowsManualMapping(aiStatus);
   const automaticRetryLimitReached = automaticReviewRetryIsExhausted(aiStatus);
   const unavailableReason = automaticReviewUnavailableReason(aiStatus);
   const validCoverageDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
@@ -761,9 +752,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
            ? 'Check the summary below before you confirm.'
            : manualRecoveryEnabled
              ? 'Choose each sheet and its columns yourself. Nothing is added until the final confirmation.'
-              : automaticRetryLimitReached
-                ? `${unavailableReason} No records were imported. Start manual sheet recovery instead.`
-                : `${unavailableReason} No records were imported. You can retry the automatic review, or explicitly start manual sheet recovery.`}
+              : `${unavailableReason} Review or correct the suggested sheets and columns below. Nothing is added until the final confirmation.`}
           {!reviewEnabled && <div className="mt-3">
             <AutomaticReviewRecoveryActions
               retryAvailable={automaticReviewCanRetry(aiStatus)}
