@@ -64,6 +64,39 @@ async function closeServer(server: ReturnType<typeof app.listen>): Promise<void>
   });
 }
 
+function completedResponsesEnvelope(id: string, payload: Record<string, unknown>) {
+  const outputText = JSON.stringify(payload);
+  return {
+    id,
+    object: 'response',
+    created_at: 0,
+    completed_at: 0,
+    status: 'completed',
+    output_text: outputText,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: {},
+    model: 'gpt-5.4-mini',
+    output: [{
+      id: `${id}-message`,
+      type: 'message',
+      role: 'assistant',
+      status: 'completed',
+      content: [{
+        type: 'output_text',
+        text: outputText,
+        annotations: [],
+      }],
+    }],
+    parallel_tool_calls: false,
+    temperature: null,
+    tool_choice: 'auto',
+    tools: [],
+    top_p: null,
+  };
+}
+
 test('development acceptance reviews fresh spreadsheet evidence without confirmation writes', async () => {
   const suffix = randomUUID().replaceAll('-', '');
   const userId = `spreadsheet-acceptance-${suffix}`;
@@ -73,6 +106,7 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
   let providerServer: ReturnType<typeof createServer> | undefined;
   let spreadsheetBuffer = Buffer.from('Date,Description,Amount\n06/04/2025,Fresh acceptance review,42.50\n');
   let providerCalls = 0;
+  let receivedStrictJsonSchema = false;
   const originalSaveContent = ObjectStorageService.prototype.saveContent;
   const originalGetFile = ObjectStorageService.prototype.getObjectEntityFile;
   const savedAiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
@@ -118,8 +152,15 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
         providerRequest.once('end', () => resolve(body));
         providerRequest.once('error', reject);
       });
-      const requestBody = JSON.parse(raw) as { input?: unknown };
+      const requestBody = JSON.parse(raw) as {
+        input?: unknown;
+        text?: { format?: { type?: unknown; strict?: unknown; schema?: unknown } };
+      };
       const input = typeof requestBody.input === 'string' ? JSON.parse(requestBody.input) as { continuationToken?: string } : {};
+      receivedStrictJsonSchema = requestBody.text?.format?.type === 'json_schema'
+        && requestBody.text.format.strict === true
+        && typeof requestBody.text.format.schema === 'object'
+        && requestBody.text.format.schema !== null;
       providerCalls += 1;
       const semanticResponse = {
         response: {
@@ -158,11 +199,10 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
         },
       };
       providerResponse.writeHead(200, { 'content-type': 'application/json' });
-      providerResponse.end(JSON.stringify({
-        id: `test-spreadsheet-acceptance-${providerCalls}`,
-        object: 'response',
-        output_text: JSON.stringify(semanticResponse),
-      }));
+      providerResponse.end(JSON.stringify(completedResponsesEnvelope(
+        `test-spreadsheet-acceptance-${providerCalls}`,
+        semanticResponse,
+      )));
     });
     await new Promise<void>((resolve) => providerServer!.listen(0, '127.0.0.1', resolve));
     const providerPort = (providerServer.address() as AddressInfo).port;
@@ -194,6 +234,7 @@ test('development acceptance reviews fresh spreadsheet evidence without confirma
     assert.equal(review.status, 200, JSON.stringify(review.body));
     assert.equal((review.body.aiStatus as { status?: string } | undefined)?.status, 'success');
     assert.equal(providerCalls, 1, 'the fresh review uses the normal provider path exactly once');
+    assert.equal(receivedStrictJsonSchema, true, 'the acceptance mock only accepts the managed strict JSON schema request');
     assert.equal(review.body.userDecision, null, 'review does not manufacture a confirmation decision');
 
     const [semanticSession] = await db.select().from(spreadsheetSemanticSessionsTable).where(and(
