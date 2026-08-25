@@ -23,6 +23,8 @@ import {
   type SpreadsheetAIEnvelope,
   type SpreadsheetProviderAttempt,
   type SpreadsheetProviderResponseShapeFingerprint,
+  type SpreadsheetResponseCandidateState,
+  type SpreadsheetResponseOutputPartCategory,
   type SpreadsheetResponseShapeDiagnostic,
 } from './spreadsheet-understanding.js';
 import {
@@ -405,7 +407,57 @@ type ProviderResponseTerminalState = 'incomplete' | 'refusal' | 'empty';
 type ProviderResponseAdapterResult = {
   content: string;
   terminalState: ProviderResponseTerminalState | null;
+  observability: ProviderResponseObservability;
 };
+
+type ProviderResponseObservability = {
+  candidateState: SpreadsheetResponseCandidateState;
+  outputPartCategory: SpreadsheetResponseOutputPartCategory;
+};
+
+type ProviderResponseCandidateCollection = {
+  candidates: string[];
+  sawParsedValue: boolean;
+  sawTextCarrier: boolean;
+  sawNonWhitespaceText: boolean;
+  sawJsonCandidate: boolean;
+  sawResponsesOutputText: boolean;
+  sawResponsesRefusal: boolean;
+  sawResponsesOther: boolean;
+};
+
+function createProviderResponseCandidateCollection(): ProviderResponseCandidateCollection {
+  return {
+    candidates: [],
+    sawParsedValue: false,
+    sawTextCarrier: false,
+    sawNonWhitespaceText: false,
+    sawJsonCandidate: false,
+    sawResponsesOutputText: false,
+    sawResponsesRefusal: false,
+    sawResponsesOther: false,
+  };
+}
+
+function providerResponseObservability(collection: ProviderResponseCandidateCollection) {
+  const candidateState: SpreadsheetResponseCandidateState = collection.sawParsedValue
+    ? 'parsed_value'
+    : collection.sawJsonCandidate
+      ? 'json_candidate'
+      : collection.sawNonWhitespaceText
+        ? 'non_json_text'
+        : collection.sawTextCarrier
+          ? 'whitespace_only'
+          : 'no_candidate';
+  const outputPartCategory: SpreadsheetResponseOutputPartCategory = collection.sawResponsesRefusal
+    ? 'refusal'
+    : collection.sawResponsesOutputText
+      ? 'output_text'
+      : collection.sawResponsesOther
+        ? 'other'
+        : 'unavailable';
+  return { candidateState, outputPartCategory };
+}
 
 function isJsonDocument(value: string): boolean {
   try {
@@ -416,15 +468,24 @@ function isJsonDocument(value: string): boolean {
   }
 }
 
-function appendProviderTextCandidate(candidates: string[], value: unknown) {
+function appendProviderTextCandidate(collection: ProviderResponseCandidateCollection, value: unknown) {
   if (typeof value !== 'string') return;
-  const normalized = normalizeProviderJsonValue(value);
-  if (normalized) candidates.push(normalized);
+  collection.sawTextCarrier = true;
+  const normalized = normalizeProviderJsonText(value);
+  if (!normalized.trim()) return;
+  collection.sawNonWhitespaceText = true;
+  const candidate = normalizeProviderJsonValue(normalized);
+  if (!candidate) return;
+  if (isJsonDocument(candidate)) collection.sawJsonCandidate = true;
+  collection.candidates.push(candidate);
 }
 
-function appendProviderParsedCandidate(candidates: string[], value: unknown) {
+function appendProviderParsedCandidate(collection: ProviderResponseCandidateCollection, value: unknown) {
   const normalized = normalizeProviderJsonValue(value);
-  if (normalized) candidates.push(normalized);
+  if (normalized) {
+    collection.sawParsedValue = true;
+    collection.candidates.push(normalized);
+  }
 }
 
 function contentHasRefusal(content: unknown): boolean {
@@ -458,14 +519,34 @@ function managedResponsesTerminalState(response: Record<string, unknown>): Provi
   return null;
 }
 
-function collectContentCandidates(candidates: string[], content: unknown) {
+function observeResponsesContent(collection: ProviderResponseCandidateCollection, content: unknown) {
   if (typeof content === 'string') {
-    appendProviderTextCandidate(candidates, content);
+    collection.sawResponsesOther = true;
     return;
   }
   if (isProviderRecord(content)) {
-    if (Object.hasOwn(content, 'parsed')) appendProviderParsedCandidate(candidates, content.parsed);
-    appendProviderTextCandidate(candidates, content.text);
+    if (content.type === 'refusal' || typeof content.refusal === 'string') collection.sawResponsesRefusal = true;
+    else if (content.type === 'output_text') collection.sawResponsesOutputText = true;
+    else collection.sawResponsesOther = true;
+    return;
+  }
+  if (Array.isArray(content)) {
+    if (content.length === 0) {
+      collection.sawResponsesOther = true;
+      return;
+    }
+    for (const part of content) observeResponsesContent(collection, part);
+  }
+}
+
+function collectContentCandidates(collection: ProviderResponseCandidateCollection, content: unknown) {
+  if (typeof content === 'string') {
+    appendProviderTextCandidate(collection, content);
+    return;
+  }
+  if (isProviderRecord(content)) {
+    if (Object.hasOwn(content, 'parsed')) appendProviderParsedCandidate(collection, content.parsed);
+    appendProviderTextCandidate(collection, content.text);
     return;
   }
   if (Array.isArray(content)) {
@@ -473,39 +554,40 @@ function collectContentCandidates(candidates: string[], content: unknown) {
     for (const part of content) {
       if (typeof part === 'string') {
         textParts.push(part);
-        appendProviderTextCandidate(candidates, part);
+        appendProviderTextCandidate(collection, part);
         continue;
       }
       if (!isProviderRecord(part)) continue;
-      if (Object.hasOwn(part, 'parsed')) appendProviderParsedCandidate(candidates, part.parsed);
+      if (Object.hasOwn(part, 'parsed')) appendProviderParsedCandidate(collection, part.parsed);
       if (typeof part.text === 'string') {
         textParts.push(part.text);
-        appendProviderTextCandidate(candidates, part.text);
+        appendProviderTextCandidate(collection, part.text);
       }
     }
     // Responses can stream a single JSON document through more than one text
     // part. Preserve the individual candidates and also try their bounded,
     // same-message concatenation; never combine across provider messages.
-    if (textParts.length > 1) appendProviderTextCandidate(candidates, textParts.join(''));
+    if (textParts.length > 1) appendProviderTextCandidate(collection, textParts.join(''));
   }
 }
 
-function collectResponsesOutputCandidates(candidates: string[], output: unknown) {
+function collectResponsesOutputCandidates(collection: ProviderResponseCandidateCollection, output: unknown) {
   if (!Array.isArray(output)) return;
   for (const item of output) {
     if (!isProviderRecord(item)) continue;
-    if (Object.hasOwn(item, 'parsed')) appendProviderParsedCandidate(candidates, item.parsed);
-    collectContentCandidates(candidates, item.content);
+    observeResponsesContent(collection, item.content);
+    if (Object.hasOwn(item, 'parsed')) appendProviderParsedCandidate(collection, item.parsed);
+    collectContentCandidates(collection, item.content);
   }
 }
 
-function collectChatChoiceCandidates(candidates: string[], choices: unknown) {
+function collectChatChoiceCandidates(collection: ProviderResponseCandidateCollection, choices: unknown) {
   if (!Array.isArray(choices)) return;
   for (const choice of choices) {
     if (!isProviderRecord(choice) || !isProviderRecord(choice.message)) continue;
     const message = choice.message;
-    if (Object.hasOwn(message, 'parsed')) appendProviderParsedCandidate(candidates, message.parsed);
-    collectContentCandidates(candidates, message.content);
+    if (Object.hasOwn(message, 'parsed')) appendProviderParsedCandidate(collection, message.parsed);
+    collectContentCandidates(collection, message.content);
   }
 }
 
@@ -517,21 +599,25 @@ function collectChatChoiceCandidates(candidates: string[], choices: unknown) {
  */
 function adaptSpreadsheetProviderResponse(response: unknown): ProviderResponseAdapterResult {
   const responseRecord = isProviderRecord(response) ? response : null;
+  const collection = createProviderResponseCandidateCollection();
+  if (responseRecord && Object.hasOwn(responseRecord, 'output_parsed')) {
+    appendProviderParsedCandidate(collection, responseRecord.output_parsed);
+  }
+  if (responseRecord && Object.hasOwn(responseRecord, 'output_text')) {
+    appendProviderTextCandidate(collection, responseRecord.output_text);
+    if (typeof responseRecord.output_text === 'string') collection.sawResponsesOutputText = true;
+  }
+  if (responseRecord) collectResponsesOutputCandidates(collection, responseRecord.output);
+  if (responseRecord) collectChatChoiceCandidates(collection, responseRecord.choices);
   if (responseRecord) {
     const terminalState = managedResponsesTerminalState(responseRecord);
-    if (terminalState) return { content: '', terminalState };
+    if (terminalState) {
+      return { content: '', terminalState, observability: providerResponseObservability(collection) };
+    }
   }
 
-  const candidates: string[] = [];
-  if (responseRecord && Object.hasOwn(responseRecord, 'output_parsed')) {
-    appendProviderParsedCandidate(candidates, responseRecord.output_parsed);
-  }
-  if (responseRecord) appendProviderTextCandidate(candidates, responseRecord.output_text);
-  if (responseRecord) collectResponsesOutputCandidates(candidates, responseRecord.output);
-  if (responseRecord) collectChatChoiceCandidates(candidates, responseRecord.choices);
-
-  const content = candidates.find(isJsonDocument) ?? candidates[0] ?? '';
-  return { content, terminalState: content ? null : 'empty' };
+  const content = collection.candidates.find(isJsonDocument) ?? collection.candidates[0] ?? '';
+  return { content, terminalState: content ? null : 'empty', observability: providerResponseObservability(collection) };
 }
 
 /**
@@ -542,6 +628,13 @@ function adaptSpreadsheetProviderResponse(response: unknown): ProviderResponseAd
  */
 export function normalizeSpreadsheetProviderResponse(response: unknown): string {
   return adaptSpreadsheetProviderResponse(response).content;
+}
+
+export function classifySpreadsheetProviderResponse(response: unknown): {
+  candidateState: SpreadsheetResponseCandidateState;
+  outputPartCategory: SpreadsheetResponseOutputPartCategory;
+} {
+  return adaptSpreadsheetProviderResponse(response).observability;
 }
 
 type ProviderResponseFingerprintPath = SpreadsheetProviderResponseShapeFingerprint['containers'][number]['path'];
@@ -662,6 +755,7 @@ export async function providerCallWithTimeout(
     classifyResponse?: (
       content: string,
       responseShapeFingerprint: SpreadsheetProviderResponseShapeFingerprint,
+      responseObservability: ProviderResponseObservability,
     ) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'diagnostic'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
@@ -671,6 +765,7 @@ export async function providerCallWithTimeout(
   resolvedModel: string;
   responseMode: SpreadsheetProviderAttempt['responseMode'];
   responseShapeFingerprint: SpreadsheetProviderResponseShapeFingerprint;
+  responseObservability: ProviderResponseObservability;
 }> {
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
   const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
@@ -800,8 +895,13 @@ export async function providerCallWithTimeout(
             : { type: 'json_object' }) as never,
         }, requestOptions);
       const responseShapeFingerprint = fingerprintSpreadsheetProviderResponse(response);
-      const content = normalizeSpreadsheetProviderResponse(response);
-      const responseFailure = options.classifyResponse?.(content, responseShapeFingerprint);
+      const adaptedResponse = adaptSpreadsheetProviderResponse(response);
+      const content = adaptedResponse.content;
+      const responseFailure = options.classifyResponse?.(
+        content,
+        responseShapeFingerprint,
+        adaptedResponse.observability,
+      );
       await options.onAttempt?.({
         telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,
         attemptNumber: (options.attemptOffset ?? 0) + providerCalls,
@@ -819,7 +919,14 @@ export async function providerCallWithTimeout(
         failurePhase: responseFailure?.failurePhase ?? null,
         diagnostic: responseFailure?.diagnostic,
       });
-      return { content, providerCalls, resolvedModel, responseMode, responseShapeFingerprint };
+      return {
+        content,
+        providerCalls,
+        resolvedModel,
+        responseMode,
+        responseShapeFingerprint,
+        responseObservability: adaptedResponse.observability,
+      };
     } catch (caught) {
       const error = timedOut ? new Error(timeoutReason) : caught;
       lastError = error;
@@ -1526,6 +1633,7 @@ export function buildSpreadsheetResponseShapeDiagnostic(
     zodIssues?: readonly z.ZodIssue[];
     contractIssue?: ResponseDiagnosticIssueCode;
     providerResponseShapeFingerprint?: SpreadsheetProviderResponseShapeFingerprint;
+    responseObservability?: ProviderResponseObservability;
   } = {},
 ): SpreadsheetResponseShapeDiagnostic {
   const root = options.root ?? 'wire';
@@ -1638,6 +1746,8 @@ export function buildSpreadsheetResponseShapeDiagnostic(
     missingRequiredFields,
     unexpectedFields,
     providerResponseShapeFingerprint: options.providerResponseShapeFingerprint,
+    candidateState: options.responseObservability?.candidateState,
+    outputPartCategory: options.responseObservability?.outputPartCategory,
     issues,
     truncated,
   });
@@ -1671,6 +1781,7 @@ function responseContractFailure(
   workbook: SpreadsheetWorkbook,
   expectedContinuationToken?: string,
   providerResponseShapeFingerprint?: SpreadsheetProviderResponseShapeFingerprint,
+  responseObservability?: ProviderResponseObservability,
 ): ResponseContractFailure | null {
   const buildDiagnostic = (
     raw: unknown,
@@ -1683,6 +1794,7 @@ function responseContractFailure(
   ) => buildSpreadsheetResponseShapeDiagnostic(raw, validationStage, {
     ...options,
     providerResponseShapeFingerprint,
+    responseObservability,
   });
   if (!content.trim()) {
     return {
@@ -2004,8 +2116,14 @@ export async function analyseSpreadsheetWithAI(
           initialResponseMode: responseMode,
           routeClass: SPREADSHEET_PROVIDER_POLICY.routeClass,
           spreadsheetDirectOnly: true,
-          classifyResponse: (content, responseShapeFingerprint) => {
-            const failure = responseContractFailure(content, workbook, token, responseShapeFingerprint);
+          classifyResponse: (content, responseShapeFingerprint, responseObservability) => {
+            const failure = responseContractFailure(
+              content,
+              workbook,
+              token,
+              responseShapeFingerprint,
+              responseObservability,
+            );
             return failure
               ? {
                 outcomeCategory: 'contract_invalid',
@@ -2029,7 +2147,13 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         const responseContent = result.content;
-        const initialFailure = responseContractFailure(responseContent, workbook, token, result.responseShapeFingerprint);
+        const initialFailure = responseContractFailure(
+          responseContent,
+          workbook,
+          token,
+          result.responseShapeFingerprint,
+          result.responseObservability,
+        );
         if (initialFailure) {
           throw new SpreadsheetProviderFailure('response_contract_invalid');
         }

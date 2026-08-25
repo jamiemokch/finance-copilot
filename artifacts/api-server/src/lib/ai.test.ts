@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet } from './spreadsheet.js';
 import {
   analyseSpreadsheetWithAI,
+  classifySpreadsheetProviderResponse,
   detectColumnSchema,
   fingerprintSpreadsheetProviderResponse,
   normalizeSpreadsheetProviderResponse,
@@ -195,57 +196,81 @@ test('provider retry and timeout failures retain the actual attempt count', asyn
   );
 });
 
-test('provider adapter normalizes every supported non-empty structured output carrier before unchanged validation', async () => {
+test('provider adapter normalizes every supported carrier and returns only safe candidate classifications', async () => {
   const token = 'normalization-token';
   const wireResponse = { response: finalResponse(token, [semanticSheet('sheet_1', 'transactional')]) };
   const serialized = JSON.stringify(wireResponse);
-  const variants: unknown[] = [
-    { output_parsed: wireResponse },
-    { output_text: serialized },
-    { output_text: JSON.stringify(serialized) },
-    { output_text: `\`\`\`json\n${serialized}\n\`\`\`` },
+  const variants: Array<{
+    response: unknown;
+    candidateState: 'parsed_value' | 'json_candidate';
+    outputPartCategory: 'output_text' | 'unavailable';
+  }> = [
+    { response: { output_parsed: wireResponse }, candidateState: 'parsed_value', outputPartCategory: 'unavailable' },
+    { response: { output_text: serialized }, candidateState: 'json_candidate', outputPartCategory: 'output_text' },
+    { response: { output_text: JSON.stringify(serialized) }, candidateState: 'json_candidate', outputPartCategory: 'output_text' },
+    { response: { output_text: `\`\`\`json\n${serialized}\n\`\`\`` }, candidateState: 'json_candidate', outputPartCategory: 'output_text' },
     {
-      output_text: '   ',
-      output: [{
-        type: 'message',
-        parsed: wireResponse,
-        content: [],
-      }],
+      response: {
+        output_text: '   ',
+        output: [{
+          type: 'message',
+          parsed: wireResponse,
+          content: [],
+        }],
+      },
+      candidateState: 'parsed_value',
+      outputPartCategory: 'output_text',
     },
     {
-      output_text: 'not-json',
-      output: [{
-        type: 'reasoning',
-        content: [],
-      }, {
-        type: 'message',
-        content: [{ type: 'output_text', text: '  ' }, { type: 'output_text', parsed: wireResponse }],
-      }, {
-        type: 'message',
-        content: [{ type: 'output_text', text: serialized }],
-      }],
+      response: {
+        output_text: 'not-json',
+        output: [{
+          type: 'reasoning',
+          content: [],
+        }, {
+          type: 'message',
+          content: [{ type: 'output_text', text: '  ' }, { type: 'output_text', parsed: wireResponse }],
+        }, {
+          type: 'message',
+          content: [{ type: 'output_text', text: serialized }],
+        }],
+      },
+      candidateState: 'parsed_value',
+      outputPartCategory: 'output_text',
     },
     {
-      output: [{
-        type: 'message',
-        content: [
-          { type: 'output_text', text: serialized.slice(0, Math.floor(serialized.length / 2)) },
-          { type: 'output_text', text: serialized.slice(Math.floor(serialized.length / 2)) },
+      response: {
+        output: [{
+          type: 'message',
+          content: [
+            { type: 'output_text', text: serialized.slice(0, Math.floor(serialized.length / 2)) },
+            { type: 'output_text', text: serialized.slice(Math.floor(serialized.length / 2)) },
+          ],
+        }],
+      },
+      candidateState: 'json_candidate',
+      outputPartCategory: 'output_text',
+    },
+    { response: { choices: [{ message: { content: serialized } }] }, candidateState: 'json_candidate', outputPartCategory: 'unavailable' },
+    { response: { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] }, candidateState: 'json_candidate', outputPartCategory: 'unavailable' },
+    { response: { choices: [{ message: { content: null, parsed: wireResponse } }] }, candidateState: 'parsed_value', outputPartCategory: 'unavailable' },
+    {
+      response: {
+        choices: [
+          { message: { content: 'not-json' } },
+          { message: { content: [{ type: 'text', text: serialized }] } },
         ],
-      }],
-    },
-    { choices: [{ message: { content: serialized } }] },
-    { choices: [{ message: { content: [{ type: 'text', text: serialized }] } }] },
-    { choices: [{ message: { content: null, parsed: wireResponse } }] },
-    {
-      choices: [
-        { message: { content: 'not-json' } },
-        { message: { content: [{ type: 'text', text: serialized }] } },
-      ],
+      },
+      candidateState: 'json_candidate',
+      outputPartCategory: 'unavailable',
     },
   ];
   for (const variant of variants) {
-    assert.deepEqual(JSON.parse(normalizeSpreadsheetProviderResponse(variant)), wireResponse);
+    assert.deepEqual(JSON.parse(normalizeSpreadsheetProviderResponse(variant.response)), wireResponse);
+    assert.deepEqual(classifySpreadsheetProviderResponse(variant.response), {
+      candidateState: variant.candidateState,
+      outputPartCategory: variant.outputPartCategory,
+    });
   }
 
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,SDK normalization fixture,37\n'), 'text/csv', 'normalization.csv');
@@ -325,6 +350,53 @@ test('provider adapter keeps empty, refusal, and incomplete Responses terminal s
     });
     assert.equal(classifiedContent, '', terminal.name);
     assert.equal(responseCalls, 1, terminal.name);
+  }
+});
+
+test('response observability returns every finite state without retaining provider values', () => {
+  const providerText = 'provider-text-must-not-persist';
+  const workbookValue = 'workbook-value-must-not-persist';
+  const promptFragment = 'prompt-fragment-must-not-persist';
+  const credentialLikeValue = 'credential-like-value-must-not-persist';
+  const classifications = {
+    noCandidate: classifySpreadsheetProviderResponse({ id: 'response-id-must-not-persist' }),
+    whitespaceOnly: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: ' \n\t ' }] }],
+    }),
+    nonJsonText: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: providerText }] }],
+    }),
+    jsonCandidate: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ response: {} }) }] }],
+    }),
+    parsedValue: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'output_text', parsed: { workbookValue } }] }],
+    }),
+    refusal: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'refusal', refusal: promptFragment }] }],
+    }),
+    other: classifySpreadsheetProviderResponse({
+      output: [{ type: 'message', content: [{ type: 'reasoning', summary: credentialLikeValue }] }],
+    }),
+  };
+
+  assert.deepEqual(classifications.noCandidate, { candidateState: 'no_candidate', outputPartCategory: 'unavailable' });
+  assert.deepEqual(classifications.whitespaceOnly, { candidateState: 'whitespace_only', outputPartCategory: 'output_text' });
+  assert.deepEqual(classifications.nonJsonText, { candidateState: 'non_json_text', outputPartCategory: 'output_text' });
+  assert.deepEqual(classifications.jsonCandidate, { candidateState: 'json_candidate', outputPartCategory: 'output_text' });
+  assert.deepEqual(classifications.parsedValue, { candidateState: 'parsed_value', outputPartCategory: 'output_text' });
+  assert.deepEqual(classifications.refusal, { candidateState: 'no_candidate', outputPartCategory: 'refusal' });
+  assert.deepEqual(classifications.other, { candidateState: 'no_candidate', outputPartCategory: 'other' });
+
+  const serialized = JSON.stringify(classifications);
+  for (const forbidden of [
+    'response-id-must-not-persist',
+    providerText,
+    workbookValue,
+    promptFragment,
+    credentialLikeValue,
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
   }
 });
 
@@ -606,16 +678,33 @@ test('provider response fingerprints keep only allowlisted extraction shape meta
 
 test('unfixable provider text still produces the existing invalid-json contract failure', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Unfixable response fixture,41\n'), 'text/csv', 'unfixable-response.csv');
+  let responsesCalls = 0;
+  let chatCalls = 0;
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
-    client: directResponsesClient(() => ({
-      status: 'completed',
-      output_text: 'not-json',
-      output: [{ type: 'message', content: [{ type: 'output_text', text: 'not-json' }] }],
-    })),
+    client: (() => {
+      const client = directResponsesClient(() => {
+        responsesCalls += 1;
+        return {
+          status: 'completed',
+          output_text: 'not-json',
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'not-json' }] }],
+        };
+      });
+      (client.chat.completions.create as unknown as () => Promise<never>) = async () => {
+        chatCalls += 1;
+        throw new Error('Chat Completions fallback is forbidden');
+      };
+      return client;
+    })(),
   });
   const diagnostic = result.providerAttempts?.find((attempt) => attempt.outcomeCategory === 'contract_invalid')?.diagnostic;
   assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 1);
+  assert.equal(responsesCalls, 1);
+  assert.equal(chatCalls, 0);
   assert.equal(diagnostic?.validationStage, 'json_parse');
+  assert.equal(diagnostic?.candidateState, 'non_json_text');
+  assert.equal(diagnostic?.outputPartCategory, 'output_text');
   assert.ok(diagnostic?.issues.some((issue) => issue.code === 'invalid_json'));
   assert.deepEqual(diagnostic?.providerResponseShapeFingerprint?.containers.slice(0, 2), [
     {

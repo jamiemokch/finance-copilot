@@ -189,6 +189,23 @@ export const spreadsheetProviderResponseShapeFingerprintSchema = z.object({
 
 export type SpreadsheetProviderResponseShapeFingerprint = z.infer<typeof spreadsheetProviderResponseShapeFingerprintSchema>;
 
+export const spreadsheetResponseCandidateStateSchema = z.enum([
+  'no_candidate',
+  'whitespace_only',
+  'non_json_text',
+  'json_candidate',
+  'parsed_value',
+]);
+export type SpreadsheetResponseCandidateState = z.infer<typeof spreadsheetResponseCandidateStateSchema>;
+
+export const spreadsheetResponseOutputPartCategorySchema = z.enum([
+  'output_text',
+  'refusal',
+  'other',
+  'unavailable',
+]);
+export type SpreadsheetResponseOutputPartCategory = z.infer<typeof spreadsheetResponseOutputPartCategorySchema>;
+
 /**
  * A deliberately data-free description of an invalid structured-provider
  * response. It records only JSON shape and fixed validation classifications;
@@ -208,6 +225,8 @@ export const spreadsheetResponseShapeDiagnosticSchema = z.object({
     length: z.number().int().min(0).max(10_000),
     truncated: z.boolean(),
   }).strict()).max(48),
+  candidateState: spreadsheetResponseCandidateStateSchema.optional(),
+  outputPartCategory: spreadsheetResponseOutputPartCategorySchema.optional(),
   missingRequiredFields: z.array(z.string().max(512)).max(64),
   unexpectedFields: z.array(z.string().max(512)).max(64),
   providerResponseShapeFingerprint: spreadsheetProviderResponseShapeFingerprintSchema.optional(),
