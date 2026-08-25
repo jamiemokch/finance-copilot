@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Database,
   EyeOff,
+  Download,
   Loader2,
   Save,
   ShieldCheck,
@@ -13,6 +14,7 @@ import { Badge, Button, Card, Input, Textarea } from '@/components/ui';
 import {
   selfAssessmentApi,
   type APISelfAssessmentReadinessResponse,
+  type SelfAssessmentFilingPack,
 } from '@/lib/api';
 import { useStore } from '@/lib/store';
 import type { SelfAssessmentReadinessConcept } from '@workspace/api-client-react';
@@ -111,6 +113,8 @@ export default function SelfAssessmentReadiness() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<'identity' | 'sa100' | 'sa103s' | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [filingPack, setFilingPack] = useState<SelfAssessmentFilingPack | null>(null);
+  const [buildingPack, setBuildingPack] = useState(false);
 
   const [utr, setUtr] = useState('');
   const [nationalInsuranceNumber, setNationalInsuranceNumber] = useState('');
@@ -218,6 +222,30 @@ export default function SelfAssessmentReadiness() {
     } finally {
       setSaving(null);
     }
+  };
+
+  const buildPack = async () => {
+    if (!activeProfileId) return;
+    setBuildingPack(true);
+    setError(null);
+    try {
+      setFilingPack(await selfAssessmentApi.getFilingPack(activeProfileId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not build the filing workpaper.');
+    } finally {
+      setBuildingPack(false);
+    }
+  };
+
+  const downloadPack = () => {
+    if (!filingPack || !activeProfile) return;
+    const blob = new Blob([JSON.stringify(filingPack, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${activeProfile.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${filingPack.taxYear.replace('/', '-')}-sa103s-workpaper.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   if (loading && !data) {
@@ -352,6 +380,44 @@ export default function SelfAssessmentReadiness() {
         <ReadinessGroup title="Missing information" description="Required details that still need an answer." concepts={data.readiness.groups.missing} tone="missing" />
         <ReadinessGroup title="Needs your confirmation" description="Important statements we cannot safely infer." concepts={data.readiness.groups.needsConfirmation} tone="confirmation" />
       </section>
+
+      <Card className="p-6">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+          <div>
+            <h2 className="font-serif text-xl">Your tax filing workpaper</h2>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">One read-only check maps every saved record to its SA103S box, compares actual expenses with the trading allowance, and shows anything that still blocks filing.</p>
+          </div>
+          <Button onClick={() => void buildPack()} disabled={buildingPack}>
+            {buildingPack ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Check and build
+          </Button>
+        </div>
+        {filingPack && (
+          <div className="mt-5 space-y-5">
+            <div className={`rounded-lg border p-4 ${filingPack.filingReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
+              <p className="font-medium">{filingPack.filingReady ? 'Ready for final human filing review' : `${filingPack.blockers.length} item${filingPack.blockers.length === 1 ? '' : 's'} to resolve`}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{filingPack.disclaimer}</p>
+              {filingPack.blockers.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">{filingPack.blockers.map((blocker, index) => <li key={`${blocker.code}-${blocker.recordId ?? index}`}>{blocker.message}</li>)}</ul>}
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <Card className="p-4">
+                <p className="text-sm font-medium">Tax optimisation check</p>
+                <p className="mt-2 text-sm text-muted-foreground">{filingPack.decision.explanation}</p>
+                <p className="mt-2 text-xs text-amber-700">{filingPack.decision.warning}</p>
+              </Card>
+              <Card className="p-4">
+                <p className="text-sm font-medium">SA103S figures</p>
+                <p className="mt-2 text-sm">Box 20 expenses: {money(filingPack.calculated.box20TotalAllowableExpenses)}</p>
+                <p className="text-sm">Box 21 profit: {money(filingPack.calculated.box21NetProfit)}</p>
+                <p className="text-sm">Box 22 loss: {money(filingPack.calculated.box22NetLoss)}</p>
+              </Card>
+            </div>
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={downloadPack}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
+            </div>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

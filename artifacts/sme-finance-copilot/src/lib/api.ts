@@ -942,7 +942,29 @@ export const selfAssessmentApi = {
     }),
   getReadiness: (profileId: string) =>
     apiFetch<SelfAssessmentReadinessResponse>(`/profiles/${profileId}/self-assessment/readiness`),
+  getFilingPack: (profileId: string) =>
+    apiFetch<SelfAssessmentFilingPack>(`/profiles/${profileId}/self-assessment/filing-pack`),
 };
+
+export interface SelfAssessmentFilingPack {
+  schemaVersion: string;
+  artifactType: string;
+  disclaimer: string;
+  taxYear: string;
+  filingReady: boolean;
+  eligibility: { form: string; shortFormThreshold: number | null; status: 'eligible' | 'manual_review' };
+  decision: {
+    selectedMethod: null;
+    recommendedMethod: 'actual_expenses' | 'trading_allowance';
+    explanation: string;
+    warning: string;
+    scenarios: Array<{ method: string; deduction: number; taxableProfit: number }>;
+  };
+  boxes: Array<{ box: string; label: string; amount: number; records: Array<{ recordId: string; date: string; description: string; amount: number }> }>;
+  calculated: { box20TotalAllowableExpenses: number; box21NetProfit: number; box22NetLoss: number };
+  blockers: Array<{ code: string; recordId?: string; message: string }>;
+  trace: Array<Record<string, unknown>>;
+}
 
 // ── Decisions ─────────────────────────────────────────────────────────────────
 

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
+import { Link } from 'wouter';
 
 type TabId = 'todo' | 'reconciliation' | 'timeline';
 
@@ -644,7 +645,7 @@ function ReconciliationTab() {
 
 // ─── Year-End Tab ─────────────────────────────────────────────────────────────
 
-function YearEndTab() {
+function LegacyYearEndTab() {
   const { saChecklist, updateSAChecklistItem, inboxItems, evidenceItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems, plBreakdown } = useStore();
   const activeProfile = profiles.find(p => p.id === activeProfileId);
 
@@ -842,6 +843,22 @@ function YearEndTab() {
         </div>
       )}
     </div>
+  );
+}
+
+function YearEndTab() {
+  return (
+    <Card className="p-6 shadow-sm">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+        <div>
+          <h3 className="font-serif text-xl font-medium">Build your real tax filing workpaper</h3>
+          <p className="mt-1 max-w-xl text-sm text-muted-foreground">Review blockers, compare the trading allowance with actual expenses, map every saved record to its SA103S box, then download the traceable workpaper.</p>
+        </div>
+        <Link href="/tax-readiness" className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90">
+          Open tax return readiness
+        </Link>
+      </div>
+    </Card>
   );
 }
 

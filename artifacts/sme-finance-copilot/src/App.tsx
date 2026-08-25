@@ -95,7 +95,7 @@ function Router() {
           <Route path="/tasks" component={Tasks} />
           <Route path="/compliance" component={Tasks} />
           <Route path="/inbox" component={Tasks} />
-          <Route path="/year-end" component={Tasks} />
+          <Route path="/year-end" component={SelfAssessmentReadiness} />
           <Route path="/exceptions" component={Tasks} />
           <Route path="/copilot" component={Copilot} />
           <Route path="/settings" component={Settings} />

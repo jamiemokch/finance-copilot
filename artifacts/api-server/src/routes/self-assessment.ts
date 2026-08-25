@@ -13,6 +13,7 @@ import { decryptTaxIdentifier, encryptTaxIdentifier, maskTaxIdentifier } from '.
 import { getOrMigrateSa100Context, updateSa100Context } from '../lib/self-assessment-context.js';
 import { buildSelfAssessmentReadiness } from '../lib/self-assessment-readiness.js';
 import { summarizeTaxYearLedger } from '../lib/tax-year-ledger.js';
+import { buildTaxFilingPack } from '../lib/tax-filing-pack.js';
 
 const router = Router();
 const TaxYearSchema = z.string().regex(/^\d{4}\/\d{2}$/);
@@ -294,6 +295,43 @@ router.get('/profiles/:profileId/self-assessment/readiness', async (req, res): P
   } catch (err) {
     req.log.error(err, 'Failed to build Self Assessment readiness');
     res.status(500).json({ error: 'Could not load Self Assessment readiness' });
+  }
+});
+
+// GET /profiles/:profileId/self-assessment/filing-pack
+// Read-only and deterministic: building or downloading a preview never writes
+// transactions, inbox items, confirmations, or filing state.
+router.get('/profiles/:profileId/self-assessment/filing-pack', async (req, res): Promise<void> => {
+  if (!req.isAuthenticated()) { res.status(401).json({ error: 'Unauthorized' }); return; }
+  try {
+    const profile = await requireProfile(req.params.profileId as string, req.user.id);
+    if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
+    if (profile.type !== 'sole_trader') { res.status(422).json({ error: 'The Self Assessment filing pack is available for sole traders only' }); return; }
+    if (!profile.taxYear) { res.status(422).json({ error: 'Choose a tax year before building a filing pack' }); return; }
+    const [transactions, sa103s] = await Promise.all([
+      db.select().from(transactionsTable).where(and(
+        eq(transactionsTable.profileId, profile.id),
+        eq(transactionsTable.ledgerStatus, 'active'),
+      )),
+      businessContext(profile.id, profile.taxYear),
+    ]);
+    const pack = buildTaxFilingPack(transactions, {
+      profile: { id: profile.id, name: profile.name, accountingBasis: profile.accountingBasis },
+      taxYear: profile.taxYear,
+      businessDescription: sa103s?.businessDescription,
+      accountingPeriodConfirmed: sa103s?.accountingPeriodConfirmed,
+      recordsCompleteConfirmed: sa103s?.recordsCompleteConfirmed,
+      derivedFiguresReviewed: sa103s?.derivedFiguresReviewed,
+    });
+    if (req.query.download === '1') {
+      const safeName = profile.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'business';
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}-${profile.taxYear.replace('/', '-')}-sa103s-workpaper.json"`);
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    }
+    res.json(pack);
+  } catch (err) {
+    req.log.error({ err }, 'Failed to build Self Assessment filing pack');
+    res.status(500).json({ error: 'Could not build the filing pack' });
   }
 });
 
