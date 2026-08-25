@@ -174,6 +174,13 @@ test('structured SDK response variants normalize before the unchanged strict res
     { choices: [{ message: { content: null, parsed: wireResponse } }] },
     { output_text: serialized },
     { output_parsed: wireResponse },
+    {
+      output_text: null,
+      output: [{
+        type: 'message',
+        content: [{ type: 'output_text', text: serialized }],
+      }],
+    },
     { choices: [{ message: { content: JSON.stringify(serialized) } }] },
     { choices: [{ message: { content: `\`\`\`json\n${serialized}\n\`\`\`` } }] },
     { choices: [{ message: { content: wireResponse } }] },
@@ -203,6 +210,85 @@ test('structured SDK response variants normalize before the unchanged strict res
   });
   assert.equal(result.status, 'success');
   assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
+});
+
+test('managed Responses message output normalizes with an empty output_text without recording values', () => {
+  const structureOnlyPayload = { response: { fixture: 'structure-only' } };
+  const response = {
+    output_text: null,
+    output: [{
+      type: 'message',
+      unknownOutputField: 'must-not-persist',
+      content: [{
+        type: 'output_text',
+        text: JSON.stringify(structureOnlyPayload),
+        unknownContentField: 'must-not-persist',
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    JSON.parse(normalizeSpreadsheetProviderResponse(response)),
+    structureOnlyPayload,
+  );
+
+  const fingerprint = fingerprintSpreadsheetProviderResponse(response);
+  assert.deepEqual(
+    fingerprint.containers.filter((container) => container.path.startsWith('$.output')),
+    [
+      {
+        path: '$.output',
+        type: 'array',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [{ path: '$.output', length: 1, truncated: false }],
+      },
+      {
+        path: '$.output[0]',
+        type: 'object',
+        keys: ['content'],
+        valueTypes: [{ key: 'content', type: 'array' }],
+        arrayLengths: [{ path: '$.output[0].content', length: 1, truncated: false }],
+      },
+      {
+        path: '$.output[0].content',
+        type: 'array',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [{ path: '$.output[0].content', length: 1, truncated: false }],
+      },
+      {
+        path: '$.output[0].content[0]',
+        type: 'object',
+        keys: ['type', 'text'],
+        valueTypes: [{ key: 'type', type: 'string' }, { key: 'text', type: 'string' }],
+        arrayLengths: [],
+      },
+      {
+        path: '$.output_text',
+        type: 'null',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [],
+      },
+      {
+        path: '$.output_parsed',
+        type: 'not_available',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [],
+      },
+    ],
+  );
+  const serializedFingerprint = JSON.stringify(fingerprint);
+  for (const forbidden of [
+    'structure-only',
+    'must-not-persist',
+    'unknownOutputField',
+    'unknownContentField',
+  ]) {
+    assert.equal(serializedFingerprint.includes(forbidden), false);
+  }
 });
 
 test('provider response fingerprints keep only allowlisted extraction shape metadata', () => {
@@ -916,6 +1002,20 @@ test('managed provider normalizes full Responses envelopes for output_text and o
   const variants = [
     { name: 'output_text', response: completedResponsesEnvelope('responses-output-text', expected) },
     { name: 'output_parsed', response: completedResponsesEnvelope('responses-output-parsed', expected, expected) },
+    {
+      name: 'output_message_when_output_text_is_empty',
+      response: {
+        object: 'response',
+        status: 'completed',
+        output_text: null,
+        output: [{
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: JSON.stringify(expected) }],
+        }],
+      },
+    },
   ];
 
   for (const variant of variants) {

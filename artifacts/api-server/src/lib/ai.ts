@@ -350,6 +350,50 @@ function normalizeProviderJsonText(value: string): string {
   return normalized;
 }
 
+function normalizeProviderJsonValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = typeof value === 'string'
+    ? normalizeProviderJsonText(value)
+    : JSON.stringify(value);
+  return normalized.trim() ? normalized : null;
+}
+
+function normalizeResponsesOutput(output: unknown): string | null {
+  if (!Array.isArray(output)) return null;
+  for (const item of output) {
+    if (!isProviderRecord(item)) continue;
+    const itemParsed = Object.hasOwn(item, 'parsed') ? item.parsed : undefined;
+    const normalizedItemParsed = normalizeProviderJsonValue(itemParsed);
+    if (normalizedItemParsed) return normalizedItemParsed;
+
+    const content = item.content;
+    if (typeof content === 'string') {
+      const normalizedContent = normalizeProviderJsonValue(content);
+      if (normalizedContent) return normalizedContent;
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    const parsedPart = content.find((part) =>
+      isProviderRecord(part) && Object.hasOwn(part, 'parsed') && part.parsed !== null,
+    );
+    if (isProviderRecord(parsedPart)) {
+      const normalizedParsed = normalizeProviderJsonValue(parsedPart.parsed);
+      if (normalizedParsed) return normalizedParsed;
+    }
+    const textParts = content.flatMap((part) => {
+      if (typeof part === 'string') return [part];
+      if (isProviderRecord(part) && typeof part.text === 'string') return [part.text];
+      return [];
+    });
+    if (textParts.length > 0) {
+      const normalizedText = normalizeProviderJsonValue(textParts.join(''));
+      if (normalizedText) return normalizedText;
+    }
+  }
+  return null;
+}
+
 /**
  * Normalizes provider/SDK representation differences without interpreting or
  * repairing semantic content. The returned string is still subject to the
@@ -360,12 +404,15 @@ export function normalizeSpreadsheetProviderResponse(response: unknown): string 
   const outputParsed = responseRecord && Object.hasOwn(responseRecord, 'output_parsed')
     ? responseRecord.output_parsed
     : undefined;
-  if (outputParsed !== undefined) {
-    return typeof outputParsed === 'string' ? normalizeProviderJsonText(outputParsed) : JSON.stringify(outputParsed);
+  const normalizedOutputParsed = normalizeProviderJsonValue(outputParsed);
+  if (normalizedOutputParsed) {
+    return normalizedOutputParsed;
   }
   const outputText = responseRecord?.output_text;
-  if (typeof outputText === 'string') return normalizeProviderJsonText(outputText);
-  if (outputText !== undefined && outputText !== null) return JSON.stringify(outputText);
+  const normalizedOutputText = normalizeProviderJsonValue(outputText);
+  if (normalizedOutputText) return normalizedOutputText;
+  const normalizedResponsesOutput = normalizeResponsesOutput(responseRecord?.output);
+  if (normalizedResponsesOutput) return normalizedResponsesOutput;
   const choices = isProviderRecord(response) && Array.isArray(response.choices) ? response.choices : [];
   const firstChoice = isProviderRecord(choices[0]) ? choices[0] : null;
   const message = firstChoice && isProviderRecord(firstChoice.message) ? firstChoice.message : null;
@@ -448,14 +495,22 @@ export function fingerprintSpreadsheetProviderResponse(response: unknown): Sprea
   const content = messageRecord?.content;
   const contentPart = Array.isArray(content) ? content[0] : undefined;
   const parsed = messageRecord && Object.hasOwn(messageRecord, 'parsed') ? messageRecord.parsed : undefined;
+  const output = responseRecord?.output;
+  const outputItem = Array.isArray(output) ? output[0] : undefined;
+  const outputItemRecord = isProviderRecord(outputItem) ? outputItem : null;
+  const outputContent = outputItemRecord?.content;
+  const outputContentPart = Array.isArray(outputContent) ? outputContent[0] : undefined;
   const hasResponsesOutput = Boolean(responseRecord
-    && (Object.hasOwn(responseRecord, 'output_text') || Object.hasOwn(responseRecord, 'output_parsed')));
+    && (Object.hasOwn(responseRecord, 'output')
+      || Object.hasOwn(responseRecord, 'output_text')
+      || Object.hasOwn(responseRecord, 'output_parsed')));
 
   return {
     version: 'spreadsheet-provider-response-shape-fingerprint.v1',
     containers: [
-      fingerprintContainer('$', response, ['choices', 'output_text', 'output_parsed'], {
+      fingerprintContainer('$', response, ['choices', 'output', 'output_text', 'output_parsed'], {
         choices: '$.choices',
+        output: '$.output',
       }),
       fingerprintContainer('$.choices', choices),
       fingerprintContainer('$.choices[0]', firstChoice, ['message'], { message: '$.choices[0].message' }),
@@ -468,6 +523,12 @@ export function fingerprintSpreadsheetProviderResponse(response: unknown): Sprea
       fingerprintContainer('$.choices[0].message.parsed', parsed),
       ...(hasResponsesOutput
         ? [
+          fingerprintContainer('$.output', output),
+          fingerprintContainer('$.output[0]', outputItem, ['content', 'parsed'], {
+            content: '$.output[0].content',
+          }),
+          fingerprintContainer('$.output[0].content', outputContent, ['type', 'text', 'parsed']),
+          fingerprintContainer('$.output[0].content[0]', outputContentPart, ['type', 'text', 'parsed']),
           fingerprintContainer('$.output_text', responseRecord?.output_text),
           fingerprintContainer('$.output_parsed', responseRecord && Object.hasOwn(responseRecord, 'output_parsed')
             ? responseRecord.output_parsed

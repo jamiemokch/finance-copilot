@@ -137,6 +137,10 @@ const spreadsheetProviderResponseShapeFingerprintPath = z.enum([
   '$.choices[0].message.content',
   '$.choices[0].message.content[0]',
   '$.choices[0].message.parsed',
+  '$.output',
+  '$.output[0]',
+  '$.output[0].content',
+  '$.output[0].content[0]',
   '$.output_text',
   '$.output_parsed',
 ]);
@@ -147,6 +151,7 @@ const spreadsheetProviderResponseShapeFingerprintKey = z.enum([
   'parsed',
   'type',
   'text',
+  'output',
   'output_text',
   'output_parsed',
 ]);
@@ -179,7 +184,7 @@ export const spreadsheetProviderResponseShapeFingerprintSchema = z.object({
       length: z.number().int().min(0).max(10_000),
       truncated: z.boolean(),
     }).strict()).max(2),
-  }).strict()).max(9),
+  }).strict()).max(13),
 }).strict();
 
 export type SpreadsheetProviderResponseShapeFingerprint = z.infer<typeof spreadsheetProviderResponseShapeFingerprintSchema>;
