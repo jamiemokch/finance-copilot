@@ -129,6 +129,57 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
+const spreadsheetProviderResponseShapeFingerprintPath = z.enum([
+  '$',
+  '$.choices',
+  '$.choices[0]',
+  '$.choices[0].message',
+  '$.choices[0].message.content',
+  '$.choices[0].message.content[0]',
+  '$.choices[0].message.parsed',
+]);
+const spreadsheetProviderResponseShapeFingerprintKey = z.enum([
+  'choices',
+  'message',
+  'content',
+  'parsed',
+  'type',
+  'text',
+]);
+const spreadsheetProviderResponseShapeFingerprintType = z.enum([
+  'not_available',
+  'null',
+  'boolean',
+  'number',
+  'string',
+  'array',
+  'object',
+]);
+
+/**
+ * A fixed-path, data-free fingerprint of the provider/SDK response envelope.
+ * Unknown keys and all scalar values are intentionally excluded.
+ */
+export const spreadsheetProviderResponseShapeFingerprintSchema = z.object({
+  version: z.literal('spreadsheet-provider-response-shape-fingerprint.v1'),
+  containers: z.array(z.object({
+    path: spreadsheetProviderResponseShapeFingerprintPath,
+    type: spreadsheetProviderResponseShapeFingerprintType,
+    keys: z.array(spreadsheetProviderResponseShapeFingerprintKey).max(6),
+    valueTypes: z.array(z.object({
+      key: spreadsheetProviderResponseShapeFingerprintKey,
+      type: spreadsheetProviderResponseShapeFingerprintType,
+    }).strict()).max(6),
+    arrayLengths: z.array(z.object({
+      path: spreadsheetProviderResponseShapeFingerprintPath,
+      length: z.number().int().min(0).max(10_000),
+      truncated: z.boolean(),
+    }).strict()).max(2),
+  }).strict()).max(7),
+}).strict();
+
+export type SpreadsheetProviderResponseShapeFingerprint = z.infer<typeof spreadsheetProviderResponseShapeFingerprintSchema>;
+
 /**
  * A deliberately data-free description of an invalid structured-provider
  * response. It records only JSON shape and fixed validation classifications;
@@ -150,6 +201,7 @@ export const spreadsheetResponseShapeDiagnosticSchema = z.object({
   }).strict()).max(48),
   missingRequiredFields: z.array(z.string().max(512)).max(64),
   unexpectedFields: z.array(z.string().max(512)).max(64),
+  providerResponseShapeFingerprint: spreadsheetProviderResponseShapeFingerprintSchema.optional(),
   issues: z.array(z.object({
     path: z.string().max(512),
     code: z.enum([

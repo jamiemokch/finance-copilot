@@ -21,6 +21,7 @@ import {
   type SpreadsheetUnderstandingProposal,
   type SpreadsheetAIEnvelope,
   type SpreadsheetProviderAttempt,
+  type SpreadsheetProviderResponseShapeFingerprint,
   type SpreadsheetResponseShapeDiagnostic,
 } from './spreadsheet-understanding.js';
 import {
@@ -380,6 +381,81 @@ export function normalizeSpreadsheetProviderResponse(response: unknown): string 
   return '';
 }
 
+type ProviderResponseFingerprintPath = SpreadsheetProviderResponseShapeFingerprint['containers'][number]['path'];
+type ProviderResponseFingerprintKey = SpreadsheetProviderResponseShapeFingerprint['containers'][number]['keys'][number];
+type ProviderResponseFingerprintContainer = SpreadsheetProviderResponseShapeFingerprint['containers'][number];
+
+function providerResponseFingerprintType(value: unknown): ProviderResponseFingerprintContainer['type'] {
+  return value === undefined ? 'not_available' : diagnosticValueType(value);
+}
+
+function fingerprintContainer(
+  path: ProviderResponseFingerprintPath,
+  value: unknown,
+  allowedKeys: readonly ProviderResponseFingerprintKey[] = [],
+  arrayChildPaths: Partial<Record<ProviderResponseFingerprintKey, ProviderResponseFingerprintPath>> = {},
+): ProviderResponseFingerprintContainer {
+  const record = isProviderRecord(value) ? value : null;
+  const keys = record
+    ? allowedKeys.filter((key) => Object.hasOwn(record, key))
+    : [];
+  const valueTypes = record
+    ? keys.map((key) => ({ key, type: providerResponseFingerprintType(record[key]) }))
+    : [];
+  const arrayLengths: ProviderResponseFingerprintContainer['arrayLengths'] = [];
+  if (Array.isArray(value)) {
+    arrayLengths.push({
+      path,
+      length: Math.min(value.length, 10_000),
+      truncated: value.length > 10_000,
+    });
+  }
+  for (const key of keys) {
+    const childPath = arrayChildPaths[key];
+    if (childPath && Array.isArray(record?.[key])) {
+      const child = record[key] as unknown[];
+      arrayLengths.push({
+        path: childPath,
+        length: Math.min(child.length, 10_000),
+        truncated: child.length > 10_000,
+      });
+    }
+  }
+  return { path, type: providerResponseFingerprintType(value), keys, valueTypes, arrayLengths };
+}
+
+/**
+ * Captures only the fixed extraction envelope shape. Key names outside the
+ * allowlist are omitted, and no scalar or structured value is copied out.
+ */
+export function fingerprintSpreadsheetProviderResponse(response: unknown): SpreadsheetProviderResponseShapeFingerprint {
+  const responseRecord = isProviderRecord(response) ? response : null;
+  const choices = responseRecord?.choices;
+  const firstChoice = Array.isArray(choices) ? choices[0] : undefined;
+  const choiceRecord = isProviderRecord(firstChoice) ? firstChoice : null;
+  const message = choiceRecord?.message;
+  const messageRecord = isProviderRecord(message) ? message : null;
+  const content = messageRecord?.content;
+  const contentPart = Array.isArray(content) ? content[0] : undefined;
+  const parsed = messageRecord && Object.hasOwn(messageRecord, 'parsed') ? messageRecord.parsed : undefined;
+
+  return {
+    version: 'spreadsheet-provider-response-shape-fingerprint.v1',
+    containers: [
+      fingerprintContainer('$', response, ['choices'], { choices: '$.choices' }),
+      fingerprintContainer('$.choices', choices),
+      fingerprintContainer('$.choices[0]', firstChoice, ['message'], { message: '$.choices[0].message' }),
+      fingerprintContainer('$.choices[0].message', message, ['content', 'parsed'], {
+        content: '$.choices[0].message.content',
+        parsed: '$.choices[0].message.parsed',
+      }),
+      fingerprintContainer('$.choices[0].message.content', content, ['type', 'text']),
+      fingerprintContainer('$.choices[0].message.content[0]', contentPart, ['type', 'text']),
+      fingerprintContainer('$.choices[0].message.parsed', parsed),
+    ],
+  };
+}
+
 export async function providerCallWithTimeout(
   client: OpenAI,
   payload: string,
@@ -393,7 +469,10 @@ export async function providerCallWithTimeout(
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
     allowJsonObjectFallback?: boolean;
     timeoutReason?: 'timeout' | 'review_deadline';
-    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'diagnostic'> | null;
+    classifyResponse?: (
+      content: string,
+      responseShapeFingerprint: SpreadsheetProviderResponseShapeFingerprint,
+    ) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'diagnostic'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
 ): Promise<{
@@ -401,6 +480,7 @@ export async function providerCallWithTimeout(
   providerCalls: number;
   resolvedModel: string;
   responseMode: SpreadsheetProviderAttempt['responseMode'];
+  responseShapeFingerprint: SpreadsheetProviderResponseShapeFingerprint;
 }> {
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
   const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
@@ -490,8 +570,9 @@ export async function providerCallWithTimeout(
           // SDK create invisible additional provider work underneath that cap.
           maxRetries: 0,
         } as never);
+      const responseShapeFingerprint = fingerprintSpreadsheetProviderResponse(response);
       const content = normalizeSpreadsheetProviderResponse(response);
-      const responseFailure = options.classifyResponse?.(content);
+      const responseFailure = options.classifyResponse?.(content, responseShapeFingerprint);
       await options.onAttempt?.({
         telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,
         attemptNumber: (options.attemptOffset ?? 0) + providerCalls,
@@ -509,7 +590,7 @@ export async function providerCallWithTimeout(
         failurePhase: responseFailure?.failurePhase ?? null,
         diagnostic: responseFailure?.diagnostic,
       });
-      return { content, providerCalls, resolvedModel, responseMode };
+      return { content, providerCalls, resolvedModel, responseMode, responseShapeFingerprint };
     } catch (caught) {
       const error = timedOut ? new Error(timeoutReason) : caught;
       lastError = error;
@@ -1204,6 +1285,7 @@ export function buildSpreadsheetResponseShapeDiagnostic(
     root?: ResponseDiagnosticRoot;
     zodIssues?: readonly z.ZodIssue[];
     contractIssue?: ResponseDiagnosticIssueCode;
+    providerResponseShapeFingerprint?: SpreadsheetProviderResponseShapeFingerprint;
   } = {},
 ): SpreadsheetResponseShapeDiagnostic {
   const root = options.root ?? 'wire';
@@ -1315,6 +1397,7 @@ export function buildSpreadsheetResponseShapeDiagnostic(
     arrayLengths,
     missingRequiredFields,
     unexpectedFields,
+    providerResponseShapeFingerprint: options.providerResponseShapeFingerprint,
     issues,
     truncated,
   });
@@ -1346,11 +1429,24 @@ function responseContractFailure(
   content: string,
   workbook: SpreadsheetWorkbook,
   expectedContinuationToken?: string,
+  providerResponseShapeFingerprint?: SpreadsheetProviderResponseShapeFingerprint,
 ): ResponseContractFailure | null {
+  const buildDiagnostic = (
+    raw: unknown,
+    validationStage: ResponseDiagnosticStage,
+    options: {
+      root?: ResponseDiagnosticRoot;
+      zodIssues?: readonly z.ZodIssue[];
+      contractIssue?: ResponseDiagnosticIssueCode;
+    } = {},
+  ) => buildSpreadsheetResponseShapeDiagnostic(raw, validationStage, {
+    ...options,
+    providerResponseShapeFingerprint,
+  });
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
     return {
       reason: 'response_too_large',
-      diagnostic: buildSpreadsheetResponseShapeDiagnostic(undefined, 'transport_envelope', { contractIssue: 'response_too_large' }),
+      diagnostic: buildDiagnostic(undefined, 'transport_envelope', { contractIssue: 'response_too_large' }),
     };
   }
   let raw: unknown;
@@ -1359,7 +1455,7 @@ function responseContractFailure(
   } catch {
     return {
       reason: 'schema_invalid',
-      diagnostic: buildSpreadsheetResponseShapeDiagnostic(undefined, 'json_parse', { contractIssue: 'invalid_json' }),
+      diagnostic: buildDiagnostic(undefined, 'json_parse', { contractIssue: 'invalid_json' }),
     };
   }
   const wire = spreadsheetAIProviderWireResponseSchema.safeParse(raw);
@@ -1372,7 +1468,7 @@ function responseContractFailure(
     const failedSchema = diagnosticRoot === 'legacy_response' && legacy ? legacy : wire;
     return {
       reason: 'schema_invalid',
-      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+      diagnostic: buildDiagnostic(raw, 'transport_envelope', {
         root: diagnosticRoot,
         zodIssues: failedSchema.error.issues,
         contractIssue: 'contract_invalid',
@@ -1387,7 +1483,7 @@ function responseContractFailure(
   if (!parsed) {
     return {
       reason: 'schema_invalid',
-      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+      diagnostic: buildDiagnostic(raw, 'transport_envelope', {
         root: diagnosticRoot,
         contractIssue: 'contract_invalid',
       }),
@@ -1399,7 +1495,7 @@ function responseContractFailure(
       if (!parsed.request) {
         return {
           reason: 'schema_invalid',
-          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+          diagnostic: buildDiagnostic(raw, 'transport_envelope', {
             root: rootForParsed,
             contractIssue: 'contract_invalid',
           }),
@@ -1408,7 +1504,7 @@ function responseContractFailure(
       if (expectedContinuationToken && parsed.request.continuationToken !== expectedContinuationToken) {
         return {
           reason: 'continuation_invalid',
-          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'continuation', {
+          diagnostic: buildDiagnostic(raw, 'continuation', {
             root: rootForParsed,
             contractIssue: 'continuation_invalid',
           }),
@@ -1419,7 +1515,7 @@ function responseContractFailure(
       if (!parsed.plan) {
         return {
           reason: 'schema_invalid',
-          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'transport_envelope', {
+          diagnostic: buildDiagnostic(raw, 'transport_envelope', {
             root: rootForParsed,
             contractIssue: 'contract_invalid',
           }),
@@ -1428,7 +1524,7 @@ function responseContractFailure(
       if (expectedContinuationToken && parsed.plan.continuationToken !== expectedContinuationToken) {
         return {
           reason: 'continuation_invalid',
-          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'continuation', {
+          diagnostic: buildDiagnostic(raw, 'continuation', {
             root: rootForParsed,
             contractIssue: 'continuation_invalid',
           }),
@@ -1438,7 +1534,7 @@ function responseContractFailure(
       if (planError) {
         return {
           reason: planError,
-          diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'semantic_plan', {
+          diagnostic: buildDiagnostic(raw, 'semantic_plan', {
             root: rootForParsed,
             contractIssue: 'semantic_plan_invalid',
           }),
@@ -1449,7 +1545,7 @@ function responseContractFailure(
   } catch {
     return {
       reason: 'contract_invalid',
-      diagnostic: buildSpreadsheetResponseShapeDiagnostic(raw, 'parser_bounds', {
+      diagnostic: buildDiagnostic(raw, 'parser_bounds', {
         root: rootForParsed,
         contractIssue: 'parser_bounds_invalid',
       }),
@@ -1683,8 +1779,8 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => {
-            const failure = responseContractFailure(content, workbook, token);
+          classifyResponse: (content, responseShapeFingerprint) => {
+            const failure = responseContractFailure(content, workbook, token, responseShapeFingerprint);
             return failure
               ? {
                 outcomeCategory: 'contract_invalid',
@@ -1708,7 +1804,7 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        const initialFailure = responseContractFailure(responseContent, workbook, token);
+        const initialFailure = responseContractFailure(responseContent, workbook, token, result.responseShapeFingerprint);
         if (initialFailure) {
           const repairPayload = repairPayloadForContract(responseContent);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
@@ -1719,8 +1815,8 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => {
-              const failure = responseContractFailure(content, workbook, token);
+            classifyResponse: (content, responseShapeFingerprint) => {
+              const failure = responseContractFailure(content, workbook, token, responseShapeFingerprint);
               return failure
                 ? {
                   outcomeCategory: 'contract_invalid',
@@ -1738,7 +1834,7 @@ export async function analyseSpreadsheetWithAI(
           providerCalls += repaired.providerCalls;
           resolvedModel = repaired.resolvedModel;
           responseMode = repaired.responseMode;
-          const repairedFailure = responseContractFailure(repaired.content, workbook, token);
+          const repairedFailure = responseContractFailure(repaired.content, workbook, token, repaired.responseShapeFingerprint);
           if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls || repairedFailure) throw new Error('schema_invalid');
           responseContent = repaired.content;
         }

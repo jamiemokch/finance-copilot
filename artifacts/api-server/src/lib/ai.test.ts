@@ -6,6 +6,7 @@ import { analyseSpreadsheet, analyseSpreadsheetStructure, inspectSpreadsheet } f
 import {
   analyseSpreadsheetWithAI,
   detectColumnSchema,
+  fingerprintSpreadsheetProviderResponse,
   normalizeSpreadsheetProviderResponse,
   providerCallWithTimeout,
   resetManagedSpreadsheetProviderPolicyForTests,
@@ -168,6 +169,100 @@ test('structured SDK response variants normalize before the unchanged strict res
   assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
 });
 
+test('provider response fingerprints keep only allowlisted extraction shape metadata', () => {
+  const response = {
+    id: 'provider-response-id-must-not-persist',
+    usage: { prompt_tokens: 901 },
+    choices: [{
+      unknownChoiceKey: 'must-not-persist',
+      message: {
+        unknownMessageKey: 'must-not-persist',
+        content: [{
+          type: 'text',
+          text: 'provider-text-must-not-persist',
+          unknownContentKey: 'must-not-persist',
+        }, {
+          type: 'text',
+          text: 'second-provider-text-must-not-persist',
+        }],
+        parsed: {
+          secret: 'parsed-value-must-not-persist',
+          amount: 12345,
+        },
+      },
+    }],
+  };
+  const fingerprint = fingerprintSpreadsheetProviderResponse(response);
+  assert.deepEqual(fingerprint, {
+    version: 'spreadsheet-provider-response-shape-fingerprint.v1',
+    containers: [
+      {
+        path: '$',
+        type: 'object',
+        keys: ['choices'],
+        valueTypes: [{ key: 'choices', type: 'array' }],
+        arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+      },
+      {
+        path: '$.choices',
+        type: 'array',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+      },
+      {
+        path: '$.choices[0]',
+        type: 'object',
+        keys: ['message'],
+        valueTypes: [{ key: 'message', type: 'object' }],
+        arrayLengths: [],
+      },
+      {
+        path: '$.choices[0].message',
+        type: 'object',
+        keys: ['content', 'parsed'],
+        valueTypes: [{ key: 'content', type: 'array' }, { key: 'parsed', type: 'object' }],
+        arrayLengths: [{ path: '$.choices[0].message.content', length: 2, truncated: false }],
+      },
+      {
+        path: '$.choices[0].message.content',
+        type: 'array',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [{ path: '$.choices[0].message.content', length: 2, truncated: false }],
+      },
+      {
+        path: '$.choices[0].message.content[0]',
+        type: 'object',
+        keys: ['type', 'text'],
+        valueTypes: [{ key: 'type', type: 'string' }, { key: 'text', type: 'string' }],
+        arrayLengths: [],
+      },
+      {
+        path: '$.choices[0].message.parsed',
+        type: 'object',
+        keys: [],
+        valueTypes: [],
+        arrayLengths: [],
+      },
+    ],
+  });
+  const serialized = JSON.stringify(fingerprint);
+  for (const forbidden of [
+    'provider-response-id-must-not-persist',
+    'provider-text-must-not-persist',
+    'second-provider-text-must-not-persist',
+    'parsed-value-must-not-persist',
+    'unknownChoiceKey',
+    'unknownMessageKey',
+    'unknownContentKey',
+    'secret',
+    'amount',
+  ]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
 test('unfixable provider text still produces the existing invalid-json contract failure', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Unfixable response fixture,41\n'), 'text/csv', 'unfixable-response.csv');
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), {
@@ -180,6 +275,23 @@ test('unfixable provider text still produces the existing invalid-json contract 
   assert.equal(result.status, 'failed');
   assert.equal(diagnostic?.validationStage, 'json_parse');
   assert.ok(diagnostic?.issues.some((issue) => issue.code === 'invalid_json'));
+  assert.deepEqual(diagnostic?.providerResponseShapeFingerprint?.containers.slice(0, 2), [
+    {
+      path: '$',
+      type: 'object',
+      keys: ['choices'],
+      valueTypes: [{ key: 'choices', type: 'array' }],
+      arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+    },
+    {
+      path: '$.choices',
+      type: 'array',
+      keys: [],
+      valueTypes: [],
+      arrayLengths: [{ path: '$.choices', length: 1, truncated: false }],
+    },
+  ]);
+  assert.equal(JSON.stringify(diagnostic?.providerResponseShapeFingerprint).includes('not-json'), false);
 });
 
 test('a provider timeout aborts the upstream request and records one bounded attempt', async () => {
