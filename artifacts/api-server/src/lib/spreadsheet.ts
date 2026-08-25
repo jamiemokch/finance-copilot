@@ -457,7 +457,7 @@ function rowPrimary(
   else if (row.values.every((cell) => !normaliseCell(cell))) { primaryDisposition = 'blank'; reason = row.hasStyle ? 'Blank row retained because it has formatting.' : 'Blank source row.'; }
   else if (rowPrimaryHeader(row)) { primaryDisposition = 'header'; reason = 'Header or title row retained outside the transaction range.'; }
   else if (looksLikeBalanceRow(row.values)) { primaryDisposition = 'balance_total'; reason = 'Balance, subtotal, opening, closing, or total row is not a transaction.'; secondaryFindings.push('balance_total'); }
-  else if (mapping.columns.date === undefined || (mapping.columns.amount === undefined && (mapping.columns.debit === undefined || mapping.columns.credit === undefined)) || (mapping.columns.description === undefined && mapping.columns.category === undefined)) {
+  else if (mapping.columns.date === undefined || (mapping.columns.amount === undefined && mapping.columns.debit === undefined && mapping.columns.credit === undefined) || (mapping.columns.description === undefined && mapping.columns.category === undefined)) {
     primaryDisposition = 'unmapped'; reason = 'A required transaction field is not mapped.';
   } else if (!date || amount === null || !description) {
     primaryDisposition = 'invalid'; reason = 'Required date, amount, or description could not be normalized.';
@@ -517,7 +517,7 @@ export function analyseSpreadsheet(
       : classifySheet(sheet, mapping);
     const isSelected = explicitlySelected ? explicitlySelected.has(sheet.sheetId) : classification.role === 'transactional' && !classification.reviewRequired;
     const hasRequired = mapping.columns.date !== undefined &&
-      (mapping.columns.amount !== undefined || (mapping.columns.debit !== undefined && mapping.columns.credit !== undefined)) &&
+      (mapping.columns.amount !== undefined || mapping.columns.debit !== undefined || mapping.columns.credit !== undefined) &&
       (mapping.columns.description !== undefined || mapping.columns.category !== undefined);
     const role = roleOverrides[sheet.sheetId] ?? classification.role;
     const disposition: SheetDisposition = options.semanticMode === 'structural' ? 'not_analysed' :

@@ -126,6 +126,80 @@ test('deterministic review keeps selected sheets and editable column suggestions
   assert.equal(manuallyCorrected.sheets[0]?.rows.filter((row) => row.primaryDisposition === 'imported').length, 2);
 });
 
+test('deterministic review accepts amount-only, debit-only, credit-only, and paired money mappings', () => {
+  const workbook = inspectSpreadsheet(Buffer.from([
+    'Date,Description,Amount,Debit,Credit',
+    '06/04/2025,Movement,125.00,10.00,25.00',
+  ].join('\n')), 'text/csv', 'money-mapping-shapes.csv');
+  const review = (columns: SpreadsheetMapping['columns']) => analyseSpreadsheet(workbook, {
+    selectedSheetIds: ['sheet_1'],
+    roleOverrides: { sheet_1: 'transactional' },
+    sheetMappings: { sheet_1: { headerRow: 0, columns } },
+    decisionSource: 'user',
+  }).sheets[0]!;
+
+  for (const columns of [
+    { date: 0, description: 1, amount: 2 },
+    { date: 0, description: 1, debit: 3 },
+    { date: 0, description: 1, credit: 4 },
+    { date: 0, description: 1, debit: 3, credit: 4 },
+  ]) {
+    const sheet = review(columns);
+    assert.equal(sheet.disposition, 'processed');
+    assert.equal(sheet.rows[1]?.primaryDisposition, 'imported');
+  }
+
+  const noMoney = review({ date: 0, description: 1 });
+  assert.equal(noMoney.disposition, 'blocked_invalid_mapping');
+  assert.equal(noMoney.rows[1]?.primaryDisposition, 'unmapped');
+});
+
+test('one-sided debit and credit mappings preserve the existing signed direction semantics', () => {
+  const row = ['06/04/2025', 'Movement', '125.00', '10.00', '25.00'];
+  assert.equal(mapSpreadsheetRow(row, { columns: { date: 0, description: 1, debit: 3 } }).amount, -10);
+  assert.equal(mapSpreadsheetRow(row, { columns: { date: 0, description: 1, credit: 4 } }).amount, 25);
+});
+
+test('the three selected bank-sheet mapping shapes are eligible for deterministic projection', () => {
+  const workbookSource = XLSX.utils.book_new();
+  const addBankSheet = (name: string, descriptionColumn: number, balanceColumn: number, creditColumn: number) => {
+    const headers = Array.from({ length: 16 }, (_, index) => `Column ${index + 1}`);
+    headers[0] = 'Date';
+    headers[descriptionColumn] = 'Description';
+    headers[balanceColumn] = 'Balance';
+    headers[creditColumn] = 'Credit';
+    const movement = Array.from({ length: 16 }, () => '');
+    movement[0] = '06/04/2025';
+    movement[descriptionColumn] = `${name} movement`;
+    movement[balanceColumn] = '100.00';
+    movement[creditColumn] = '25.00';
+    XLSX.utils.book_append_sheet(workbookSource, XLSX.utils.aoa_to_sheet([headers, movement]), name);
+  };
+  addBankSheet('Bank C.A.', 5, 7, 14);
+  addBankSheet('Bank S.A.', 5, 7, 15);
+  addBankSheet("Director's current", 4, 6, 13);
+  const workbook = inspectSpreadsheet(
+    XLSX.write(workbookSource, { type: 'buffer', bookType: 'xlsx' }),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'bank-shapes.xlsx',
+  );
+  const mappings = [
+    { sheetId: 'sheet_1', columns: { date: 0, credit: 14, balance: 7, description: 5 } },
+    { sheetId: 'sheet_2', columns: { date: 0, credit: 15, balance: 7, description: 5 } },
+    { sheetId: 'sheet_3', columns: { date: 0, credit: 13, balance: 6, description: 4 } },
+  ];
+  for (const { sheetId, columns } of mappings) {
+    const sheet = analyseSpreadsheet(workbook, {
+      selectedSheetIds: ['sheet_1', 'sheet_2', 'sheet_3'],
+      roleOverrides: { sheet_1: 'transactional', sheet_2: 'transactional', sheet_3: 'transactional' },
+      sheetMappings: { [sheetId]: { headerRow: 0, columns } },
+      decisionSource: 'deterministic',
+    }).sheets.find((candidate) => candidate.sheetId === sheetId)!;
+    assert.equal(sheet.disposition, 'processed');
+    assert.equal(sheet.rows[1]?.primaryDisposition, 'imported');
+  }
+});
+
 test('the exact 17-sheet Yatson workbook keeps references hidden and proposes only structured money sheets', () => {
   const workbook = XLSX.utils.book_new();
   for (const name of ['Master data', 'Query', 'FS', 'TB', 'Queries']) {
