@@ -1,0 +1,554 @@
+From e23540412d68e3db91e889e634ecbb3ab9d50f31 Mon Sep 17 00:00:00 2001
+From: Jamie <jamie@JamiedeMacBook-Pro.local>
+Date: Tue, 25 Aug 2026 22:54:37 +0100
+Subject: [PATCH 2/2] Build traceable SA103S filing workpaper
+
+---
+ .../src/lib/tax-filing-pack.test.ts           |  54 ++++++
+ .../api-server/src/lib/tax-filing-pack.ts     | 158 ++++++++++++++++++
+ .../api-server/src/routes/self-assessment.ts  |  40 ++++-
+ artifacts/sme-finance-copilot/src/App.tsx     |   2 +-
+ artifacts/sme-finance-copilot/src/lib/api.ts  |  22 +++
+ .../src/pages/self-assessment-readiness.tsx   |  68 +++++++-
+ .../sme-finance-copilot/src/pages/tasks.tsx   |  19 ++-
+ docs/BACKBONE_AUDIT.md                        |  47 ++++++
+ 8 files changed, 406 insertions(+), 4 deletions(-)
+ create mode 100644 artifacts/api-server/src/lib/tax-filing-pack.test.ts
+ create mode 100644 artifacts/api-server/src/lib/tax-filing-pack.ts
+ create mode 100644 docs/BACKBONE_AUDIT.md
+
+diff --git a/artifacts/api-server/src/lib/tax-filing-pack.test.ts b/artifacts/api-server/src/lib/tax-filing-pack.test.ts
+new file mode 100644
+index 0000000..deb2cab
+--- /dev/null
++++ b/artifacts/api-server/src/lib/tax-filing-pack.test.ts
+@@ -0,0 +1,54 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import type { Transaction } from '@workspace/db';
++import { buildTaxFilingPack } from './tax-filing-pack.js';
++
++const tx = (overrides: Partial<Transaction>): Transaction => ({
++  id: crypto.randomUUID(), profileId: 'profile-1', date: '2025-08-01', description: 'Record', amount: 0,
++  recordType: 'expense', note: null, category: 'other', taxTreatment: 'deductible', source: 'manual', evidenceId: null,
++  evidenceTier: 4, sourceRowIndex: null, rawRowData: null, classificationConfidence: 1, accountingCategory: 'other',
++  allowablePercentage: 100, allowableAmount: null, capitalAllowanceType: null, vatMetadata: null, userOverride: true,
++  accountingClassification: null, financialAccountId: null, bankImportBatchId: null, bankImportRowId: null,
++  bankMovementIdentity: null, originalImportSnapshot: null, ledgerStatus: 'active', voidedAt: null, voidReason: null,
++  createdAt: new Date(), updatedAt: new Date(), ...overrides,
++});
++
++const context = {
++  profile: { id: 'profile-1', name: 'Simple Studio', accountingBasis: 'cash' }, taxYear: '2025/26', asOf: '2026-04-05',
++  businessDescription: 'Design services', accountingPeriodConfirmed: true, recordsCompleteConfirmed: true, derivedFiguresReviewed: true,
++};
++
++test('maps every included record to an SA103S box and preserves source trace', () => {
++  const pack = buildTaxFilingPack([
++    tx({ id: 'sale', recordType: 'income', accountingCategory: 'sales', amount: 20_000 }),
++    tx({ id: 'travel', accountingCategory: 'travel', amount: -500, allowableAmount: 400 }),
++    tx({ id: 'office', accountingCategory: 'office', amount: -700 }),
++    tx({ id: 'private', accountingCategory: 'other', amount: -100, taxTreatment: 'non_deductible' }),
++  ], context);
++  assert.equal(pack.boxes.find((box) => box.box === '9')?.amount, 20_000);
++  assert.equal(pack.boxes.find((box) => box.box === '12')?.amount, 400);
++  assert.equal(pack.boxes.find((box) => box.box === '18')?.amount, 700);
++  assert.equal(pack.calculated.box20TotalAllowableExpenses, 1_100);
++  assert.equal(pack.trace.length, 4);
++  assert.equal(pack.trace.find((item) => item.recordId === 'private')?.status, 'excluded');
++  assert.equal(pack.filingReady, true);
++});
++
++test('fails closed when a record is unclassified or cannot map to a filing box', () => {
++  const pack = buildTaxFilingPack([
++    tx({ id: 'unknown', recordType: 'unknown', accountingClassification: 'unknown' }),
++    tx({ id: 'unmapped', accountingCategory: 'crypto_spaceship' }),
++  ], context);
++  assert.equal(pack.filingReady, false);
++  assert.deepEqual(pack.blockers.map((item) => item.code), ['record_needs_classification', 'record_needs_tax_category']);
++});
++
++test('shows actual-expense and trading-allowance scenarios without silently choosing', () => {
++  const pack = buildTaxFilingPack([
++    tx({ recordType: 'income', accountingCategory: 'sales', amount: 5_000 }),
++    tx({ accountingCategory: 'office', amount: -200 }),
++  ], context);
++  assert.equal(pack.decision.recommendedMethod, 'trading_allowance');
++  assert.equal(pack.decision.selectedMethod, null);
++  assert.deepEqual(pack.decision.scenarios.map((scenario) => scenario.taxableProfit), [4_800, 4_000]);
++});
+diff --git a/artifacts/api-server/src/lib/tax-filing-pack.ts b/artifacts/api-server/src/lib/tax-filing-pack.ts
+new file mode 100644
+index 0000000..4d074e4
+--- /dev/null
++++ b/artifacts/api-server/src/lib/tax-filing-pack.ts
+@@ -0,0 +1,158 @@
++import type { Transaction } from '@workspace/db';
++import { taxYearPeriod } from './tax-year-ledger.js';
++
++export type Sa103sBox = '9' | '10' | '11' | '12' | '13' | '14' | '15' | '16' | '17' | '18' | '19';
++
++export interface FilingPackContext {
++  profile: { id: string; name: string; accountingBasis: string };
++  taxYear: string;
++  asOf?: string;
++  businessDescription?: string | null;
++  accountingPeriodConfirmed?: boolean | null;
++  recordsCompleteConfirmed?: boolean | null;
++  derivedFiguresReviewed?: boolean | null;
++}
++
++const BOX_LABELS: Record<Sa103sBox, string> = {
++  '9': 'Turnover',
++  '10': 'Other business income',
++  '11': 'Cost of goods and materials',
++  '12': 'Car, van and travel expenses',
++  '13': 'Wages and staff costs',
++  '14': 'Rent, rates, power and insurance',
++  '15': 'Repairs and maintenance',
++  '16': 'Accountancy, legal and professional fees',
++  '17': 'Interest and financial charges',
++  '18': 'Phone, stationery and office costs',
++  '19': 'Other allowable business expenses',
++};
++
++const CATEGORY_TO_BOX: Record<string, Sa103sBox> = {
++  sales: '9', revenue: '9', turnover: '9', income: '9', business_income: '9',
++  other_income: '10', other_business_income: '10', grants: '10',
++  materials: '11', goods: '11', stock: '11', cost_of_goods: '11', cost_of_sales: '11',
++  travel: '12', vehicle: '12', motor: '12', mileage: '12', car_van_travel: '12',
++  wages: '13', salary: '13', salaries: '13', staff: '13', payroll: '13', subcontractors: '13',
++  rent: '14', rates: '14', utilities: '14', power: '14', insurance: '14', premises: '14',
++  repairs: '15', maintenance: '15', repairs_maintenance: '15',
++  professional: '16', professional_fees: '16', legal: '16', accountancy: '16', accounting: '16',
++  interest: '17', bank_fees: '17', card_fees: '17', finance_charges: '17',
++  office: '18', phone: '18', stationery: '18', software: '18', office_costs: '18',
++  other: '19', other_expense: '19', misc: '19', miscellaneous: '19',
++};
++
++function money(value: number) {
++  return Math.round((value + Number.EPSILON) * 100) / 100;
++}
++
++function canonicalType(transaction: Transaction): 'income' | 'expense' | 'unknown' {
++  if (transaction.recordType === 'income' || transaction.recordType === 'expense') return transaction.recordType;
++  if (transaction.accountingClassification === 'income' || transaction.accountingClassification === 'expense') {
++    return transaction.accountingClassification;
++  }
++  return 'unknown';
++}
++
++function normalizedCategory(transaction: Transaction) {
++  return (transaction.accountingCategory || transaction.category || 'other')
++    .trim().toLowerCase().replace(/[\s/&-]+/g, '_').replace(/_+/g, '_');
++}
++
++function filingBox(transaction: Transaction, type: 'income' | 'expense'): Sa103sBox | null {
++  const mapped = CATEGORY_TO_BOX[normalizedCategory(transaction)];
++  if (mapped && (type === 'income' ? mapped === '9' || mapped === '10' : mapped !== '9' && mapped !== '10')) return mapped;
++  // A confirmed generic income/expense remains traceable instead of disappearing.
++  if (normalizedCategory(transaction) === 'other') return type === 'income' ? '10' : '19';
++  return null;
++}
++
++export function buildTaxFilingPack(transactions: Transaction[], context: FilingPackContext) {
++  const period = taxYearPeriod(context.taxYear);
++  if (!period) throw new Error('Unsupported tax year');
++  const asOf = context.asOf ?? new Date().toISOString().slice(0, 10);
++  const periodEnd = asOf < period.end ? asOf : period.end;
++  const scoped = transactions.filter((record) =>
++    record.ledgerStatus !== 'voided' && record.date >= period.start && record.date <= periodEnd,
++  );
++  const boxRecords = new Map<Sa103sBox, Array<{ recordId: string; date: string; description: string; amount: number }>>();
++  const trace: Array<Record<string, unknown>> = [];
++  const blockers: Array<{ code: string; recordId?: string; message: string }> = [];
++
++  for (const record of scoped) {
++    const type = canonicalType(record);
++    if (type === 'unknown') {
++      blockers.push({ code: 'record_needs_classification', recordId: record.id, message: `Classify “${record.description}” as income or expense.` });
++      trace.push({ recordId: record.id, status: 'blocked', reason: 'record_needs_classification' });
++      continue;
++    }
++    if (type === 'expense' && record.taxTreatment !== 'deductible') {
++      trace.push({ recordId: record.id, status: 'excluded', reason: 'not_deductible', sourceAmount: money(Math.abs(record.amount)) });
++      continue;
++    }
++    const box = filingBox(record, type);
++    if (!box) {
++      blockers.push({ code: 'record_needs_tax_category', recordId: record.id, message: `Choose a tax category for “${record.description}”.` });
++      trace.push({ recordId: record.id, status: 'blocked', reason: 'record_needs_tax_category' });
++      continue;
++    }
++    const sourceAmount = money(Math.abs(record.amount));
++    const amount = type === 'expense'
++      ? money(Math.min(sourceAmount, Math.max(0, record.allowableAmount == null ? sourceAmount * record.allowablePercentage / 100 : Math.abs(record.allowableAmount))))
++      : sourceAmount;
++    const item = { recordId: record.id, date: record.date, description: record.description, amount };
++    boxRecords.set(box, [...(boxRecords.get(box) ?? []), item]);
++    trace.push({ recordId: record.id, status: 'mapped', box, sourceAmount, filingAmount: amount });
++  }
++
++  const boxes = (Object.keys(BOX_LABELS) as Sa103sBox[]).map((box) => ({
++    box,
++    label: BOX_LABELS[box],
++    amount: money((boxRecords.get(box) ?? []).reduce((sum, record) => sum + record.amount, 0)),
++    records: boxRecords.get(box) ?? [],
++  }));
++  const boxAmount = (box: Sa103sBox) => boxes.find((entry) => entry.box === box)!.amount;
++  const turnover = money(boxAmount('9') + boxAmount('10'));
++  const actualExpenses = money(boxes.filter((entry) => Number(entry.box) >= 11).reduce((sum, entry) => sum + entry.amount, 0));
++  const tradingAllowance = Math.min(1_000, turnover);
++  const actualProfit = money(turnover - actualExpenses);
++  const allowanceProfit = money(Math.max(0, turnover - tradingAllowance));
++  const recommendedMethod = allowanceProfit < actualProfit ? 'trading_allowance' : 'actual_expenses';
++  const shortFormThreshold = context.taxYear === '2025/26' ? 90_000 : context.taxYear === '2024/25' ? 85_000 : null;
++
++  if (periodEnd !== period.end) blockers.push({ code: 'tax_year_incomplete', message: `Records currently stop at ${periodEnd}; the tax year ends ${period.end}.` });
++  if (!context.businessDescription?.trim()) blockers.push({ code: 'business_description_missing', message: 'Add a plain-language business description.' });
++  if (context.accountingPeriodConfirmed !== true) blockers.push({ code: 'accounting_period_unconfirmed', message: 'Confirm the accounting period.' });
++  if (context.recordsCompleteConfirmed !== true) blockers.push({ code: 'records_unconfirmed', message: 'Confirm the records are complete.' });
++  if (context.derivedFiguresReviewed !== true) blockers.push({ code: 'figures_unconfirmed', message: 'Review and confirm the derived tax figures.' });
++  if (shortFormThreshold == null) blockers.push({ code: 'tax_year_rules_unsupported', message: 'This tax year needs a current-rules review before filing.' });
++  else if (turnover >= shortFormThreshold) blockers.push({ code: 'sa103s_turnover_limit', message: `Turnover is not below the £${shortFormThreshold.toLocaleString('en-GB')} SA103S limit; use the full self-employment pages.` });
++
++  return {
++    schemaVersion: 'uk-sa103s-filing-pack-v1',
++    artifactType: 'accountant_and_filing_ready_workpaper',
++    disclaimer: 'Prepared workpaper only. It does not submit a return to HMRC.',
++    generatedAt: new Date().toISOString(),
++    taxYear: context.taxYear,
++    period: { start: period.start, end: periodEnd, complete: periodEnd === period.end },
++    business: context.profile,
++    eligibility: { form: 'SA103S', shortFormThreshold, status: blockers.some((item) => item.code === 'sa103s_turnover_limit' || item.code === 'tax_year_rules_unsupported') ? 'manual_review' : 'eligible' },
++    decision: {
++      required: true,
++      selectedMethod: null,
++      recommendedMethod,
++      explanation: recommendedMethod === 'trading_allowance'
++        ? `The £${tradingAllowance.toFixed(2)} trading allowance currently gives a lower taxable profit than claiming £${actualExpenses.toFixed(2)} actual expenses.`
++        : `Claiming £${actualExpenses.toFixed(2)} actual expenses currently gives a lower taxable profit than the £${tradingAllowance.toFixed(2)} trading allowance.`,
++      scenarios: [
++        { method: 'actual_expenses', deduction: actualExpenses, taxableProfit: actualProfit },
++        { method: 'trading_allowance', deduction: tradingAllowance, taxableProfit: allowanceProfit },
++      ],
++      warning: 'The two methods cannot be claimed together. Confirm the chosen method before filing.',
++    },
++    boxes,
++    calculated: { box20TotalAllowableExpenses: actualExpenses, box21NetProfit: Math.max(0, actualProfit), box22NetLoss: Math.max(0, -actualProfit) },
++    trace,
++    blockers,
++    filingReady: blockers.length === 0,
++  };
++}
+diff --git a/artifacts/api-server/src/routes/self-assessment.ts b/artifacts/api-server/src/routes/self-assessment.ts
+index 118fd85..a1b1673 100644
+--- a/artifacts/api-server/src/routes/self-assessment.ts
++++ b/artifacts/api-server/src/routes/self-assessment.ts
+@@ -13,6 +13,7 @@ import { decryptTaxIdentifier, encryptTaxIdentifier, maskTaxIdentifier } from '.
+ import { getOrMigrateSa100Context, updateSa100Context } from '../lib/self-assessment-context.js';
+ import { buildSelfAssessmentReadiness } from '../lib/self-assessment-readiness.js';
+ import { summarizeTaxYearLedger } from '../lib/tax-year-ledger.js';
++import { buildTaxFilingPack } from '../lib/tax-filing-pack.js';
+ 
+ const router = Router();
+ const TaxYearSchema = z.string().regex(/^\d{4}\/\d{2}$/);
+@@ -297,4 +298,41 @@ router.get('/profiles/:profileId/self-assessment/readiness', async (req, res): P
+   }
+ });
+ 
+-export default router;
+\ No newline at end of file
++// GET /profiles/:profileId/self-assessment/filing-pack
++// Read-only and deterministic: building or downloading a preview never writes
++// transactions, inbox items, confirmations, or filing state.
++router.get('/profiles/:profileId/self-assessment/filing-pack', async (req, res): Promise<void> => {
++  if (!req.isAuthenticated()) { res.status(401).json({ error: 'Unauthorized' }); return; }
++  try {
++    const profile = await requireProfile(req.params.profileId as string, req.user.id);
++    if (!profile) { res.status(404).json({ error: 'Profile not found' }); return; }
++    if (profile.type !== 'sole_trader') { res.status(422).json({ error: 'The Self Assessment filing pack is available for sole traders only' }); return; }
++    if (!profile.taxYear) { res.status(422).json({ error: 'Choose a tax year before building a filing pack' }); return; }
++    const [transactions, sa103s] = await Promise.all([
++      db.select().from(transactionsTable).where(and(
++        eq(transactionsTable.profileId, profile.id),
++        eq(transactionsTable.ledgerStatus, 'active'),
++      )),
++      businessContext(profile.id, profile.taxYear),
++    ]);
++    const pack = buildTaxFilingPack(transactions, {
++      profile: { id: profile.id, name: profile.name, accountingBasis: profile.accountingBasis },
++      taxYear: profile.taxYear,
++      businessDescription: sa103s?.businessDescription,
++      accountingPeriodConfirmed: sa103s?.accountingPeriodConfirmed,
++      recordsCompleteConfirmed: sa103s?.recordsCompleteConfirmed,
++      derivedFiguresReviewed: sa103s?.derivedFiguresReviewed,
++    });
++    if (req.query.download === '1') {
++      const safeName = profile.name.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'business';
++      res.setHeader('Content-Disposition', `attachment; filename="${safeName}-${profile.taxYear.replace('/', '-')}-sa103s-workpaper.json"`);
++      res.setHeader('Content-Type', 'application/json; charset=utf-8');
++    }
++    res.json(pack);
++  } catch (err) {
++    req.log.error({ err }, 'Failed to build Self Assessment filing pack');
++    res.status(500).json({ error: 'Could not build the filing pack' });
++  }
++});
++
++export default router;
+diff --git a/artifacts/sme-finance-copilot/src/App.tsx b/artifacts/sme-finance-copilot/src/App.tsx
+index defbf9b..2c6e8fa 100644
+--- a/artifacts/sme-finance-copilot/src/App.tsx
++++ b/artifacts/sme-finance-copilot/src/App.tsx
+@@ -95,7 +95,7 @@ function Router() {
+           <Route path="/tasks" component={Tasks} />
+           <Route path="/compliance" component={Tasks} />
+           <Route path="/inbox" component={Tasks} />
+-          <Route path="/year-end" component={Tasks} />
++          <Route path="/year-end" component={SelfAssessmentReadiness} />
+           <Route path="/exceptions" component={Tasks} />
+           <Route path="/copilot" component={Copilot} />
+           <Route path="/settings" component={Settings} />
+diff --git a/artifacts/sme-finance-copilot/src/lib/api.ts b/artifacts/sme-finance-copilot/src/lib/api.ts
+index 0f61473..52f6117 100644
+--- a/artifacts/sme-finance-copilot/src/lib/api.ts
++++ b/artifacts/sme-finance-copilot/src/lib/api.ts
+@@ -942,8 +942,30 @@ export const selfAssessmentApi = {
+     }),
+   getReadiness: (profileId: string) =>
+     apiFetch<SelfAssessmentReadinessResponse>(`/profiles/${profileId}/self-assessment/readiness`),
++  getFilingPack: (profileId: string) =>
++    apiFetch<SelfAssessmentFilingPack>(`/profiles/${profileId}/self-assessment/filing-pack`),
+ };
+ 
++export interface SelfAssessmentFilingPack {
++  schemaVersion: string;
++  artifactType: string;
++  disclaimer: string;
++  taxYear: string;
++  filingReady: boolean;
++  eligibility: { form: string; shortFormThreshold: number | null; status: 'eligible' | 'manual_review' };
++  decision: {
++    selectedMethod: null;
++    recommendedMethod: 'actual_expenses' | 'trading_allowance';
++    explanation: string;
++    warning: string;
++    scenarios: Array<{ method: string; deduction: number; taxableProfit: number }>;
++  };
++  boxes: Array<{ box: string; label: string; amount: number; records: Array<{ recordId: string; date: string; description: string; amount: number }> }>;
++  calculated: { box20TotalAllowableExpenses: number; box21NetProfit: number; box22NetLoss: number };
++  blockers: Array<{ code: string; recordId?: string; message: string }>;
++  trace: Array<Record<string, unknown>>;
++}
++
+ // ── Decisions ─────────────────────────────────────────────────────────────────
+ 
+ export interface APIDecision {
+diff --git a/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx b/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
+index 77c17a6..9b48082 100644
+--- a/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
++++ b/artifacts/sme-finance-copilot/src/pages/self-assessment-readiness.tsx
+@@ -5,6 +5,7 @@ import {
+   CheckCircle2,
+   Database,
+   EyeOff,
++  Download,
+   Loader2,
+   Save,
+   ShieldCheck,
+@@ -13,6 +14,7 @@ import { Badge, Button, Card, Input, Textarea } from '@/components/ui';
+ import {
+   selfAssessmentApi,
+   type APISelfAssessmentReadinessResponse,
++  type SelfAssessmentFilingPack,
+ } from '@/lib/api';
+ import { useStore } from '@/lib/store';
+ import type { SelfAssessmentReadinessConcept } from '@workspace/api-client-react';
+@@ -111,6 +113,8 @@ export default function SelfAssessmentReadiness() {
+   const [error, setError] = useState<string | null>(null);
+   const [saving, setSaving] = useState<'identity' | 'sa100' | 'sa103s' | null>(null);
+   const [saveMessage, setSaveMessage] = useState<string | null>(null);
++  const [filingPack, setFilingPack] = useState<SelfAssessmentFilingPack | null>(null);
++  const [buildingPack, setBuildingPack] = useState(false);
+ 
+   const [utr, setUtr] = useState('');
+   const [nationalInsuranceNumber, setNationalInsuranceNumber] = useState('');
+@@ -220,6 +224,30 @@ export default function SelfAssessmentReadiness() {
+     }
+   };
+ 
++  const buildPack = async () => {
++    if (!activeProfileId) return;
++    setBuildingPack(true);
++    setError(null);
++    try {
++      setFilingPack(await selfAssessmentApi.getFilingPack(activeProfileId));
++    } catch (err) {
++      setError(err instanceof Error ? err.message : 'Could not build the filing workpaper.');
++    } finally {
++      setBuildingPack(false);
++    }
++  };
++
++  const downloadPack = () => {
++    if (!filingPack || !activeProfile) return;
++    const blob = new Blob([JSON.stringify(filingPack, null, 2)], { type: 'application/json' });
++    const url = URL.createObjectURL(blob);
++    const anchor = document.createElement('a');
++    anchor.href = url;
++    anchor.download = `${activeProfile.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${filingPack.taxYear.replace('/', '-')}-sa103s-workpaper.json`;
++    anchor.click();
++    URL.revokeObjectURL(url);
++  };
++
+   if (loading && !data) {
+     return <div className="flex min-h-[320px] items-center justify-center text-muted-foreground"><Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading tax return readiness…</div>;
+   }
+@@ -352,6 +380,44 @@ export default function SelfAssessmentReadiness() {
+         <ReadinessGroup title="Missing information" description="Required details that still need an answer." concepts={data.readiness.groups.missing} tone="missing" />
+         <ReadinessGroup title="Needs your confirmation" description="Important statements we cannot safely infer." concepts={data.readiness.groups.needsConfirmation} tone="confirmation" />
+       </section>
++
++      <Card className="p-6">
++        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
++          <div>
++            <h2 className="font-serif text-xl">Your tax filing workpaper</h2>
++            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">One read-only check maps every saved record to its SA103S box, compares actual expenses with the trading allowance, and shows anything that still blocks filing.</p>
++          </div>
++          <Button onClick={() => void buildPack()} disabled={buildingPack}>
++            {buildingPack ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
++            Check and build
++          </Button>
++        </div>
++        {filingPack && (
++          <div className="mt-5 space-y-5">
++            <div className={`rounded-lg border p-4 ${filingPack.filingReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
++              <p className="font-medium">{filingPack.filingReady ? 'Ready for final human filing review' : `${filingPack.blockers.length} item${filingPack.blockers.length === 1 ? '' : 's'} to resolve`}</p>
++              <p className="mt-1 text-sm text-muted-foreground">{filingPack.disclaimer}</p>
++              {filingPack.blockers.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">{filingPack.blockers.map((blocker, index) => <li key={`${blocker.code}-${blocker.recordId ?? index}`}>{blocker.message}</li>)}</ul>}
++            </div>
++            <div className="grid gap-4 md:grid-cols-2">
++              <Card className="p-4">
++                <p className="text-sm font-medium">Tax optimisation check</p>
++                <p className="mt-2 text-sm text-muted-foreground">{filingPack.decision.explanation}</p>
++                <p className="mt-2 text-xs text-amber-700">{filingPack.decision.warning}</p>
++              </Card>
++              <Card className="p-4">
++                <p className="text-sm font-medium">SA103S figures</p>
++                <p className="mt-2 text-sm">Box 20 expenses: {money(filingPack.calculated.box20TotalAllowableExpenses)}</p>
++                <p className="text-sm">Box 21 profit: {money(filingPack.calculated.box21NetProfit)}</p>
++                <p className="text-sm">Box 22 loss: {money(filingPack.calculated.box22NetLoss)}</p>
++              </Card>
++            </div>
++            <div className="flex justify-end">
++              <Button variant="outline" onClick={downloadPack}><Download className="mr-2 h-4 w-4" />Download traceable workpaper</Button>
++            </div>
++          </div>
++        )}
++      </Card>
+     </div>
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/artifacts/sme-finance-copilot/src/pages/tasks.tsx b/artifacts/sme-finance-copilot/src/pages/tasks.tsx
+index 5700dce..9546a90 100644
+--- a/artifacts/sme-finance-copilot/src/pages/tasks.tsx
++++ b/artifacts/sme-finance-copilot/src/pages/tasks.tsx
+@@ -8,6 +8,7 @@ import {
+ } from 'lucide-react';
+ import { useEffect, useState, type ReactNode } from 'react';
+ import { cn } from '@/components/ui';
++import { Link } from 'wouter';
+ 
+ type TabId = 'todo' | 'reconciliation' | 'timeline';
+ 
+@@ -644,7 +645,7 @@ function ReconciliationTab() {
+ 
+ // ─── Year-End Tab ─────────────────────────────────────────────────────────────
+ 
+-function YearEndTab() {
++function LegacyYearEndTab() {
+   const { saChecklist, updateSAChecklistItem, inboxItems, evidenceItems, activeProfileId, yearEndPackGenerated, setYearEndPackGenerated, profiles, complianceItems, plBreakdown } = useStore();
+   const activeProfile = profiles.find(p => p.id === activeProfileId);
+ 
+@@ -845,6 +846,22 @@ function YearEndTab() {
+   );
+ }
+ 
++function YearEndTab() {
++  return (
++    <Card className="p-6 shadow-sm">
++      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
++        <div>
++          <h3 className="font-serif text-xl font-medium">Build your real tax filing workpaper</h3>
++          <p className="mt-1 max-w-xl text-sm text-muted-foreground">Review blockers, compare the trading allowance with actual expenses, map every saved record to its SA103S box, then download the traceable workpaper.</p>
++        </div>
++        <Link href="/tax-readiness" className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90">
++          Open tax return readiness
++        </Link>
++      </div>
++    </Card>
++  );
++}
++
+ // ─── Main page ────────────────────────────────────────────────────────────────
+ 
+ export default function Tasks() {
+diff --git a/docs/BACKBONE_AUDIT.md b/docs/BACKBONE_AUDIT.md
+new file mode 100644
+index 0000000..95b1cfc
+--- /dev/null
++++ b/docs/BACKBONE_AUDIT.md
+@@ -0,0 +1,47 @@
++# Finance Copilot backbone audit
++
++## Product contract
++
++The shortest safe user journey is:
++
++1. Add a source once.
++2. Preview deterministic extraction and classification without durable financial writes.
++3. Ask only about unresolved facts that affect accounting or tax.
++4. Save only after explicit confirmation.
++5. Map every saved record to a filing box or a visible blocker.
++6. Compare tax choices before asking the user to confirm one.
++7. Produce a traceable accountant/filing workpaper. Do not imply that HMRC submission occurred.
++
++## Audit findings
++
++- The upload and semantic-review pipeline had more validation layers than the later tax-output pipeline. Late failures were therefore discovered after upload work had already succeeded.
++- Classification rules were duplicated across spreadsheet analysis, confirmation routes, Financial Memory, tax estimates, and readiness views. This previously allowed a value accepted by one layer to be rejected by another.
++- Transactions stored free-text accounting categories. There was no versioned, deterministic record-to-HMRC-box contract.
++- Self Assessment readiness calculated headline totals but did not expose the source records behind each filing box.
++- The old Year-End Pack was UI-only state. It claimed a pack was generated while no server artifact or downloadable file existed.
++- Tax ideas and estimates did not produce an explicit mutually-exclusive decision between actual expenses and the trading allowance.
++- Refresh/resume behaviour and provider execution are operational concerns; neither should decide whether already confirmed records can produce tax outputs.
++
++## Implemented boundary
++
++`uk-sa103s-filing-pack-v1` is the canonical downstream contract for sole traders. It is deterministic and read-only. Every in-period active record is:
++
++- mapped to SA103S boxes 9–19 with its source record ID;
++- explicitly excluded with a reason; or
++- surfaced as a filing blocker.
++
++The pack calculates boxes 20–22, checks the SA103S turnover threshold, exposes incomplete-year and missing-confirmation blockers, and compares actual expenses with the trading allowance without silently choosing.
++
++The output is a traceable JSON workpaper, not a direct HMRC submission. Unsupported years and full-form cases fail closed to manual review.
++
++## Regression gates
++
++- Provider semantics: valid, empty, malformed JSON, refusal, incomplete, timeout, missing credential, strict JSON schema, native input text, exact model, one call only, no fallback/retry, no credential leakage.
++- Durable-write boundary: no Financial Memory, inbox, import, or confirmation writes before explicit confirmation.
++- Filing journey: income and each expense family map to a box; excluded records remain traceable; unknown types/categories block; tax-method scenarios remain unselected; the downloadable pack is derived from confirmed records only.
++- UI truthfulness: no screen may claim a pack exists unless an actual downloadable artifact exists.
++
++## Remaining limits
++
++- This version prepares SA103S workpapers only. SA103F, VAT, companies, partnerships, capital allowances, CIS, losses, and direct HMRC submission require separate versioned contracts.
++- Category aliases are intentionally conservative. New aliases require a regression test and a documented filing-box mapping.
+-- 
+2.39.5 (Apple Git-154)
+
