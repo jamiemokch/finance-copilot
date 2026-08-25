@@ -378,6 +378,7 @@ export interface AppState {
   addTransaction: (transaction: Omit<TransactionItem, 'id'>, idempotencyKey: string) => Promise<void>;
 
   evidenceItems: EvidenceItem[];
+  evidenceItemsLoaded: boolean;
   addEvidenceItem: (item: Omit<EvidenceItem, 'id'>) => string;
 
   inboxItems: InboxItem[];
@@ -717,6 +718,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [reconciliationWorkflowTasks, setReconciliationWorkflowTasks] = useState<ReconciliationWorkflowTask[]>([]);
   const [reconciliationCoverageChecks, setReconciliationCoverageChecks] = useState<ReconciliationCoverageCheck[]>([]);
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
+  const [evidenceItemsLoaded, setEvidenceItemsLoaded] = useState(false);
   const [decisionMemory, setDecisionMemory] = useState<DecisionMemoryEntry[]>([]);
   const [businessIdeas, setBusinessIdeas] = useState<BusinessIdea[]>([]);
   const [saChecklist, setSAChecklist] = useState<SAChecklistItem[]>([]);
@@ -741,6 +743,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setReconciliationWorkflowTasks([]);
     setReconciliationCoverageChecks([]);
     setEvidenceItems([]);
+    setEvidenceItemsLoaded(false);
     setDecisionMemory([]);
     setBusinessIdeas([]);
     setSAChecklist([]);
@@ -780,7 +783,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (fetchVersion !== dataFetchVersion.current) return;
     if (posResult.status === 'fulfilled') setRawPosition(posResult.value);
     if (inboxResult.status === 'fulfilled') setInboxItems(inboxResult.value.map(mapInboxItem));
-    if (evidResult.status === 'fulfilled') setEvidenceItems(evidResult.value.map(mapEvidenceItem));
+    if (evidResult.status === 'fulfilled') {
+      setEvidenceItems(evidResult.value.map(mapEvidenceItem));
+      setEvidenceItemsLoaded(true);
+    }
     if (txnResult.status === 'fulfilled') setRawTransactions(txnResult.value);
     if (decResult.status === 'fulfilled')
       setDecisionMemory(decResult.value.map(d => mapDecision(d, profileId)));
@@ -1240,6 +1246,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addTransaction,
 
     evidenceItems,
+    evidenceItemsLoaded,
     addEvidenceItem,
 
     inboxItems,

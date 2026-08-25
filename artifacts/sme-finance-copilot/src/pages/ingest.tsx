@@ -13,6 +13,11 @@ import {
   automaticReviewRetryIsExhausted,
   automaticReviewUnavailableReason,
 } from '@/lib/spreadsheet-review-status';
+import {
+  findSpreadsheetResumeEvidence,
+  readSpreadsheetResumeEvidenceId,
+  setSpreadsheetResumeEvidenceId,
+} from '@/lib/spreadsheet-resume';
 import { useStore, type EvidenceItem } from '@/lib/store';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -20,7 +25,7 @@ import {
   Loader2, Pencil, Plus, Receipt, UploadCloud, AlertCircle, Landmark,
 } from 'lucide-react';
 import { cn } from '@/components/ui';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 
 type Intake = 'document' | 'bank' | 'ledger' | 'manual' | null;
 type ColumnRole = 'date' | 'amount' | 'description' | 'category' | 'debit' | 'credit' | 'balance' | 'none';
@@ -318,7 +323,7 @@ function BankImportFlow({ profileId, refresh, onBack }: { profileId: string; ref
 
 type ReviewMapping = { headerRow: number; columns: Record<string, number | undefined>; dateFormat?: string | null; currency?: string };
 
-function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind: 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; resumeEvidence: EvidenceItem | null }) {
+function BatchFlow({ kind, profileId, refresh, onBack, onComplete, resumeEvidence }: { kind: 'ledger'; profileId: string; refresh: () => Promise<void>; onBack: () => void; onComplete: () => void; resumeEvidence: EvidenceItem | null }) {
   const [stage, setStage] = useState<'pick' | 'inspecting' | 'review' | 'confirming' | 'done' | 'error'>(resumeEvidence ? 'inspecting' : 'pick');
   const [evidenceId, setEvidenceId] = useState(resumeEvidence?.id ?? '');
   const [filename, setFilename] = useState(resumeEvidence?.filename ?? '');
@@ -585,7 +590,7 @@ function BatchFlow({ kind, profileId, refresh, onBack, resumeEvidence }: { kind:
         excludedRowRefs: acknowledgeUnresolved ? unresolvedRows : [],
         preTradingStartMode, outsideScopeMode,
       });
-      setSummary(result); await refresh(); setStage('done');
+      setSummary(result); await refresh(); setStage('done'); onComplete();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'The spreadsheet could not be confirmed.';
        const details = err instanceof ApiError ? err.details : undefined;
@@ -906,7 +911,8 @@ function ManualFlow({ onBack }: { onBack: () => void }) {
 }
 
 export default function AddRecords() {
-  const { evidenceItems, inboxItems, activeProfileId, transactions, refreshData } = useStore();
+  const { evidenceItems, evidenceItemsLoaded, inboxItems, activeProfileId, transactions, refreshData } = useStore();
+  const [location, navigate] = useLocation();
   const [intake, setIntake] = useState<Intake>(null);
   const [resumeEvidence, setResumeEvidence] = useState<EvidenceItem | null>(null);
   const [unmatchedEvidenceIds, setUnmatchedEvidenceIds] = useState<Set<string> | null>(null);
@@ -922,6 +928,7 @@ export default function AddRecords() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [attachError, setAttachError] = useState('');
   const attachInFlight = useRef(false);
+  const autoResumeAttempted = useRef('');
   const pending = inboxItems.filter(i => i.status === 'pending').length;
   useEffect(() => {
     let cancelled = false;
@@ -948,12 +955,40 @@ export default function AddRecords() {
     item.documentLifecycle === 'active' && unmatchedEvidenceIds?.has(item.id) &&
     (item.reviewState === 'review_required' || item.reviewState === 'reviewed'),
   );
-  const startNewUpload = () => { setResumeEvidence(null); setIntake(null); setResumeError(''); setShowResumePanel(false); };
+  const clearResumeQuery = () => {
+    const nextLocation = setSpreadsheetResumeEvidenceId(location, null);
+    if (nextLocation !== location) navigate(nextLocation, { replace: true });
+  };
+  const leaveIntake = () => {
+    clearResumeQuery();
+    setIntake(null);
+    setResumeEvidence(null);
+  };
+  const startNewUpload = () => { leaveIntake(); setResumeError(''); setShowResumePanel(false); };
   const resumeUpload = (item: EvidenceItem) => {
     setResumeError('');
+    if (item.evidenceType === 'ledger') {
+      autoResumeAttempted.current = `${activeProfileId}:${item.id}`;
+      const nextLocation = setSpreadsheetResumeEvidenceId(location, item.id);
+      if (nextLocation !== location) navigate(nextLocation, { replace: true });
+    }
     setResumeEvidence(item);
     setIntake(item.evidenceType === 'document' ? 'document' : item.evidenceType === 'bank_csv' ? 'bank' : 'ledger');
   };
+  useEffect(() => {
+    if (!activeProfileId || !evidenceItemsLoaded) return;
+    const requestedId = readSpreadsheetResumeEvidenceId(location);
+    if (!requestedId) return;
+    const attemptKey = `${activeProfileId}:${requestedId}`;
+    if (autoResumeAttempted.current === attemptKey) return;
+    autoResumeAttempted.current = attemptKey;
+    const item = findSpreadsheetResumeEvidence(location, activeProfileId, evidenceItems);
+    if (!item) {
+      clearResumeQuery();
+      return;
+    }
+    resumeUpload(item);
+  }, [activeProfileId, evidenceItemsLoaded, evidenceItems, location]);
   const discardUpload = async (item: EvidenceItem) => {
     setDiscardingId(item.id); setResumeError('');
     try {
@@ -1017,10 +1052,10 @@ export default function AddRecords() {
     </Card>}
     {!intake ? <><div className="grid sm:grid-cols-2 gap-4">{INTAKES.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setIntake(option.id)} className="text-left border border-border rounded-xl p-5 bg-card hover:border-primary/40 hover:bg-primary/[.02] transition-all cursor-pointer"><div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center mb-4"><Icon className="w-5 h-5" /></div><h2 className="font-serif text-lg">{option.title}</h2><p className="text-sm text-muted-foreground mt-1">{option.text}</p><p className="text-xs text-primary mt-3">{option.note} →</p></button>; })}</div>
       <section><h2 className="text-xl font-serif mb-3">Recent records</h2><Card className="divide-y divide-border overflow-hidden">{transactions.length ? transactions.slice(0, 12).map(t => <div key={t.id} className="p-4 flex justify-between gap-4"><div className="min-w-0"><p className="font-medium text-sm truncate">{t.description}</p><div className="flex gap-2 items-center mt-1"><span className="text-xs text-muted-foreground">{new Date(t.date).toLocaleDateString('en-GB')} · {t.category}</span><TierBadge tier={t.evidenceTier} />{t.source === 'bank_csv' && (t.accountingClassification ?? 'unknown') === 'unknown' && <Badge variant="outline" className="text-[10px] py-0">Needs classification</Badge>}{(t.evidenceTier === 3 || t.evidenceTier === 4) && <button onClick={() => setAttachTo(t.id)} className="text-xs text-primary hover:underline">Attach receipt +</button>}{(t.source === 'manual' || t.source === 'bank_csv') && <><button onClick={() => setEditing({ id: t.id, date: t.date, amount: String(t.amount), description: t.description, category: t.category, source: t.source, accountingClassification: t.accountingClassification ?? 'unknown', allowablePercentage: String(t.allowablePercentage ?? 100) })} className="text-xs text-primary hover:underline">{t.source === 'bank_csv' ? 'Review' : 'Edit'}</button><button onClick={() => void deleteRecord(t.id)} className="text-xs text-destructive hover:underline">{t.source === 'bank_csv' ? 'Remove' : 'Delete'}</button></>}</div></div><div className="flex items-center gap-3"><span className={cn('font-semibold text-sm shrink-0', t.amount > 0 && 'text-emerald-600')}>{t.amount > 0 ? '+' : '−'}£{Math.abs(t.amount).toFixed(2)}</span>{(t.source === 'manual' || t.source === 'bank_csv') && <Pencil className="w-4 h-4 text-muted-foreground" />}</div></div>) : <div className="p-10 text-center text-muted-foreground"><Database className="w-8 h-8 mx-auto mb-2 opacity-30" />No records yet — choose a way to add your first one.</div>}</Card></section></> :
-       intake === 'document' ? <DocumentFlow profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={() => { setIntake(null); setResumeEvidence(null); }} /> :
+        intake === 'document' ? <DocumentFlow profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={leaveIntake} /> :
       intake === 'manual' ? <ManualFlow onBack={() => setIntake(null)} /> :
-        intake === 'bank' ? <BankImportFlow profileId={activeProfileId} refresh={refreshData} onBack={() => { setIntake(null); setResumeEvidence(null); }} /> :
-        <BatchFlow kind="ledger" profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={() => { setIntake(null); setResumeEvidence(null); }} />}
+         intake === 'bank' ? <BankImportFlow profileId={activeProfileId} refresh={refreshData} onBack={leaveIntake} /> :
+         <BatchFlow kind="ledger" profileId={activeProfileId} refresh={refreshData} resumeEvidence={resumeEvidence} onBack={leaveIntake} onComplete={clearResumeQuery} />}
     {attachTo && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="p-6 w-full max-w-md space-y-4"><h2 className="font-serif text-xl">Attach a receipt</h2><p className="text-sm text-muted-foreground">Adding an original receipt upgrades this record’s evidence quality.</p>{attaching ? <Loader2 className="animate-spin text-primary mx-auto" /> : <FilePicker accept=".pdf,.jpg,.jpeg,.png,.heic" onPick={attachReceipt} label="Choose receipt" />}{attachError && <p className="text-sm text-destructive">{attachError}</p>}<Button variant="outline" className="w-full" onClick={() => setAttachTo(null)}>Cancel</Button></Card></div>}
     {editing && <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4"><Card className="w-full max-w-lg space-y-4 p-6"><div><h2 className="font-serif text-xl">{editing.source === 'bank_csv' ? 'Review imported movement' : 'Edit manual record'}</h2><p className="mt-1 text-sm text-muted-foreground">{editing.source === 'bank_csv' ? 'Choose how this movement should affect your accounts. Transfers and owner movements remain outside profit and tax.' : 'Updating this record refreshes Financial Memory and tax figures.'}</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1"><span className="text-sm">Date</span><Input type="date" value={editing.date} onChange={e => setEditing({ ...editing, date: e.target.value })} /></label><label className="space-y-1"><span className="text-sm">Amount (£)</span><Input type="number" value={editing.amount} onChange={e => setEditing({ ...editing, amount: e.target.value })} /></label><label className="space-y-1 sm:col-span-2"><span className="text-sm">Description</span><Input value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} /></label>{editing.source === 'bank_csv' && <label className="space-y-1 sm:col-span-2"><span className="text-sm">Accounting classification</span><Select value={editing.accountingClassification} onChange={e => setEditing({ ...editing, accountingClassification: e.target.value })}><option value="unknown">Keep unreviewed</option><option value="income">Business income</option><option value="expense">Business expense</option><option value="transfer">Transfer between accounts</option><option value="owner_funds">Owner funds introduced</option><option value="drawings">Owner drawings</option><option value="loan">Loan movement</option><option value="tax_payment">Tax payment</option></Select></label>}<label className="space-y-1"><span className="text-sm">Category</span><Input value={editing.category} onChange={e => setEditing({ ...editing, category: e.target.value })} /></label>{editing.source === 'manual' && Number(editing.amount) < 0 && <label className="space-y-1"><span className="text-sm">Business use (%)</span><Input type="number" min="0" max="100" value={editing.allowablePercentage} onChange={e => setEditing({ ...editing, allowablePercentage: e.target.value })} /></label>}</div><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button><Button disabled={savingEdit} onClick={() => void saveEdit()}>{savingEdit ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pencil className="mr-2 h-4 w-4" />}Save changes</Button></div></Card></div>}
   </div>;
