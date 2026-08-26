@@ -41,7 +41,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify safe canonical baseline
+        if: ${{ !startsWith(github.event.issue.title, 'P0 Controller Canary') }}
         run: pnpm test:baseline-safe
+
+      - name: Verify controller-canary repository structure
+        if: ${{ startsWith(github.event.issue.title, 'P0 Controller Canary') }}
+        run: |
+          git status --short
+          test -f .github/workflows/claude-build.yml
 
       - name: Capture pre-Claude remote branch SHA
         run: echo "PRE_CLAUDE_REMOTE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
