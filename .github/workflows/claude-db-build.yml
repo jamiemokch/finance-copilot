@@ -1,0 +1,105 @@
+name: Claude Controlled DB Build
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude-db-build:
+    if: |
+      github.actor == 'jamiemokch' &&
+      github.event.sender.type != 'Bot' &&
+      github.event.issue.pull_request == null &&
+      contains(github.event.comment.body, '@claude-db-build')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      pull-requests: read
+      issues: read
+      actions: read
+      id-token: write
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: finance_copilot_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d finance_copilot_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      EVIDENCE_TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/finance_copilot_ci
+    steps:
+      - name: Checkout controller-created implementation branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: claude-build/issue-${{ github.event.issue.number }}
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Set up pnpm 10
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install repository dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify safe canonical baseline
+        run: pnpm test:baseline-safe
+
+      - name: Verify isolated evidence DB baseline
+        run: pnpm --filter @workspace/api-server run test:evidence-safety
+
+      - name: Run Claude Code controlled DB implementation
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          base_branch: "stabilisation/canonical-20260826"
+          prompt: |
+            You are the sole repository implementation engineer for Finance Copilot.
+            The controller has already created and checked out the only branch you may modify.
+            Do not create, switch, merge, rebase, reset, or delete branches. Never modify main or the canonical branch directly.
+            Follow CLAUDE.md. Execute the approved task directly: inspect only the files needed, implement the smallest evidence-backed change, run only the authorised tests, then commit and push the current branch.
+            Do not spend turns creating GitHub progress comments or todo checklists. Do not re-audit architecture unless the task explicitly says diagnostic only.
+            A disposable localhost CI PostgreSQL service is available only for the explicitly authorised repository DB safety test commands. Never access live/shared/runtime databases, providers, Replit services, or the web. Do not deploy.
+
+            ISSUE TITLE:
+            ${{ github.event.issue.title }}
+
+            APPROVED TASK CONTRACT:
+            ${{ github.event.issue.body }}
+
+            CONTROLLER COMMAND:
+            ${{ github.event.comment.body }}
+
+            Final response must state Built/Tested/Verified accurately. Never claim Verified from GitHub Actions alone.
+          claude_args: |
+            --max-turns 20
+            --allowedTools "Glob,Grep,LS,Read,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pnpm:*),Bash(node:*)"
+            --disallowedTools "NotebookEdit,WebSearch,WebFetch,Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(docker:*),Bash(replit:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git merge:*),Bash(git rebase:*),Bash(git reset:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push origin stabilisation/canonical-20260826:*)"
+
+      - name: Verify post-change safe baseline
+        run: pnpm test:baseline-safe
+
+      - name: Verify post-change isolated evidence DB safety
+        run: pnpm --filter @workspace/api-server run test:evidence-safety
+
+      - name: Verify API server typecheck
+        run: pnpm --filter @workspace/api-server run typecheck
