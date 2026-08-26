@@ -25,6 +25,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: claude-build/issue-${{ github.event.issue.number }}
+          token: ${{ secrets.CLAUDE_WORKFLOW_PAT }}
 
       - name: Set up Node.js 24
         uses: actions/setup-node@v6
@@ -41,6 +42,9 @@ jobs:
 
       - name: Verify safe canonical baseline
         run: pnpm test:baseline-safe
+
+      - name: Capture pre-Claude remote branch SHA
+        run: echo "PRE_CLAUDE_REMOTE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Run Claude Code controlled implementation
         uses: anthropics/claude-code-action@v1
@@ -70,3 +74,14 @@ jobs:
             --max-turns 20
             --allowedTools "Glob,Grep,LS,Read,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pnpm:*),Bash(node:*)"
             --disallowedTools "NotebookEdit,WebSearch,WebFetch,Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(docker:*),Bash(replit:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git merge:*),Bash(git rebase:*),Bash(git reset:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push origin stabilisation/canonical-20260826:*)"
+
+      - name: Assert Claude delivered a remote branch delta
+        run: |
+          BRANCH="claude-build/issue-${{ github.event.issue.number }}"
+          git fetch origin "$BRANCH"
+          POST_CLAUDE_REMOTE_SHA=$(git rev-parse "origin/$BRANCH")
+          if [ "$POST_CLAUDE_REMOTE_SHA" = "$PRE_CLAUDE_REMOTE_SHA" ]; then
+            echo "No delivery: remote branch unchanged after Claude run"
+            exit 1
+          fi
+          echo "Delivery confirmed: $PRE_CLAUDE_REMOTE_SHA -> $POST_CLAUDE_REMOTE_SHA"
