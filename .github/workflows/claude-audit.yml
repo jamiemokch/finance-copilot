@@ -11,7 +11,7 @@ jobs:
       github.event.sender.type != 'Bot' &&
       contains(github.event.comment.body, '@claude-audit')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: read
@@ -31,6 +31,6 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           trigger_phrase: "@claude-audit"
           claude_args: |
-            --max-turns 12
+            --max-turns 20
             --allowedTools "Glob,Grep,LS,Read,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),mcp__github_comment__update_claude_comment"
             --disallowedTools "Edit,Write,NotebookEdit,WebSearch,WebFetch,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*),Bash(/home/runner/work/_actions/anthropics/claude-code-action/v1/scripts/git-push.sh:*)"
