@@ -33,4 +33,4 @@ jobs:
           claude_args: |
             --max-turns 12
             --allowedTools "Glob,Grep,LS,Read,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),mcp__github_comment__update_claude_comment"
-            --disallowedTools "Edit,Write,NotebookEdit,WebSearch,WebFetch"
+            --disallowedTools "Edit,Write,NotebookEdit,WebSearch,WebFetch,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*),Bash(/home/runner/work/_actions/anthropics/claude-code-action/v1/scripts/git-push.sh:*)"
