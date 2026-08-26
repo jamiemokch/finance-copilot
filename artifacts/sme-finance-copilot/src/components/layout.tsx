@@ -5,6 +5,7 @@ import {
   RotateCcw, BookOpen,
   Calculator,
   ClipboardCheck,
+  LogOut,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { cn } from './ui';
@@ -16,7 +17,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
-  const { inboxItems, activeProfileId, businessIdeas, profiles, setActiveProfileId, resetDemoData } = useStore();
+  const { inboxItems, activeProfileId, businessIdeas, profiles, setActiveProfileId, resetDemoData, logout } = useStore();
   const pendingInbox = inboxItems.filter(i => i.status === 'pending' && i.profileId === activeProfileId).length;
   const newIdeas = businessIdeas.filter(d => d.status === 'new' && d.profileId === activeProfileId).length;
 
@@ -179,6 +180,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <Settings className="w-4 h-4" />
             Profile & Settings
           </Link>
+          <button
+            type="button"
+            onClick={() => { setSidebarOpen(false); logout(); }}
+            className="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <LogOut className="w-4 h-4" />
+            Log out
+          </button>
           <p className="text-[10px] text-muted-foreground px-3 py-1 flex items-center gap-1.5">
             <MessageSquare className="w-3 h-3 opacity-50" />
             Copilot available bottom-right
