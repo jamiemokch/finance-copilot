@@ -9,29 +9,48 @@ jobs:
     if: |
       github.actor == 'jamiemokch' &&
       github.event.sender.type != 'Bot' &&
+      github.event.issue.pull_request == null &&
       contains(github.event.comment.body, '@claude-build')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
-      pull-requests: write
-      issues: write
+      pull-requests: read
+      issues: read
       actions: read
       id-token: write
     steps:
-      - name: Checkout repository history
+      - name: Checkout controller-created implementation branch
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: claude-build/issue-${{ github.event.issue.number }}
 
       - name: Run Claude Code controlled implementation
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          trigger_phrase: "@claude-build"
           base_branch: "stabilisation/canonical-20260826"
+          prompt: |
+            You are the sole repository implementation engineer for Finance Copilot.
+            The controller has already created and checked out the only branch you may modify.
+            Do not create, switch, merge, rebase, reset, or delete branches. Never modify main or the canonical branch directly.
+            Follow CLAUDE.md. Execute the approved task directly: inspect only the files needed, implement the smallest evidence-backed change, run only the authorised tests, then commit and push the current branch.
+            Do not spend turns creating GitHub progress comments or todo checklists. Do not re-audit architecture unless the task explicitly says diagnostic only.
+            Do not access live DB/provider/runtime/web services. Do not deploy.
+
+            ISSUE TITLE:
+            ${{ github.event.issue.title }}
+
+            APPROVED TASK CONTRACT:
+            ${{ github.event.issue.body }}
+
+            CONTROLLER COMMAND:
+            ${{ github.event.comment.body }}
+
+            Final response must state Built/Tested/Verified accurately. Never claim Verified from GitHub Actions alone.
           claude_args: |
-            --max-turns 30
-            --allowedTools "Glob,Grep,LS,Read,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git add:*),Bash(git commit:*),Bash(pnpm:*),Bash(node:*),mcp__github_comment__update_claude_comment"
-            --disallowedTools "NotebookEdit,WebSearch,WebFetch,Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(docker:*),Bash(replit:*)"
+            --max-turns 20
+            --allowedTools "Glob,Grep,LS,Read,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pnpm:*),Bash(node:*)"
+            --disallowedTools "NotebookEdit,WebSearch,WebFetch,Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(docker:*),Bash(replit:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git merge:*),Bash(git rebase:*),Bash(git reset:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push origin stabilisation/canonical-20260826:*)"
