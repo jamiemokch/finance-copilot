@@ -11,6 +11,7 @@ jobs:
       github.event.sender.type != 'Bot' &&
       contains(github.event.comment.body, '@claude-audit')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -31,3 +32,5 @@ jobs:
           trigger_phrase: "@claude-audit"
           claude_args: |
             --max-turns 12
+            --allowedTools "Glob,Grep,LS,Read,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),mcp__github_comment__update_claude_comment"
+            --disallowedTools "Edit,Write,NotebookEdit,WebSearch,WebFetch"
