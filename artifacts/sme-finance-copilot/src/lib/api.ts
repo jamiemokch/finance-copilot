@@ -97,6 +97,11 @@ export interface AuthUser {
   picture?: string | null;
 }
 
+export function getLogoutUrl(baseUrl = ''): string {
+  const base = baseUrl.replace(/\/+$/, '');
+  return `/api/logout?returnTo=${encodeURIComponent(base || '/')}`;
+}
+
 export async function getAuthUser(): Promise<AuthUser | null> {
   try {
     const data = await apiFetch<{ user: AuthUser | null }>("/auth/user", { cache: "no-store" });

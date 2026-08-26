@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getAuthUser } from './api.js';
+import { getAuthUser, getLogoutUrl } from './api.js';
 
 test('getAuthUser bypasses the browser cache and returns the authenticated user', async () => {
   const authenticatedUser = { id: 'user-1', name: 'Test User', email: 'test@example.com', picture: null };
@@ -28,4 +28,9 @@ test('getAuthUser bypasses the browser cache and returns the authenticated user'
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('getLogoutUrl builds a canonical logout URL that returns to the app base path', () => {
+  assert.equal(getLogoutUrl('/'), '/api/logout?returnTo=%2F');
+  assert.equal(getLogoutUrl('/finance/'), '/api/logout?returnTo=%2Ffinance');
 });
