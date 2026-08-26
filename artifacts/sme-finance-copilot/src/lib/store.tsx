@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   profilesApi, positionApi, inboxApi, evidenceApi, transactionsApi,
-  decisionsApi, ideasApi, saChecklistApi, demoApi, uatApi, getAuthUser, reconciliationApi,
+  decisionsApi, ideasApi, saChecklistApi, demoApi, uatApi, getAuthUser, getLogoutUrl, reconciliationApi,
   type APITransaction, type APIFinancialPosition, type APIInboxItem,
   type APIEvidenceItem, type APIDecision, type APIBusinessIdea,
   type APISAChecklistItem, type AuthUser,
@@ -356,6 +356,7 @@ export interface AppState {
   isLoading: boolean;
   authUser: AuthUser | null;
   login: () => void;
+  logout: () => void;
 
   profiles: Profile[];
   activeProfileId: string;
@@ -1189,12 +1190,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     window.location.href = `/api/login?returnTo=${encodeURIComponent(base || '/')}`;
   }, []);
 
+  const logout = useCallback(() => {
+    setAuthUser(null);
+    setAuthLoading(false);
+    setProfiles([]);
+    setProfilesLoaded(false);
+    setProfileLoadError(false);
+    selectActiveProfile('');
+    resolvingInboxIds.current.clear();
+    setChatHistory([]);
+    setPeerCategory(null);
+    setSharedContext({ name: '', address: '' });
+    setCopilotTrigger(null);
+    setYearEndPackGenerated(false);
+    try {
+      window.sessionStorage.removeItem(ACTIVE_PROFILE_STORAGE_KEY);
+    } catch {
+      // Logout should proceed even if browser storage is unavailable.
+    }
+    const base = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL?.replace(/\/+$/, '') ?? '';
+    window.location.assign(getLogoutUrl(base));
+  }, [selectActiveProfile]);
+
   // ── Context value
   const value: AppState = {
     isAuthenticated: !!authUser,
     isLoading: authLoading,
     authUser,
     login,
+    logout,
 
     profiles,
     activeProfileId,
