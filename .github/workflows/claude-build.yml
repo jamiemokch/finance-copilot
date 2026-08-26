@@ -1,3 +1,4 @@
+# controller workflow delivery canary
 name: Claude Controlled Build
 
 on:
