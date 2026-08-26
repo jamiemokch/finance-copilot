@@ -7,6 +7,7 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
+    "test:baseline-safe": "pnpm run test:ingestion && pnpm run test:spreadsheet-ai && pnpm run test:guided-review-dom && pnpm run test:spreadsheet-timeout-ui && pnpm run test:bank-csv && pnpm run test:self-assessment",
     "test:ingestion": "esbuild src/lib/spreadsheet.test.ts --bundle --platform=node --format=cjs --outfile=dist/spreadsheet.test.cjs && node --test dist/spreadsheet.test.cjs",
     "test:spreadsheet-ai": "esbuild src/lib/ai.test.ts --bundle --platform=node --format=cjs --outfile=dist/ai.test.cjs && node --test dist/ai.test.cjs",
     "check:spreadsheet-provider": "node ./scripts/run-spreadsheet-provider-compatibility-check.mjs",
