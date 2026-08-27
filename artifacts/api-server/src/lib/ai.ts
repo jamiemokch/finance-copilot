@@ -1119,12 +1119,26 @@ function buildSpreadsheetContractDiagnostic(
 function repairPayloadForContract(content: string): string | null {
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) return null;
   try {
-    const returnedSemanticContent = JSON.parse(content) as unknown;
-    if (!returnedSemanticContent || typeof returnedSemanticContent !== 'object') return null;
+    // A response that failed to parse as JSON at all still carries the
+    // provider's intended semantic decisions as plain text. Falling back to
+    // the raw text (instead of giving up) lets the same bounded repair call
+    // recover it; the repaired response still has to pass the full protected
+    // contract validation below, so no unvalidated content can be accepted.
+    let returnedSemanticContent: unknown;
+    let parsedAsJson = true;
+    try {
+      returnedSemanticContent = JSON.parse(content) as unknown;
+    } catch {
+      parsedAsJson = false;
+      returnedSemanticContent = content;
+    }
+    if (parsedAsJson && (!returnedSemanticContent || typeof returnedSemanticContent !== 'object')) return null;
     const payload = {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       stage: 'repair_response_contract',
-      instruction: 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
+      instruction: parsedAsJson
+        ? 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.'
+        : 'The returned semantic content below was not valid JSON. Reformat only the semantic decisions it already expresses into the supplied response contract as valid JSON. Preserve every semantic decision exactly as intended. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
       responseContract: spreadsheetAIResponseContract,
       returnedSemanticContent,
     };

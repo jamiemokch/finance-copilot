@@ -900,6 +900,79 @@ test('a contract-invalid repair result remains unavailable and cannot become an 
   ]);
 });
 
+test('an initial non-JSON managed-provider response gets one bounded repair pass and can recover a valid contract response', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Non-JSON initial response probe,10\n'), 'text/csv', 'nonjson-repair.csv');
+  let calls = 0;
+  let repairPayload: Record<string, unknown> | undefined;
+  let initialToken: string | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        // Reproduces the confirmed live failure: the managed provider's first
+        // response is prose rather than parseable JSON.
+        return { choices: [{ message: { content: 'Sure — here is my analysis of the workbook in plain English.' } }] };
+      }
+      repairPayload = payload;
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify(finalResponse(initialToken!, [semanticSheet('sheet_1', 'transactional')])),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.equal(calls, 2);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['success', null],
+  ]);
+  const diagnostic = result.providerAttempts?.[0]?.contractDiagnostic;
+  assert.equal(diagnostic?.validationStage, 'json_parse');
+  assert.equal(diagnostic?.checkId, 'schema_invalid');
+  assert.equal(diagnostic?.responseFingerprint, null, 'a response that never parsed as JSON has no structural fingerprint');
+  assert.equal(repairPayload?.stage, 'repair_response_contract');
+  assert.equal(repairPayload?.returnedSemanticContent, 'Sure — here is my analysis of the workbook in plain English.');
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+});
+
+test('an initial non-JSON response whose bounded repair is still contract-invalid stays safely rejected', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Non-JSON repair failure probe,11\n'), 'text/csv', 'nonjson-repair-failure.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return {
+        choices: [{
+          message: {
+            content: calls === 1
+              ? 'Here is a plain-English summary, not JSON at all.'
+              : JSON.stringify({ stillInvalid: true }),
+          },
+        }],
+      };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'AI returned a response that did not pass the protected spreadsheet contract.');
+  assert.equal(result.providerCalls, 2, 'one invalid response and exactly one bounded repair attempt — no unbounded retry loop');
+  assert.equal((result.semanticPlan as { status?: string }).status, 'incomplete');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['contract_invalid', 'repair_validation'],
+  ]);
+  assert.equal(result.providerAttempts?.[0]?.contractDiagnostic?.validationStage, 'json_parse');
+});
+
 test('a schema-invalid response records a safe first Zod issue and never leaks arbitrary payload keys or values', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Legacy schema probe,21\n'), 'text/csv', 'legacy-schema.csv');
   let calls = 0;
