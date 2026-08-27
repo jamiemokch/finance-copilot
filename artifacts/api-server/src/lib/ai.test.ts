@@ -242,6 +242,92 @@ test('JSON-object fallback is available only to an explicit non-managed compatib
   ]);
 });
 
+test('a provider attempt without contractDiagnostic keeps its existing outcome, status, and failure behavior', async () => {
+  const telemetry: SpreadsheetProviderAttempt[] = [];
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0,
+    classifyResponse: () => null,
+    onAttempt: async (attempt) => { telemetry.push(attempt); },
+  });
+
+  assert.equal(result.providerCalls, 1);
+  assert.equal(telemetry.length, 1);
+  assert.equal(telemetry[0].outcomeCategory, 'success');
+  assert.equal(telemetry[0].safeStatus, 'ok');
+  assert.equal(telemetry[0].failurePhase, null);
+  assert.equal(telemetry[0].contractDiagnostic, undefined);
+  assert.equal('contractDiagnostic' in JSON.parse(JSON.stringify(telemetry[0])), false, 'an absent optional field must not appear in the serialized attempt shape');
+});
+
+test('a provider-request failure attempt keeps its existing shape with contractDiagnostic absent', async () => {
+  const telemetry: SpreadsheetProviderAttempt[] = [];
+  const client = {
+    chat: { completions: { create: async () => {
+      const error = new Error('synthetic upstream failure') as Error & { status?: number };
+      error.status = 500;
+      throw error;
+    } } },
+  } as unknown as OpenAI;
+
+  await assert.rejects(() => providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0,
+    maxProviderCalls: 1,
+    onAttempt: async (attempt) => { telemetry.push(attempt); },
+  }));
+
+  assert.equal(telemetry.length, 1);
+  assert.equal(telemetry[0].failurePhase, 'provider_request');
+  assert.equal(telemetry[0].contractDiagnostic, undefined);
+});
+
+test('a classifyResponse implementation may optionally carry contractDiagnostic through without changing outcome/status/failure semantics', async () => {
+  const telemetry: SpreadsheetProviderAttempt[] = [];
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
+  } as unknown as OpenAI;
+  const contractDiagnostic = { diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v1' as const };
+
+  const result = await providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0,
+    classifyResponse: () => ({ outcomeCategory: 'contract_invalid', safeStatus: 'contract_invalid', failurePhase: 'response_validation', contractDiagnostic }),
+    onAttempt: async (attempt) => { telemetry.push(attempt); },
+  });
+
+  assert.equal(result.providerCalls, 1);
+  assert.equal(telemetry.length, 1);
+  assert.equal(telemetry[0].outcomeCategory, 'contract_invalid');
+  assert.equal(telemetry[0].safeStatus, 'contract_invalid');
+  assert.equal(telemetry[0].failurePhase, 'response_validation');
+  assert.deepEqual(telemetry[0].contractDiagnostic, contractDiagnostic);
+});
+
+test('a historical provider attempt literal built without contractDiagnostic remains a valid SpreadsheetProviderAttempt and round-trips through JSON unchanged', () => {
+  const attempt: SpreadsheetProviderAttempt = {
+    telemetryVersion: 'spreadsheet-provider-attempt.v1',
+    attemptNumber: 1,
+    routeClass: 'replit_ai_integrations',
+    requestedModel: SPREADSHEET_PROVIDER_MODEL,
+    resolvedModel: SPREADSHEET_PROVIDER_MODEL,
+    model: SPREADSHEET_PROVIDER_MODEL,
+    responseMode: 'json_schema',
+    startedAt: '2026-08-24T12:48:28.303Z',
+    durationMs: 10,
+    outcomeCategory: 'success',
+    safeStatus: 'ok',
+    statusCode: null,
+    retryable: false,
+    failurePhase: null,
+  };
+
+  const roundTripped = JSON.parse(JSON.stringify(attempt));
+  assert.deepEqual(roundTripped, attempt);
+  assert.equal('contractDiagnostic' in roundTripped, false);
+});
+
 test('the manual compatibility probe sends only a synthetic semantic payload and validates the response contract', async () => {
   let request: Record<string, unknown> | undefined;
   const client = {

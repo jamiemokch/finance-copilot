@@ -129,6 +129,17 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
+export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v1' as const;
+
+/**
+ * Bounded structural metadata only. It deliberately excludes workbook values,
+ * request payloads, response text, provider headers, and raw errors. This
+ * type is currently inert: no call site populates it yet.
+ */
+export type SpreadsheetProviderAttemptContractDiagnostic = {
+  diagnosticVersion: typeof SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION;
+};
+
 /**
  * This contains operational metadata only. It deliberately excludes workbook
  * values, request payloads, response text, provider headers, and raw errors.
@@ -151,6 +162,8 @@ export type SpreadsheetProviderAttempt = {
   statusCode: number | null;
   retryable: boolean;
   failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
+  /** Optional and unpopulated today; carried through unchanged by existing callers. */
+  contractDiagnostic?: SpreadsheetProviderAttemptContractDiagnostic;
 };
 
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */

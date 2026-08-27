@@ -337,7 +337,7 @@ export async function providerCallWithTimeout(
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
     allowJsonObjectFallback?: boolean;
     timeoutReason?: 'timeout' | 'review_deadline';
-    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase'> | null;
+    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'contractDiagnostic'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
 ): Promise<{
@@ -451,6 +451,7 @@ export async function providerCallWithTimeout(
         statusCode: null,
         retryable: false,
         failurePhase: responseFailure?.failurePhase ?? null,
+        contractDiagnostic: responseFailure?.contractDiagnostic,
       });
       return { content, providerCalls, resolvedModel, responseMode };
     } catch (caught) {
