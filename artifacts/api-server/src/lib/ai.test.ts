@@ -13,7 +13,7 @@ import {
   SPREADSHEET_PROVIDER_MODEL,
   type SpreadsheetSemanticSession,
 } from './ai.js';
-import type { SpreadsheetProviderAttempt } from './spreadsheet-understanding.js';
+import { SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION, type SpreadsheetProviderAttempt } from './spreadsheet-understanding.js';
 import {
   buildRequestedSpreadsheetContext,
   buildSpreadsheetWorkbookOverview,
@@ -326,6 +326,44 @@ test('a historical provider attempt literal built without contractDiagnostic rem
   const roundTripped = JSON.parse(JSON.stringify(attempt));
   assert.deepEqual(roundTripped, attempt);
   assert.equal('contractDiagnostic' in roundTripped, false);
+});
+
+test('a response exceeding the response-size safety limit gets only the bounded response_size contractDiagnostic, with existing outcome/status/failure semantics unchanged', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'oversized-response.csv');
+  const sentinel = 'RESPONSE_SIZE_SENTINEL_MUST_NOT_APPEAR_IN_TELEMETRY';
+  const oversized = sentinel + 'x'.repeat(70_000);
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: oversized } }] }) } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'AI returned a response that did not pass the protected spreadsheet contract.');
+  assert.equal(result.providerCalls, 1, 'an oversized response is never sent to the repair pass');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.safeStatus, attempt.failurePhase]), [
+    ['contract_invalid', 'contract_invalid', 'response_validation'],
+  ]);
+  assert.deepEqual(result.providerAttempts?.[0]?.contractDiagnostic, {
+    diagnosticVersion: SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION,
+  });
+  assert.doesNotMatch(JSON.stringify(result.providerAttempts), new RegExp(sentinel), 'raw oversized response content must never reach telemetry');
+});
+
+test('a non-response-size contract failure remains diagnostic-free', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Sale,11\n'), 'text/csv', 'malformed-response.csv');
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: JSON.stringify({ invalid: true }) } }] }) } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['contract_invalid', 'repair_validation'],
+  ]);
+  assert.equal(result.providerAttempts?.every((attempt) => attempt.contractDiagnostic === undefined), true);
 });
 
 test('the manual compatibility probe sends only a synthetic semantic payload and validates the response contract', async () => {

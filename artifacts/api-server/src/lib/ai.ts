@@ -16,10 +16,12 @@ import type { FinancialPosition } from './finance.js';
 import { analyseSpreadsheetStructure, type SpreadsheetAnalysis, type SpreadsheetWorkbook } from './spreadsheet.js';
 import {
   SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
+  SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION,
   spreadsheetUnderstandingProposalSchema,
   type SpreadsheetUnderstandingProposal,
   type SpreadsheetAIEnvelope,
   type SpreadsheetProviderAttempt,
+  type SpreadsheetProviderAttemptContractDiagnostic,
 } from './spreadsheet-understanding.js';
 import {
   analysisFromSemanticPlan,
@@ -1021,6 +1023,12 @@ function parseSpreadsheetProviderResponse(content: string) {
   return legacy.data;
 }
 
+function contractDiagnosticForFailureReason(reason: string): SpreadsheetProviderAttemptContractDiagnostic | undefined {
+  return reason === 'response_too_large'
+    ? { diagnosticVersion: SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION }
+    : undefined;
+}
+
 function responseContractFailure(content: string, workbook: SpreadsheetWorkbook): string | null {
   let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
   try {
@@ -1267,13 +1275,17 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => responseContractFailure(content, workbook)
-            ? {
-              outcomeCategory: 'contract_invalid',
-              safeStatus: 'contract_invalid',
-              failurePhase: 'response_validation',
-            }
-            : null,
+          classifyResponse: (content) => {
+            const reason = responseContractFailure(content, workbook);
+            return reason
+              ? {
+                outcomeCategory: 'contract_invalid',
+                safeStatus: 'contract_invalid',
+                failurePhase: 'response_validation',
+                contractDiagnostic: contractDiagnosticForFailureReason(reason),
+              }
+              : null;
+          },
           onAttempt: async (attempt) => {
             providerAttempts = [...providerAttempts, attempt];
             await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1298,13 +1310,17 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => responseContractFailure(content, workbook)
-              ? {
-                outcomeCategory: 'contract_invalid',
-                safeStatus: 'contract_invalid',
-                failurePhase: 'repair_validation',
-              }
-              : null,
+            classifyResponse: (content) => {
+              const reason = responseContractFailure(content, workbook);
+              return reason
+                ? {
+                  outcomeCategory: 'contract_invalid',
+                  safeStatus: 'contract_invalid',
+                  failurePhase: 'repair_validation',
+                  contractDiagnostic: contractDiagnosticForFailureReason(reason),
+                }
+                : null;
+            },
             onAttempt: async (attempt) => {
               providerAttempts = [...providerAttempts, attempt];
               await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
