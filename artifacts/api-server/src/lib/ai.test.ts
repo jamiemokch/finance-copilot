@@ -900,6 +900,111 @@ test('a contract-invalid repair result remains unavailable and cannot become an 
   ]);
 });
 
+test('a schema-invalid response records a safe first Zod issue and never leaks arbitrary payload keys or values', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Legacy schema probe,21\n'), 'text/csv', 'legacy-schema.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: JSON.stringify({
+        secretCustomerName: 'Jane Example',
+        accountNumber: '12345678',
+        note: 'do not leak this',
+      }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.providerAttempts?.length, 2);
+  for (const attempt of result.providerAttempts ?? []) {
+    assert.equal(attempt.outcomeCategory, 'contract_invalid');
+    const diagnostic = attempt.contractDiagnostic;
+    assert.ok(diagnostic, 'a contract-invalid attempt always carries a diagnostic');
+    assert.equal(diagnostic.validationStage, 'legacy_schema');
+    assert.equal(diagnostic.checkId, 'schema_invalid');
+    assert.equal(typeof diagnostic.issueCode, 'string');
+    assert.deepEqual(diagnostic.responseFingerprint, { rootType: 'object', topLevelKeyCount: 3, knownKeys: [], arrayLength: null });
+    const serialized = JSON.stringify(diagnostic);
+    assert.doesNotMatch(serialized, /Jane Example|12345678|do not leak this|secretCustomerName|accountNumber/);
+  }
+});
+
+test('an oversized provider response records validationStage=response_size and is never sent to a repair pass', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Oversized response probe,22\n'), 'text/csv', 'oversized.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: 'x'.repeat(70_000) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'AI returned a response that did not pass the protected spreadsheet contract.');
+  assert.equal(calls, 1, 'an oversized response is never sent to a repair pass');
+  assert.equal(result.providerAttempts?.length, 1);
+  const diagnostic = result.providerAttempts?.[0]?.contractDiagnostic;
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.validationStage, 'response_size');
+  assert.equal(diagnostic.checkId, 'response_too_large');
+  assert.equal(diagnostic.responseFingerprint, null, 'no fingerprint is captured before JSON parsing');
+});
+
+test('a schema-valid requested-context out-of-bounds rejection is recorded across both response and repair validation phases', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Context out-of-bounds probe,23\n'), 'text/csv', 'context-oob.csv');
+  const client = scriptedClient(() => ({
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'request_context',
+    request: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      continuationToken: 'seed-token-8',
+      allowedSheetIds: ['sheet_1'],
+      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 999_999, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Out of bounds probe.' }],
+    },
+    plan: null,
+  }));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+  ]), [
+    ['response_validation', 'requested_context', 'context_request_out_of_bounds'],
+    ['repair_validation', 'requested_context', 'context_request_out_of_bounds'],
+  ]);
+});
+
+test('an import-plan rejection is recorded with a validationStage distinct from requested-context and protected-check rejections', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Import plan unknown sheet probe,24\n'), 'text/csv', 'import-plan-unknown-sheet.csv');
+  const client = scriptedClient((payload) => finalResponse(String(payload.continuationToken), [
+    semanticSheet('sheet_unknown', 'transactional'),
+  ]));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  const diagnostic = result.providerAttempts?.[0]?.contractDiagnostic;
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.validationStage, 'import_plan');
+  assert.equal(diagnostic.checkId, 'unknown_sheet_reference');
+  assert.notEqual(diagnostic.validationStage, 'requested_context');
+  assert.notEqual(diagnostic.validationStage, 'protected_check');
+});
+
+test('a successful analyse run never attaches a contractDiagnostic to any provider attempt', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Clean success probe,25\n'), 'text/csv', 'clean-success.csv');
+  const client = scriptedClient((payload) => finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.ok(result.providerAttempts?.length);
+  assert.equal(result.providerAttempts?.every((attempt) => attempt.contractDiagnostic === undefined), true);
+});
+
 test('a failed semantic session retries to success without replaying prior provider attempts', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Retry-only sale,17\n'), 'text/csv', 'retry-after-contract-failure.csv');
   const checkpoints: SpreadsheetSemanticSession[] = [];

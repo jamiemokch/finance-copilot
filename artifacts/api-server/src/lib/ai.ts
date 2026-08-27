@@ -1025,26 +1025,6 @@ function parseSpreadsheetProviderResponse(content: string) {
   return legacy.data;
 }
 
-function responseContractFailure(content: string, workbook: SpreadsheetWorkbook): string | null {
-  let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
-  try {
-    parsed = parseSpreadsheetProviderResponse(content);
-  } catch (error) {
-    return error instanceof Error ? error.message : 'schema_invalid';
-  }
-  try {
-    if (parsed.stage === 'request_context') {
-      buildRequestedSpreadsheetContext(workbook, parsed.request);
-    } else {
-      const planError = validateSpreadsheetImportPlan(parsed.plan, workbook);
-      if (planError) return planError;
-    }
-    return null;
-  } catch {
-    return 'contract_invalid';
-  }
-}
-
 const CONTRACT_DIAGNOSTIC_KNOWN_KEYS = ['response', 'schemaVersion', 'stage', 'request', 'plan'] as const;
 const CONTRACT_DIAGNOSTIC_MAX_KEY_COUNT = 200;
 const CONTRACT_DIAGNOSTIC_MAX_ARRAY_LENGTH = 1_000;
@@ -1073,11 +1053,12 @@ function contractDiagnosticResponseFingerprint(raw: unknown): SpreadsheetProvide
 }
 
 /**
- * Mirrors responseContractFailure's exact pass/fail decision (same schemas,
- * same helper calls, same order) but additionally captures which bounded
- * stage/check rejected the response. This is a parallel, read-only
- * classification: it never throws and never changes control flow, so it
- * cannot change existing pass/fail or repair/retry behavior.
+ * The single classifier for both the pass/fail decision and the privacy-safe
+ * diagnostic: it reimplements the same schemas/helper calls in the same
+ * order as parseSpreadsheetProviderResponse so there is exactly one place
+ * that decides why a response is contract-invalid. Returns null on a valid
+ * response (the pass path is unchanged); callers that only need the
+ * pass/fail signal check the result for null.
  */
 function buildSpreadsheetContractDiagnostic(
   content: string,
@@ -1116,7 +1097,7 @@ function buildSpreadsheetContractDiagnostic(
   } else {
     const legacy = spreadsheetAIResponseSchema.safeParse(raw);
     if (!legacy.success) {
-      return diagnostic('legacy_schema', 'schema_invalid', fingerprint, wire.error.issues[0]);
+      return diagnostic('legacy_schema', 'schema_invalid', fingerprint, legacy.error.issues[0]);
     }
     parsed = legacy.data;
   }
@@ -1361,14 +1342,17 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => responseContractFailure(content, workbook)
-            ? {
-              outcomeCategory: 'contract_invalid',
-              safeStatus: 'contract_invalid',
-              failurePhase: 'response_validation',
-              contractDiagnostic: buildSpreadsheetContractDiagnostic(content, workbook) ?? undefined,
-            }
-            : null,
+          classifyResponse: (content) => {
+            const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+            return contractDiagnostic
+              ? {
+                outcomeCategory: 'contract_invalid',
+                safeStatus: 'contract_invalid',
+                failurePhase: 'response_validation',
+                contractDiagnostic,
+              }
+              : null;
+          },
           onAttempt: async (attempt) => {
             providerAttempts = [...providerAttempts, attempt];
             await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1383,7 +1367,7 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        if (responseContractFailure(responseContent, workbook)) {
+        if (buildSpreadsheetContractDiagnostic(responseContent, workbook)) {
           const repairPayload = repairPayloadForContract(responseContent);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
@@ -1393,14 +1377,17 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => responseContractFailure(content, workbook)
-              ? {
-                outcomeCategory: 'contract_invalid',
-                safeStatus: 'contract_invalid',
-                failurePhase: 'repair_validation',
-                contractDiagnostic: buildSpreadsheetContractDiagnostic(content, workbook) ?? undefined,
-              }
-              : null,
+            classifyResponse: (content) => {
+              const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+              return contractDiagnostic
+                ? {
+                  outcomeCategory: 'contract_invalid',
+                  safeStatus: 'contract_invalid',
+                  failurePhase: 'repair_validation',
+                  contractDiagnostic,
+                }
+                : null;
+            },
             onAttempt: async (attempt) => {
               providerAttempts = [...providerAttempts, attempt];
               await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1410,7 +1397,7 @@ export async function analyseSpreadsheetWithAI(
           resolvedModel = repaired.resolvedModel;
           responseMode = repaired.responseMode;
           if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls
-            || responseContractFailure(repaired.content, workbook)) throw new Error('schema_invalid');
+            || buildSpreadsheetContractDiagnostic(repaired.content, workbook)) throw new Error('schema_invalid');
           responseContent = repaired.content;
         }
         const parsed = parseSpreadsheetProviderResponse(responseContent);
