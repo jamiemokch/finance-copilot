@@ -13,7 +13,7 @@ jobs:
       github.event.issue.pull_request == null &&
       contains(github.event.comment.body, '@claude-build')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
       pull-requests: read
@@ -62,11 +62,14 @@ jobs:
           github_token: ${{ secrets.CLAUDE_WORKFLOW_PAT }}
           base_branch: "stabilisation/canonical-20260826"
           prompt: |
-            You are the sole repository implementation engineer for Finance Copilot.
+            You are the sole Tech Team repository engineer for Finance Copilot.
+            The Product/Delivery controller defines the approved outcome, acceptance criteria and risk boundaries; you own technical refinement, internal decomposition, implementation, debugging, tests and commit discipline.
             The controller has already created and checked out the only branch you may modify.
             Do not create, switch, merge, rebase, reset, or delete branches. Never modify main or the canonical branch directly.
-            Follow CLAUDE.md. Execute the approved task directly: inspect only the files needed, implement the smallest evidence-backed change, run only the authorised tests, then commit and push the current branch.
-            Do not spend turns creating GitHub progress comments or todo checklists. Do not re-audit architecture unless the task explicitly says diagnostic only.
+            Follow CLAUDE.md. Solve the approved product outcome as one coherent engineering delivery rather than waiting for controller micro-steps.
+            Inspect only directly relevant dependencies, choose the implementation sequence, implement, test, debug your own direct failures, then commit and push the current branch.
+            Make a checkpoint commit and push as soon as a coherent durable foundation exists; do not defer all commits until the entire task is complete. If execution budget becomes tight, preserve coherent tested progress in a pushed checkpoint and clearly report what remains rather than returning zero durable output.
+            Do not spend turns creating GitHub progress comments or todo checklists. Do not re-audit unrelated architecture unless the task explicitly says diagnostic only.
             Do not access live DB/provider/runtime/web services. Do not deploy.
 
             ISSUE TITLE:
@@ -80,7 +83,7 @@ jobs:
 
             Final response must state Built/Tested/Verified accurately. Never claim Verified from GitHub Actions alone.
           claude_args: |
-            --max-turns 35
+            --max-turns 80
             --allowedTools "Glob,Grep,LS,Read,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pnpm:*),Bash(node:*)"
             --disallowedTools "NotebookEdit,WebSearch,WebFetch,Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(docker:*),Bash(replit:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git merge:*),Bash(git rebase:*),Bash(git reset:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push origin stabilisation/canonical-20260826:*)"
 
