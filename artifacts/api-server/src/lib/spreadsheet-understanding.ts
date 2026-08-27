@@ -129,15 +129,47 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
-export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v1' as const;
+export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v2' as const;
+
+/** Closed set of stages a contract-invalid response can be rejected at. */
+export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_STAGES = [
+  'response_size',
+  'json_parse',
+  'legacy_schema',
+  'requested_context',
+  'import_plan',
+  'protected_check',
+] as const;
+export type SpreadsheetProviderAttemptContractDiagnosticStage =
+  typeof SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_STAGES[number];
+
+/**
+ * Root-shape metadata captured only once a response has parsed as JSON. Key
+ * names are limited to this module's own fixed, whitelisted contract
+ * vocabulary and counts are bounded; it never carries unknown key names,
+ * array/string content, or any workbook or provider text.
+ */
+export type SpreadsheetProviderAttemptResponseFingerprint = {
+  rootType: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null';
+  topLevelKeyCount: number | null;
+  knownKeys: string[];
+  arrayLength: number | null;
+};
 
 /**
  * Bounded structural metadata only. It deliberately excludes workbook values,
- * request payloads, response text, provider headers, and raw errors. This
- * type is currently inert: no call site populates it yet.
+ * request payloads, response text, provider headers, and raw errors.
+ * `checkId` is always one of this module's own existing bounded validator
+ * reason strings; `issueCode`/`issuePath` are the first Zod issue's code and
+ * structural path, never message text.
  */
 export type SpreadsheetProviderAttemptContractDiagnostic = {
   diagnosticVersion: typeof SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION;
+  validationStage: SpreadsheetProviderAttemptContractDiagnosticStage;
+  checkId: string | null;
+  issueCode: string | null;
+  issuePath: string | null;
+  responseFingerprint: SpreadsheetProviderAttemptResponseFingerprint | null;
 };
 
 /**
@@ -162,7 +194,7 @@ export type SpreadsheetProviderAttempt = {
   statusCode: number | null;
   retryable: boolean;
   failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
-  /** Optional and unpopulated today; carried through unchanged by existing callers. */
+  /** Populated only when outcomeCategory is 'contract_invalid'; absent on success and on provider-request failures. */
   contractDiagnostic?: SpreadsheetProviderAttemptContractDiagnostic;
 };
 

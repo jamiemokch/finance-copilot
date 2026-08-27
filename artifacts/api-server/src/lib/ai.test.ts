@@ -289,7 +289,14 @@ test('a classifyResponse implementation may optionally carry contractDiagnostic 
   const client = {
     chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
   } as unknown as OpenAI;
-  const contractDiagnostic = { diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v1' as const };
+  const contractDiagnostic = {
+    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v2' as const,
+    validationStage: 'import_plan' as const,
+    checkId: 'unknown_sheet_reference',
+    issueCode: null,
+    issuePath: null,
+    responseFingerprint: null,
+  };
 
   const result = await providerCallWithTimeout(client, '{}', {
     retryDelayMs: 0,
