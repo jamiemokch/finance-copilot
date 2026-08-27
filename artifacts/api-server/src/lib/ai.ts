@@ -17,9 +17,13 @@ import { analyseSpreadsheetStructure, type SpreadsheetAnalysis, type Spreadsheet
 import {
   SPREADSHEET_UNDERSTANDING_SCHEMA_VERSION,
   spreadsheetUnderstandingProposalSchema,
+  SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION,
   type SpreadsheetUnderstandingProposal,
   type SpreadsheetAIEnvelope,
   type SpreadsheetProviderAttempt,
+  type SpreadsheetProviderAttemptContractDiagnostic,
+  type SpreadsheetProviderAttemptContractDiagnosticStage,
+  type SpreadsheetProviderAttemptResponseFingerprint,
 } from './spreadsheet-understanding.js';
 import {
   analysisFromSemanticPlan,
@@ -1021,23 +1025,94 @@ function parseSpreadsheetProviderResponse(content: string) {
   return legacy.data;
 }
 
-function responseContractFailure(content: string, workbook: SpreadsheetWorkbook): string | null {
-  let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
+const CONTRACT_DIAGNOSTIC_KNOWN_KEYS = ['response', 'schemaVersion', 'stage', 'request', 'plan'] as const;
+const CONTRACT_DIAGNOSTIC_MAX_KEY_COUNT = 200;
+const CONTRACT_DIAGNOSTIC_MAX_ARRAY_LENGTH = 1_000;
+const CONTRACT_DIAGNOSTIC_MAX_ISSUE_PATH_SEGMENTS = 10;
+
+function contractDiagnosticResponseFingerprint(raw: unknown): SpreadsheetProviderAttemptResponseFingerprint {
+  if (Array.isArray(raw)) {
+    return { rootType: 'array', topLevelKeyCount: null, knownKeys: [], arrayLength: Math.min(raw.length, CONTRACT_DIAGNOSTIC_MAX_ARRAY_LENGTH) };
+  }
+  if (raw === null) return { rootType: 'null', topLevelKeyCount: null, knownKeys: [], arrayLength: null };
+  if (typeof raw === 'object') {
+    const keys = Object.keys(raw as Record<string, unknown>);
+    return {
+      rootType: 'object',
+      topLevelKeyCount: Math.min(keys.length, CONTRACT_DIAGNOSTIC_MAX_KEY_COUNT),
+      knownKeys: CONTRACT_DIAGNOSTIC_KNOWN_KEYS.filter((key) => keys.includes(key)),
+      arrayLength: null,
+    };
+  }
+  return {
+    rootType: typeof raw === 'string' ? 'string' : typeof raw === 'number' ? 'number' : typeof raw === 'boolean' ? 'boolean' : 'null',
+    topLevelKeyCount: null,
+    knownKeys: [],
+    arrayLength: null,
+  };
+}
+
+/**
+ * The single classifier for both the pass/fail decision and the privacy-safe
+ * diagnostic: it reimplements the same schemas/helper calls in the same
+ * order as parseSpreadsheetProviderResponse so there is exactly one place
+ * that decides why a response is contract-invalid. Returns null on a valid
+ * response (the pass path is unchanged); callers that only need the
+ * pass/fail signal check the result for null.
+ */
+function buildSpreadsheetContractDiagnostic(
+  content: string,
+  workbook: SpreadsheetWorkbook,
+): SpreadsheetProviderAttemptContractDiagnostic | null {
+  const diagnostic = (
+    validationStage: SpreadsheetProviderAttemptContractDiagnosticStage,
+    checkId: string | null,
+    responseFingerprint: SpreadsheetProviderAttemptResponseFingerprint | null = null,
+    issue?: { code: string; path: Array<string | number> },
+  ): SpreadsheetProviderAttemptContractDiagnostic => ({
+    diagnosticVersion: SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION,
+    validationStage,
+    checkId,
+    issueCode: issue?.code ?? null,
+    issuePath: issue && issue.path.length
+      ? issue.path.slice(0, CONTRACT_DIAGNOSTIC_MAX_ISSUE_PATH_SEGMENTS).map(String).join('.')
+      : null,
+    responseFingerprint,
+  });
+
+  if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
+    return diagnostic('response_size', 'response_too_large');
+  }
+  let raw: unknown;
   try {
-    parsed = parseSpreadsheetProviderResponse(content);
-  } catch (error) {
-    return error instanceof Error ? error.message : 'schema_invalid';
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    return diagnostic('json_parse', 'schema_invalid');
+  }
+  const fingerprint = contractDiagnosticResponseFingerprint(raw);
+  const wire = spreadsheetAIProviderWireResponseSchema.safeParse(raw);
+  let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
+  if (wire.success) {
+    parsed = wire.data.response;
+  } else {
+    const legacy = spreadsheetAIResponseSchema.safeParse(raw);
+    if (!legacy.success) {
+      return diagnostic('legacy_schema', 'schema_invalid', fingerprint, legacy.error.issues[0]);
+    }
+    parsed = legacy.data;
   }
   try {
     if (parsed.stage === 'request_context') {
       buildRequestedSpreadsheetContext(workbook, parsed.request);
     } else {
       const planError = validateSpreadsheetImportPlan(parsed.plan, workbook);
-      if (planError) return planError;
+      if (planError) return diagnostic('import_plan', planError, fingerprint);
     }
     return null;
-  } catch {
-    return 'contract_invalid';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : null;
+    if (message?.startsWith('context_request')) return diagnostic('requested_context', message, fingerprint);
+    return diagnostic('protected_check', 'contract_invalid', fingerprint);
   }
 }
 
@@ -1267,13 +1342,17 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => responseContractFailure(content, workbook)
-            ? {
-              outcomeCategory: 'contract_invalid',
-              safeStatus: 'contract_invalid',
-              failurePhase: 'response_validation',
-            }
-            : null,
+          classifyResponse: (content) => {
+            const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+            return contractDiagnostic
+              ? {
+                outcomeCategory: 'contract_invalid',
+                safeStatus: 'contract_invalid',
+                failurePhase: 'response_validation',
+                contractDiagnostic,
+              }
+              : null;
+          },
           onAttempt: async (attempt) => {
             providerAttempts = [...providerAttempts, attempt];
             await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1288,7 +1367,7 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        if (responseContractFailure(responseContent, workbook)) {
+        if (buildSpreadsheetContractDiagnostic(responseContent, workbook)) {
           const repairPayload = repairPayloadForContract(responseContent);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
@@ -1298,13 +1377,17 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => responseContractFailure(content, workbook)
-              ? {
-                outcomeCategory: 'contract_invalid',
-                safeStatus: 'contract_invalid',
-                failurePhase: 'repair_validation',
-              }
-              : null,
+            classifyResponse: (content) => {
+              const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+              return contractDiagnostic
+                ? {
+                  outcomeCategory: 'contract_invalid',
+                  safeStatus: 'contract_invalid',
+                  failurePhase: 'repair_validation',
+                  contractDiagnostic,
+                }
+                : null;
+            },
             onAttempt: async (attempt) => {
               providerAttempts = [...providerAttempts, attempt];
               await testOptions?.persistProviderAttempts?.(providerAttempts, attempt.attemptNumber - attemptOffset);
@@ -1314,7 +1397,7 @@ export async function analyseSpreadsheetWithAI(
           resolvedModel = repaired.resolvedModel;
           responseMode = repaired.responseMode;
           if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls
-            || responseContractFailure(repaired.content, workbook)) throw new Error('schema_invalid');
+            || buildSpreadsheetContractDiagnostic(repaired.content, workbook)) throw new Error('schema_invalid');
           responseContent = repaired.content;
         }
         const parsed = parseSpreadsheetProviderResponse(responseContent);
