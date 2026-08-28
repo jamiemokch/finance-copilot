@@ -208,6 +208,17 @@ export const spreadsheetAIProviderWireResponseSchema = z.object({
   response: spreadsheetAIResponseSchema,
 }).strict();
 
+/**
+ * The same requested-context budgets enforced by buildRequestedSpreadsheetContext
+ * below, derived directly from SPREADSHEET_SEMANTIC_LIMITS so the AI-visible
+ * contract and the protected validator can never drift independently.
+ */
+export const spreadsheetRequestedContextBudget = {
+  maxRequestedRanges: SPREADSHEET_SEMANTIC_LIMITS.maxRequestedRanges,
+  maxRowsPerRequestedRange: SPREADSHEET_SEMANTIC_LIMITS.maxRowsPerRequestedRange,
+  maxCellsPerRequestedRange: SPREADSHEET_SEMANTIC_LIMITS.maxCellsPerRequestedRange,
+} as const;
+
 /** Compact JSON-schema-like contract sent with every provider request. */
 export const spreadsheetAIResponseContract = {
   schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
@@ -218,6 +229,10 @@ export const spreadsheetAIResponseContract = {
       request: {
         required: ['schemaVersion', 'continuationToken', 'allowedSheetIds', 'requests'],
         requestItem: { required: ['sheetId', 'startRow', 'endRow', 'startColumn', 'endColumn', 'chunk', 'reason'] },
+      },
+      requestBudget: {
+        ...spreadsheetRequestedContextBudget,
+        rule: 'Each request item\'s row count (endRow - startRow + 1) must be at most maxRowsPerRequestedRange, and its cell count (rows x columns) must be at most maxCellsPerRequestedRange. At most maxRequestedRanges request items are allowed.',
       },
       plan: null,
     },

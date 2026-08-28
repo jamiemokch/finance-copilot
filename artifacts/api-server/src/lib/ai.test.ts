@@ -1117,6 +1117,155 @@ test('an out-of-bounds requested-context rejection is repaired with safe parser 
   ]);
 });
 
+test('a schema-valid requested-context over-limit rejection is recorded across both response and repair validation phases', async () => {
+  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Over-limit probe row ${index + 1},${index + 1}`).join('\n');
+  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-over-limit.csv');
+  const client = scriptedClient(() => ({
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'request_context',
+    request: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      continuationToken: 'seed-token-9',
+      allowedSheetIds: ['sheet_1'],
+      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Over-limit probe.' }],
+    },
+    plan: null,
+  }));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+  ]), [
+    ['response_validation', 'requested_context', 'context_request_limit_exceeded'],
+    ['repair_validation', 'requested_context', 'context_request_limit_exceeded'],
+  ]);
+});
+
+test('an over-limit requested-context rejection is repaired with the authoritative budget and proceeds through normal validation', async () => {
+  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Budget repair probe row ${index + 1},${index + 1}`).join('\n');
+  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-limit-repair.csv');
+  let calls = 0;
+  let repairPayload: Record<string, unknown> | undefined;
+  let initialToken: string | undefined;
+  const overLimitRequest = (token: string) => ({
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'request_context',
+    request: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      continuationToken: token,
+      allowedSheetIds: ['sheet_1'],
+      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs enough rows to see the pattern.' }],
+    },
+    plan: null,
+  });
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken)) } }] };
+      }
+      if (calls === 2) {
+        repairPayload = payload;
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                stage: 'request_context',
+                request: {
+                  schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                  continuationToken: initialToken,
+                  allowedSheetIds: ['sheet_1'],
+                  requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 40, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs enough rows to see the pattern.' }],
+                },
+                plan: null,
+              }),
+            },
+          }],
+        };
+      }
+      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 3, 'exactly one bounded repair call precedes the follow-up requested-context call');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(repairPayload?.requestBudget, { maxRequestedRanges: 4, maxRowsPerRequestedRange: 40, maxCellsPerRequestedRange: 480 });
+  assert.match(String(repairPayload?.instruction), /requestBudget/);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'sheetBounds'), false, 'an over-limit repair never carries out-of-bounds sheet bounds');
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+  assert.doesNotMatch(JSON.stringify(repairPayload), /Budget repair probe row/);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['success', null],
+    ['success', null],
+  ]);
+});
+
+test('a still-over-limit repaired requested-context response remains rejected', async () => {
+  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Still over limit probe row ${index + 1},${index + 1}`).join('\n');
+  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-limit-repair-fail.csv');
+  let calls = 0;
+  let initialToken: string | undefined;
+  const overLimitRequest = (token: string, endRow: number) => ({
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'request_context',
+    request: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      continuationToken: token,
+      allowedSheetIds: ['sheet_1'],
+      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Still needs too many rows.' }],
+    },
+    plan: null,
+  });
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken, 50)) } }] };
+      }
+      return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken!, 45)) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and exactly one bounded repair attempt — no unbounded retry loop');
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.contractDiagnostic?.checkId), [
+    'context_request_limit_exceeded',
+    'context_request_limit_exceeded',
+  ]);
+});
+
+test('the initial workbook-overview payload exposes the same authoritative requested-context budget enforced by the protected validator', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Initial budget exposure probe,27\n'), 'text/csv', 'initial-budget-exposure.csv');
+  let initialPayload: Record<string, unknown> | undefined;
+  const client = scriptedClient((payload) => {
+    if (!initialPayload) initialPayload = payload;
+    return finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]);
+  });
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  const responseContract = initialPayload?.responseContract as Record<string, unknown>;
+  const response = responseContract.response as Record<string, unknown>;
+  const requestBudget = (response.requestContext as Record<string, unknown>).requestBudget as Record<string, unknown>;
+  assert.equal(requestBudget.maxRequestedRanges, 4);
+  assert.equal(requestBudget.maxRowsPerRequestedRange, 40);
+  assert.equal(requestBudget.maxCellsPerRequestedRange, 480);
+  assert.equal(typeof requestBudget.rule, 'string');
+  assert.match(String(initialPayload?.instruction), /requestBudget/);
+});
+
 test('an import-plan rejection is recorded with a validationStage distinct from requested-context and protected-check rejections', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Import plan unknown sheet probe,24\n'), 'text/csv', 'import-plan-unknown-sheet.csv');
   const client = scriptedClient((payload) => finalResponse(String(payload.continuationToken), [
