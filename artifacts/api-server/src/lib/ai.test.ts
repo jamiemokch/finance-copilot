@@ -290,7 +290,7 @@ test('a classifyResponse implementation may optionally carry contractDiagnostic 
     chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
   } as unknown as OpenAI;
   const contractDiagnostic = {
-    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v2' as const,
+    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v3' as const,
     validationStage: 'import_plan' as const,
     checkId: 'unknown_sheet_reference',
     issueCode: null,
@@ -973,6 +973,159 @@ test('an initial non-JSON response whose bounded repair is still contract-invali
     ['contract_invalid', 'repair_validation'],
   ]);
   assert.equal(result.providerAttempts?.[0]?.contractDiagnostic?.validationStage, 'json_parse');
+});
+
+test('providerCallWithTimeout classifies a null-content response envelope distinctly from string content, without leaking refusal text', async () => {
+  const telemetry: SpreadsheetProviderAttempt[] = [];
+  const client = {
+    chat: { completions: { create: async () => ({
+      choices: [{
+        message: { content: null, refusal: 'a private reason the provider declined to answer' },
+        finish_reason: 'content_filter',
+      }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', {
+    retryDelayMs: 0,
+    classifyResponse: (content, envelope) => {
+      assert.equal(content, '', 'null content is still surfaced as an empty string to existing string-typed callers');
+      assert.deepEqual(envelope, {
+        contentPresence: 'null_or_absent',
+        refusalPresent: true,
+        finishReason: 'content_filter',
+        choiceCount: 1,
+      });
+      return null;
+    },
+    onAttempt: async (attempt) => { telemetry.push(attempt); },
+  });
+
+  assert.equal(result.content, '');
+  assert.deepEqual(result.responseEnvelope, {
+    contentPresence: 'null_or_absent',
+    refusalPresent: true,
+    finishReason: 'content_filter',
+    choiceCount: 1,
+  });
+  assert.deepEqual(telemetry[0]?.responseEnvelope, result.responseEnvelope);
+  const serialized = JSON.stringify(telemetry[0]);
+  assert.doesNotMatch(serialized, /a private reason the provider declined to answer/, 'raw refusal text never enters persisted attempt telemetry');
+});
+
+test('providerCallWithTimeout records refusalPresent by field presence, not truthiness, without leaking refusal text', async () => {
+  const emptyRefusalClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null, refusal: '' }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const emptyRefusalResult = await providerCallWithTimeout(emptyRefusalClient, '{}', { retryDelayMs: 0 });
+  assert.equal(emptyRefusalResult.responseEnvelope.refusalPresent, true, 'a present-but-empty refusal string is still a populated refusal field');
+
+  const noRefusalFieldClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const noRefusalFieldResult = await providerCallWithTimeout(noRefusalFieldClient, '{}', { retryDelayMs: 0 });
+  assert.equal(noRefusalFieldResult.responseEnvelope.refusalPresent, false, 'an absent refusal field must not be recorded as present');
+
+  const nullRefusalClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null, refusal: null }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const nullRefusalResult = await providerCallWithTimeout(nullRefusalClient, '{}', { retryDelayMs: 0 });
+  assert.equal(nullRefusalResult.responseEnvelope.refusalPresent, false, 'an explicit null refusal field must not be recorded as present');
+});
+
+test('providerCallWithTimeout classifies a string-content response envelope even when the content is not valid JSON', async () => {
+  const client = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: 'plain prose, not JSON' }, finish_reason: 'stop' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const result = await providerCallWithTimeout(client, '{}', { retryDelayMs: 0 });
+  assert.equal(result.content, 'plain prose, not JSON');
+  assert.deepEqual(result.responseEnvelope, {
+    contentPresence: 'string',
+    refusalPresent: false,
+    finishReason: 'stop',
+    choiceCount: 1,
+  });
+});
+
+test('a valid strict-schema JSON response still follows the existing success path and reports a string content envelope', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Envelope success probe,12\n'), 'text/csv', 'envelope-success.csv');
+  const client = scriptedClient((payload) => finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.equal(result.providerAttempts?.length, 1);
+  assert.equal(result.providerAttempts?.[0]?.outcomeCategory, 'success');
+  assert.deepEqual(result.providerAttempts?.[0]?.responseEnvelope, {
+    contentPresence: 'string',
+    refusalPresent: false,
+    finishReason: 'missing',
+    choiceCount: 1,
+  });
+});
+
+test('an initial null-content managed-provider response is classified as null_content, not json_parse/schema_invalid, and is never sent to semantic repair', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Null content initial probe,13\n'), 'text/csv', 'null-content-initial.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      // Reproduces the confirmed observability gap: the managed provider's
+      // response carries no content at all (e.g. a refusal or an alternate
+      // terminal envelope), which previously collapsed to '' and was
+      // indistinguishable from malformed JSON.
+      return { choices: [{ message: { content: null }, finish_reason: 'content_filter' }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 1, 'null/absent content is never forwarded into a semantic repair pass');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCategory, 'response_contract_invalid');
+  assert.equal(result.providerCalls, 1);
+  assert.equal(result.providerAttempts?.length, 1);
+  const diagnostic = result.providerAttempts?.[0]?.contractDiagnostic;
+  assert.equal(diagnostic?.validationStage, 'null_content');
+  assert.equal(diagnostic?.checkId, 'no_content');
+  assert.notEqual(diagnostic?.validationStage, 'json_parse');
+});
+
+test('a null-content bounded repair response is classified with the same envelope rule as the initial call', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Null content repair probe,14\n'), 'text/csv', 'null-content-repair.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      if (calls === 1) {
+        // A recoverable diagnostic (non-JSON prose) triggers exactly one
+        // bounded repair pass, matching existing repair behavior.
+        return { choices: [{ message: { content: 'Here is a plain-English summary, not JSON at all.' }, finish_reason: 'stop' }] };
+      }
+      // The repair pass itself returns null/absent content — the same
+      // envelope classification used on the initial call must apply here too.
+      return { choices: [{ message: { content: null }, finish_reason: 'content_filter' }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'exactly one bounded repair attempt — no unbounded retry loop');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.providerCalls, 2);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase, attempt.contractDiagnostic?.validationStage]), [
+    ['contract_invalid', 'response_validation', 'json_parse'],
+    ['contract_invalid', 'repair_validation', 'null_content'],
+  ]);
 });
 
 test('a schema-invalid response records a safe first Zod issue and never leaks arbitrary payload keys or values', async () => {

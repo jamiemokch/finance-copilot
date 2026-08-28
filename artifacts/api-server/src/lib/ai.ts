@@ -24,6 +24,7 @@ import {
   type SpreadsheetProviderAttemptContractDiagnostic,
   type SpreadsheetProviderAttemptContractDiagnosticStage,
   type SpreadsheetProviderAttemptResponseFingerprint,
+  type SpreadsheetProviderAttemptResponseEnvelope,
 } from './spreadsheet-understanding.js';
 import {
   analysisFromSemanticPlan,
@@ -330,6 +331,16 @@ function validateProposalSemantics(proposal: SpreadsheetUnderstandingProposal, a
   return null;
 }
 
+const SPREADSHEET_PROVIDER_FINISH_REASON_ALLOWLIST = new Set(['stop', 'length', 'content_filter', 'tool_calls', 'function_call']);
+
+/** Normalizes the provider's finish_reason into a bounded, known allowlist; never passes through an arbitrary provider string. */
+function normalizeSpreadsheetProviderFinishReason(value: unknown): SpreadsheetProviderAttemptResponseEnvelope['finishReason'] {
+  if (value == null) return 'missing';
+  return typeof value === 'string' && SPREADSHEET_PROVIDER_FINISH_REASON_ALLOWLIST.has(value)
+    ? value as SpreadsheetProviderAttemptResponseEnvelope['finishReason']
+    : 'other';
+}
+
 export async function providerCallWithTimeout(
   client: OpenAI,
   payload: string,
@@ -343,7 +354,7 @@ export async function providerCallWithTimeout(
     routeClass?: SpreadsheetProviderAttempt['routeClass'];
     allowJsonObjectFallback?: boolean;
     timeoutReason?: 'timeout' | 'review_deadline';
-    classifyResponse?: (content: string) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'contractDiagnostic'> | null;
+    classifyResponse?: (content: string, envelope: SpreadsheetProviderAttemptResponseEnvelope) => Pick<SpreadsheetProviderAttempt, 'outcomeCategory' | 'safeStatus' | 'failurePhase' | 'contractDiagnostic'> | null;
     onAttempt?: (attempt: SpreadsheetProviderAttempt) => Promise<void>;
   } = {},
 ): Promise<{
@@ -351,6 +362,7 @@ export async function providerCallWithTimeout(
   providerCalls: number;
   resolvedModel: string;
   responseMode: SpreadsheetProviderAttempt['responseMode'];
+  responseEnvelope: SpreadsheetProviderAttemptResponseEnvelope;
 }> {
   const timeoutMs = options.timeoutMs ?? SPREADSHEET_AI_LIMITS.timeoutMs;
   const retryDelayMs = options.retryDelayMs ?? SPREADSHEET_AI_LIMITS.retryDelayMs;
@@ -440,8 +452,23 @@ export async function providerCallWithTimeout(
           // SDK create invisible additional provider work underneath that cap.
           maxRetries: 0,
         } as never);
-      const content = response.choices[0]?.message?.content ?? '';
-      const responseFailure = options.classifyResponse?.(content);
+      const choice = response.choices[0];
+      const rawContent = choice?.message?.content;
+      // Preserve the null/absent-vs-string distinction for classification before
+      // collapsing to '' for downstream JSON parsing; collapsing first (as before)
+      // destroyed this distinction and made null/absent content indistinguishable
+      // from malformed JSON.
+      const content = typeof rawContent === 'string' ? rawContent : '';
+      const responseEnvelope: SpreadsheetProviderAttemptResponseEnvelope = {
+        contentPresence: typeof rawContent === 'string' ? 'string' : 'null_or_absent',
+        // Presence, not truthiness: a present-but-empty refusal string is still a
+        // refusal field the provider populated, and must record true. Only
+        // null/absent should record false. Never store the refusal text itself.
+        refusalPresent: typeof choice?.message?.refusal === 'string',
+        finishReason: normalizeSpreadsheetProviderFinishReason(choice?.finish_reason),
+        choiceCount: Math.min(Array.isArray(response.choices) ? response.choices.length : 0, 10),
+      };
+      const responseFailure = options.classifyResponse?.(content, responseEnvelope);
       await options.onAttempt?.({
         telemetryVersion: SPREADSHEET_PROVIDER_TELEMETRY_VERSION,
         attemptNumber: (options.attemptOffset ?? 0) + providerCalls,
@@ -458,8 +485,9 @@ export async function providerCallWithTimeout(
         retryable: false,
         failurePhase: responseFailure?.failurePhase ?? null,
         contractDiagnostic: responseFailure?.contractDiagnostic,
+        responseEnvelope,
       });
-      return { content, providerCalls, resolvedModel, responseMode };
+      return { content, providerCalls, resolvedModel, responseMode, responseEnvelope };
     } catch (caught) {
       const error = timedOut ? new Error(timeoutReason) : caught;
       lastError = error;
@@ -1065,6 +1093,7 @@ function contractDiagnosticResponseFingerprint(raw: unknown): SpreadsheetProvide
 function buildSpreadsheetContractDiagnostic(
   content: string,
   workbook: SpreadsheetWorkbook,
+  responseEnvelope?: SpreadsheetProviderAttemptResponseEnvelope | null,
 ): SpreadsheetProviderAttemptContractDiagnostic | null {
   const diagnostic = (
     validationStage: SpreadsheetProviderAttemptContractDiagnosticStage,
@@ -1082,6 +1111,13 @@ function buildSpreadsheetContractDiagnostic(
     responseFingerprint,
   });
 
+  if (responseEnvelope?.contentPresence === 'null_or_absent') {
+    // The provider returned no content at all (e.g. a refusal or an
+    // alternate terminal envelope). Classify this explicitly rather than
+    // collapsing it to '' and letting JSON.parse('') report a generic
+    // json_parse/schema_invalid failure that looks like malformed JSON text.
+    return diagnostic('null_content', responseEnvelope.refusalPresent ? 'refusal' : 'no_content');
+  }
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) {
     return diagnostic('response_size', 'response_too_large');
   }
@@ -1429,8 +1465,8 @@ export async function analyseSpreadsheetWithAI(
           attemptOffset: attemptOffset + providerCalls,
           initialResolvedModel: resolvedModel,
           initialResponseMode: responseMode,
-          classifyResponse: (content) => {
-            const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+          classifyResponse: (content, envelope) => {
+            const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook, envelope);
             return contractDiagnostic
               ? {
                 outcomeCategory: 'contract_invalid',
@@ -1454,8 +1490,11 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        const initialContractDiagnostic = buildSpreadsheetContractDiagnostic(responseContent, workbook);
+        const initialContractDiagnostic = buildSpreadsheetContractDiagnostic(responseContent, workbook, result.responseEnvelope);
         if (initialContractDiagnostic) {
+          // Null/absent content never carries semantic decisions, so it is
+          // never forwarded to the bounded repair pass as though it did.
+          if (initialContractDiagnostic.validationStage === 'null_content') throw new Error('null_content');
           const repairPayload = repairPayloadForContract(responseContent, overview, initialContractDiagnostic);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
@@ -1465,8 +1504,8 @@ export async function analyseSpreadsheetWithAI(
             attemptOffset: attemptOffset + providerCalls,
             initialResolvedModel: resolvedModel,
             initialResponseMode: responseMode,
-            classifyResponse: (content) => {
-              const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook);
+            classifyResponse: (content, envelope) => {
+              const contractDiagnostic = buildSpreadsheetContractDiagnostic(content, workbook, envelope);
               return contractDiagnostic
                 ? {
                   outcomeCategory: 'contract_invalid',
@@ -1484,8 +1523,10 @@ export async function analyseSpreadsheetWithAI(
           providerCalls += repaired.providerCalls;
           resolvedModel = repaired.resolvedModel;
           responseMode = repaired.responseMode;
-          if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls
-            || buildSpreadsheetContractDiagnostic(repaired.content, workbook)) throw new Error('schema_invalid');
+          const repairedDiagnostic = buildSpreadsheetContractDiagnostic(repaired.content, workbook, repaired.responseEnvelope);
+          if (providerCalls > SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls || repairedDiagnostic) {
+            throw new Error(repairedDiagnostic?.validationStage === 'null_content' ? 'null_content' : 'schema_invalid');
+          }
           responseContent = repaired.content;
         }
         const parsed = parseSpreadsheetProviderResponse(responseContent);
@@ -1541,7 +1582,7 @@ export async function analyseSpreadsheetWithAI(
       const failureCategory = error instanceof SpreadsheetProviderFailure
         ? error.category
         : message === 'timeout' ? 'transport_failure'
-          : message === 'schema_invalid' || message === 'continuation_invalid' ? 'response_contract_invalid'
+          : message === 'schema_invalid' || message === 'continuation_invalid' || message === 'null_content' ? 'response_contract_invalid'
             : 'provider_unavailable';
       const timedOut = message === 'timeout' || message === 'review_deadline';
       const reason = failureCategory === 'model_unavailable'
