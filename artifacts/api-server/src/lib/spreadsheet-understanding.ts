@@ -172,7 +172,17 @@ export type SpreadsheetAIEnvelope = {
   analysis?: SpreadsheetAnalysis;
   continuationToken?: string;
   reason?: string;
-  failureCategory?: 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'response_contract_invalid' | 'provider_unavailable';
+  failureCategory?: 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'response_contract_invalid' | 'semantic_validation' | 'provider_unavailable';
+  diagnostic?: {
+    phase: 'configuration' | 'provider_request' | 'response_validation' | 'repair_validation' | 'semantic_validation' | 'complete';
+    category: 'timeout' | 'model_unavailable' | 'provider_schema_invalid' | 'transport_failure' | 'response_contract_invalid' | 'semantic_validation' | 'provider_unavailable' | 'success';
+    providerReached: boolean;
+    providerSucceeded: boolean;
+    providerCalls: number;
+    safeStatus: string;
+    code: string;
+    httpStatus: number | null;
+  };
   sampledSheetIds: string[];
   providerCalls: number;
   providerAttempts?: SpreadsheetProviderAttempt[];

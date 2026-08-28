@@ -57,6 +57,7 @@ export type SpreadsheetProviderFailureCategory =
   | 'provider_schema_invalid'
   | 'transport_failure'
   | 'response_contract_invalid'
+  | 'semantic_validation'
   | 'provider_unavailable';
 
 class SpreadsheetProviderFailure extends Error {
@@ -1030,9 +1031,6 @@ function responseContractFailure(content: string, workbook: SpreadsheetWorkbook)
   try {
     if (parsed.stage === 'request_context') {
       buildRequestedSpreadsheetContext(workbook, parsed.request);
-    } else {
-      const planError = validateSpreadsheetImportPlan(parsed.plan, workbook);
-      if (planError) return planError;
     }
     return null;
   } catch {
@@ -1079,6 +1077,8 @@ export async function analyseSpreadsheetWithAI(
     // A durable lease holder must never inherit a stale worker's in-process
     // promise after its database claim has been reclaimed.
     inFlightKey?: string;
+    /** Test-only stale health state; deliberately ignored by workbook review. */
+    compatibilityState?: SpreadsheetProviderCompatibilityCheckResult | null;
   },
 ): Promise<SpreadsheetAIEnvelope> {
   const structuralAnalysis = analyseSpreadsheetStructure(workbook);
@@ -1100,7 +1100,12 @@ export async function analyseSpreadsheetWithAI(
     continuationToken = initialToken,
     providerAttempts: SpreadsheetProviderAttempt[] = [],
     failureCategory?: SpreadsheetProviderFailureCategory,
-  ): SpreadsheetAIEnvelope => ({
+  ): SpreadsheetAIEnvelope => {
+    // Keep the first failure as the primary diagnostic; the full ordered
+    // providerAttempts array preserves every later retry outcome.
+    const firstFailure = providerAttempts.find((attempt) => attempt.outcomeCategory !== 'success');
+    const timedOut = firstFailure?.outcomeCategory === 'timeout';
+    return ({
     status,
     proposal: null,
     semanticPlan: incompletePlanForWorkbook(workbook, continuationToken, abstention),
@@ -1111,8 +1116,20 @@ export async function analyseSpreadsheetWithAI(
     sampledSheetIds: [],
     providerCalls,
     providerAttempts,
+    diagnostic: {
+      phase: (failureCategory === 'semantic_validation' ? 'semantic_validation'
+        : firstFailure?.failurePhase ?? (providerCalls ? 'provider_request' : 'configuration')),
+      category: timedOut ? 'timeout' : (failureCategory ?? 'provider_unavailable'),
+      providerReached: providerCalls > 0,
+      providerSucceeded: providerAttempts.some((attempt) => attempt.outcomeCategory === 'success' || attempt.outcomeCategory === 'contract_invalid'),
+      providerCalls,
+      safeStatus: firstFailure?.safeStatus ?? failureCategory ?? 'provider_unavailable',
+      code: firstFailure?.safeStatus ?? failureCategory ?? 'provider_unavailable',
+      httpStatus: firstFailure?.statusCode ?? null,
+    },
     limits,
   });
+  };
   const tooLarge = workbook.totalParserRows > SPREADSHEET_AI_LIMITS.largeWorkbookRows
     || workbook.totalParserCells > SPREADSHEET_AI_LIMITS.largeWorkbookCells
     || workbook.sheets.length > SPREADSHEET_AI_LIMITS.largeWorkbookSheets
@@ -1136,6 +1153,11 @@ export async function analyseSpreadsheetWithAI(
         sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId),
         providerCalls: 0,
         providerAttempts: persisted.providerAttempts ?? [],
+        diagnostic: {
+          phase: complete ? 'complete' : 'semantic_validation', category: complete ? 'success' : 'semantic_validation',
+          providerReached: false, providerSucceeded: complete, providerCalls: 0,
+          safeStatus: complete ? 'ok' : 'semantic_validation', code: complete ? 'ok' : 'semantic_validation', httpStatus: null,
+        },
         limits,
       };
     }
@@ -1150,30 +1172,9 @@ export async function analyseSpreadsheetWithAI(
       reason: 'operational_limit', detail: 'The workbook exceeds the bounded interpretation limit.', manualRecoveryRequired: true,
     });
   }
-  let providerPolicy = SPREADSHEET_PROVIDER_POLICY;
-  if (!testOptions?.client) {
-    try {
-      providerPolicy = await verifiedManagedSpreadsheetProviderPolicy();
-    } catch (error) {
-      const failureCategory = error instanceof SpreadsheetProviderFailure
-        ? error.category
-        : 'provider_unavailable';
-      const reason = failureCategory === 'model_unavailable'
-        ? 'Automatic review is unavailable because the configured review model is not available.'
-        : failureCategory === 'provider_schema_invalid'
-          ? 'Automatic review is unavailable because the provider rejected the review format.'
-          : failureCategory === 'response_contract_invalid'
-            ? 'Automatic review is unavailable because the provider contract check did not pass.'
-            : 'Automatic review is temporarily unavailable. No records were imported.';
-      return incomplete('incomplete', reason, {
-        reason: failureCategory === 'provider_schema_invalid' || failureCategory === 'response_contract_invalid'
-          ? 'provider_schema_invalid'
-          : 'provider_unavailable',
-        detail: reason,
-        manualRecoveryRequired: true,
-      }, 0, initialToken, [], failureCategory);
-    }
-  }
+  // A synthetic compatibility check is an operator diagnostic, never a gate
+  // for a user's real workbook request. The real call below is authoritative.
+  const providerPolicy = SPREADSHEET_PROVIDER_POLICY;
   const overview = buildSpreadsheetWorkbookOverview(workbook);
   const executionCacheScope = testOptions?.session
     ? `${testOptions.session.executionId ?? "legacy"}:${testOptions.session.executionNumber ?? 0}`
@@ -1227,7 +1228,7 @@ export async function analyseSpreadsheetWithAI(
       continuationToken: token,
       overview,
       responseContract: spreadsheetAIResponseContract,
-      instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient.',
+      instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. An empty include list is valid and means that no rows from that sheet are importable; never infer an implicit include range. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient.',
     };
     let contextHistory = resumable ? testOptions!.session!.contextHistory : [];
     const checkpoint = async (
@@ -1339,7 +1340,7 @@ export async function analyseSpreadsheetWithAI(
         const plan: SpreadsheetImportPlan = parsed.plan;
         if (plan.continuationToken !== token) throw new Error('continuation_invalid');
         const planError = validateSpreadsheetImportPlan(plan, workbook);
-        if (planError) throw new Error(planError);
+        if (planError) throw new SpreadsheetProviderFailure('semantic_validation');
         if (plan.status !== 'complete' || parsed.stage === 'abstain') {
           await checkpoint('incomplete', plan);
           return {
@@ -1353,6 +1354,10 @@ export async function analyseSpreadsheetWithAI(
           status: 'success', proposal: null, semanticPlan: plan, semanticOverview: overview,
           analysis: analysisFromSemanticPlan(workbook, plan), continuationToken: token,
           sampledSheetIds: workbook.sheets.map((sheet) => sheet.sheetId), providerCalls, providerAttempts, limits,
+          diagnostic: {
+            phase: 'complete', category: 'success', providerReached: providerCalls > 0, providerSucceeded: true,
+            providerCalls, safeStatus: 'ok', code: 'ok', httpStatus: null,
+          },
         };
         await checkpoint('complete', plan);
         spreadsheetAICache.set(cacheKey, { expiresAt: Date.now() + SPREADSHEET_SEMANTIC_LIMITS.cacheTtlMs, envelope });
@@ -1382,6 +1387,8 @@ export async function analyseSpreadsheetWithAI(
               ? 'Automatic review is temporarily unavailable because the provider could not be reached.'
             : failureCategory === 'response_contract_invalid'
               ? 'AI returned a response that did not pass the protected spreadsheet contract.'
+            : failureCategory === 'semantic_validation'
+              ? 'AI returned a spreadsheet plan that did not pass semantic validation.'
           : message.includes('context_request') || message === 'response_too_large' ? 'AI requested context outside the safe limits.'
             : 'AI analysis could not complete.';
       const abstentionReason = timedOut ? 'provider_timeout'
