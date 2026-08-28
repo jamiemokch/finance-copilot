@@ -838,6 +838,7 @@ test('a provider-success contract-invalid response gets one bounded repair pass 
   assert.match(JSON.stringify(repairPayload), /returnedSemanticContent/);
   assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
   assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'sheetBounds'), false, 'a non-requested-context repair never carries parser bounds');
   assert.doesNotMatch(JSON.stringify(repairPayload), /Private consulting payment/);
 });
 
@@ -941,6 +942,7 @@ test('an initial non-JSON managed-provider response gets one bounded repair pass
   assert.equal(repairPayload?.returnedSemanticContent, 'Sure — here is my analysis of the workbook in plain English.');
   assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
   assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'sheetBounds'), false, 'a non-requested-context repair never carries parser bounds');
 });
 
 test('an initial non-JSON response whose bounded repair is still contract-invalid stays safely rejected', async () => {
@@ -1049,6 +1051,69 @@ test('a schema-valid requested-context out-of-bounds rejection is recorded acros
   ]), [
     ['response_validation', 'requested_context', 'context_request_out_of_bounds'],
     ['repair_validation', 'requested_context', 'context_request_out_of_bounds'],
+  ]);
+});
+
+test('an out-of-bounds requested-context rejection is repaired with safe parser bounds and proceeds through normal validation', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Bounded coordinate repair probe,26\n'), 'text/csv', 'context-oob-repair.csv');
+  let calls = 0;
+  let repairPayload: Record<string, unknown> | undefined;
+  let initialToken: string | undefined;
+  const outOfBoundsRequest = (token: string) => ({
+    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+    stage: 'request_context',
+    request: {
+      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+      continuationToken: token,
+      allowedSheetIds: ['sheet_1'],
+      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 999_999, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs the header and one movement.' }],
+    },
+    plan: null,
+  });
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        return { choices: [{ message: { content: JSON.stringify(outOfBoundsRequest(initialToken)) } }] };
+      }
+      if (calls === 2) {
+        repairPayload = payload;
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                stage: 'request_context',
+                request: {
+                  schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+                  continuationToken: initialToken,
+                  allowedSheetIds: ['sheet_1'],
+                  requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 2, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs the header and one movement.' }],
+                },
+                plan: null,
+              }),
+            },
+          }],
+        };
+      }
+      return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 3, 'exactly one bounded repair call precedes the follow-up requested-context call');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(repairPayload?.sheetBounds, { sheet_1: { startRow: 1, endRow: 2, startColumn: 1, endColumn: 3 } });
+  assert.match(String(repairPayload?.instruction), /sheetBounds/);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
+  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
+  assert.doesNotMatch(JSON.stringify(repairPayload), /Bounded coordinate repair probe/);
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
+    ['contract_invalid', 'response_validation'],
+    ['success', null],
+    ['success', null],
   ]);
 });
 
