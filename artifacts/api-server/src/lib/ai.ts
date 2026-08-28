@@ -45,6 +45,7 @@ import {
   buildSpreadsheetProviderPositiveCompatibilityWorkbook,
   SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
   type SpreadsheetImportPlan,
+  type SpreadsheetStructuralWorkbook,
 } from './spreadsheet-semantic-contract.js';
 
 const FINANCE_COPILOT_MODEL = 'gpt-5.4-mini';
@@ -1116,7 +1117,58 @@ function buildSpreadsheetContractDiagnostic(
   }
 }
 
-function repairPayloadForContract(content: string): string | null {
+type SpreadsheetRepairSheetBounds = Record<string, {
+  startRow: number; endRow: number; startColumn: number; endColumn: number;
+} | null>;
+
+/**
+ * Reads only the sheet identifiers the provider itself referenced in its
+ * rejected request (allowedSheetIds / requests[].sheetId). This never widens
+ * scope to sheets the provider didn't ask about.
+ */
+function extractRequestedSpreadsheetContextSheetIds(raw: unknown): string[] {
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  const envelope = isRecord(raw) && isRecord(raw.response) ? raw.response : raw;
+  const request = isRecord(envelope) ? envelope.request : null;
+  if (!isRecord(request)) return [];
+  const ids = new Set<string>();
+  if (Array.isArray(request.allowedSheetIds)) {
+    for (const id of request.allowedSheetIds) if (typeof id === 'string') ids.add(id);
+  }
+  if (Array.isArray(request.requests)) {
+    for (const item of request.requests) {
+      if (isRecord(item) && typeof item.sheetId === 'string') ids.add(item.sheetId);
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * Privacy-safe structural bounds (sheetId -> parserRange) for exactly the
+ * sheets the rejected request referenced, sourced from the same redacted
+ * overview already sent to the provider. No cell values or new metadata.
+ */
+function safeSheetBoundsForOutOfBoundsRequestRepair(
+  overview: SpreadsheetStructuralWorkbook,
+  raw: unknown,
+): SpreadsheetRepairSheetBounds | null {
+  const sheetIds = extractRequestedSpreadsheetContextSheetIds(raw);
+  if (!sheetIds.length) return null;
+  const bounds: SpreadsheetRepairSheetBounds = {};
+  for (const id of sheetIds) {
+    const sheet = overview.sheets.find((item) => item.sheetId === id);
+    if (!sheet) continue;
+    bounds[id] = sheet.parserRange ? { ...sheet.parserRange } : null;
+  }
+  return Object.keys(bounds).length ? bounds : null;
+}
+
+function repairPayloadForContract(
+  content: string,
+  overview: SpreadsheetStructuralWorkbook,
+  contractDiagnostic: SpreadsheetProviderAttemptContractDiagnostic | null,
+): string | null {
   if (Buffer.byteLength(content) > SPREADSHEET_SEMANTIC_LIMITS.maxResponseBytes) return null;
   try {
     // A response that failed to parse as JSON at all still carries the
@@ -1133,13 +1185,24 @@ function repairPayloadForContract(content: string): string | null {
       returnedSemanticContent = content;
     }
     if (parsedAsJson && (!returnedSemanticContent || typeof returnedSemanticContent !== 'object')) return null;
+    // Every other diagnostic type keeps the existing generic repair
+    // instruction; only a confirmed out-of-bounds requested-context
+    // rejection gets narrowly scoped coordinate-only repair authority.
+    const sheetBounds = parsedAsJson
+      && contractDiagnostic?.validationStage === 'requested_context'
+      && contractDiagnostic.checkId === 'context_request_out_of_bounds'
+      ? safeSheetBoundsForOutOfBoundsRequestRepair(overview, returnedSemanticContent)
+      : null;
     const payload = {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       stage: 'repair_response_contract',
-      instruction: parsedAsJson
-        ? 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.'
-        : 'The returned semantic content below was not valid JSON. Reformat only the semantic decisions it already expresses into the supplied response contract as valid JSON. Preserve every semantic decision exactly as intended. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
+      instruction: sheetBounds
+        ? 'The requested_context request in returnedSemanticContent has a range outside the safe bounds supplied in sheetBounds. Adjust only the out-of-bounds startRow, endRow, startColumn, and endColumn values in each request item so every range fits within its sheetId\'s bounds in sheetBounds. Preserve sheetId, chunk, reason, the continuation token, and every other value exactly as returned. Do not add workbook facts, infer classifications, create new sheet, column, row, question, or continuation identifiers, or widen the request beyond fitting the supplied bounds. Return only the repaired contract JSON.'
+        : parsedAsJson
+          ? 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.'
+          : 'The returned semantic content below was not valid JSON. Reformat only the semantic decisions it already expresses into the supplied response contract as valid JSON. Preserve every semantic decision exactly as intended. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
       responseContract: spreadsheetAIResponseContract,
+      ...(sheetBounds ? { sheetBounds } : {}),
       returnedSemanticContent,
     };
     return safeJsonSize(payload) <= SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes
@@ -1381,8 +1444,9 @@ export async function analyseSpreadsheetWithAI(
           }, providerCalls, token, providerAttempts);
         }
         let responseContent = result.content;
-        if (buildSpreadsheetContractDiagnostic(responseContent, workbook)) {
-          const repairPayload = repairPayloadForContract(responseContent);
+        const initialContractDiagnostic = buildSpreadsheetContractDiagnostic(responseContent, workbook);
+        if (initialContractDiagnostic) {
+          const repairPayload = repairPayloadForContract(responseContent, overview, initialContractDiagnostic);
           if (!repairPayload || providerCalls >= SPREADSHEET_SEMANTIC_LIMITS.maxProviderCalls) throw new Error('schema_invalid');
           const repaired = await providerCallWithTimeout(testOptions?.client ?? getClient(), repairPayload, {
             ...timeoutForNextProviderCall(),
