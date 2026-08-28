@@ -461,7 +461,10 @@ export async function providerCallWithTimeout(
       const content = typeof rawContent === 'string' ? rawContent : '';
       const responseEnvelope: SpreadsheetProviderAttemptResponseEnvelope = {
         contentPresence: typeof rawContent === 'string' ? 'string' : 'null_or_absent',
-        refusalPresent: Boolean(choice?.message?.refusal),
+        // Presence, not truthiness: a present-but-empty refusal string is still a
+        // refusal field the provider populated, and must record true. Only
+        // null/absent should record false. Never store the refusal text itself.
+        refusalPresent: typeof choice?.message?.refusal === 'string',
         finishReason: normalizeSpreadsheetProviderFinishReason(choice?.finish_reason),
         choiceCount: Math.min(Array.isArray(response.choices) ? response.choices.length : 0, 10),
       };

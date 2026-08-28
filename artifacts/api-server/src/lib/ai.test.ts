@@ -1013,6 +1013,35 @@ test('providerCallWithTimeout classifies a null-content response envelope distin
   assert.doesNotMatch(serialized, /a private reason the provider declined to answer/, 'raw refusal text never enters persisted attempt telemetry');
 });
 
+test('providerCallWithTimeout records refusalPresent by field presence, not truthiness, without leaking refusal text', async () => {
+  const emptyRefusalClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null, refusal: '' }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const emptyRefusalResult = await providerCallWithTimeout(emptyRefusalClient, '{}', { retryDelayMs: 0 });
+  assert.equal(emptyRefusalResult.responseEnvelope.refusalPresent, true, 'a present-but-empty refusal string is still a populated refusal field');
+
+  const noRefusalFieldClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const noRefusalFieldResult = await providerCallWithTimeout(noRefusalFieldClient, '{}', { retryDelayMs: 0 });
+  assert.equal(noRefusalFieldResult.responseEnvelope.refusalPresent, false, 'an absent refusal field must not be recorded as present');
+
+  const nullRefusalClient = {
+    chat: { completions: { create: async () => ({
+      choices: [{ message: { content: null, refusal: null }, finish_reason: 'content_filter' }],
+    }) } },
+  } as unknown as OpenAI;
+
+  const nullRefusalResult = await providerCallWithTimeout(nullRefusalClient, '{}', { retryDelayMs: 0 });
+  assert.equal(nullRefusalResult.responseEnvelope.refusalPresent, false, 'an explicit null refusal field must not be recorded as present');
+});
+
 test('providerCallWithTimeout classifies a string-content response envelope even when the content is not valid JSON', async () => {
   const client = {
     chat: { completions: { create: async () => ({
