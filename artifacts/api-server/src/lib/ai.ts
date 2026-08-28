@@ -36,6 +36,7 @@ import {
   spreadsheetAIProviderWireResponseSchema,
   spreadsheetAIResponseContract,
   spreadsheetAIResponseJsonSchema,
+  spreadsheetRequestedContextBudget,
   spreadsheetImportPlanSchema,
   validateSpreadsheetImportPlan,
   buildSpreadsheetProviderCompatibilityPayload,
@@ -1186,23 +1187,32 @@ function repairPayloadForContract(
     }
     if (parsedAsJson && (!returnedSemanticContent || typeof returnedSemanticContent !== 'object')) return null;
     // Every other diagnostic type keeps the existing generic repair
-    // instruction; only a confirmed out-of-bounds requested-context
-    // rejection gets narrowly scoped coordinate-only repair authority.
+    // instruction; only a confirmed out-of-bounds or over-limit
+    // requested-context rejection gets narrowly scoped coordinate-only
+    // repair authority.
     const sheetBounds = parsedAsJson
       && contractDiagnostic?.validationStage === 'requested_context'
       && contractDiagnostic.checkId === 'context_request_out_of_bounds'
       ? safeSheetBoundsForOutOfBoundsRequestRepair(overview, returnedSemanticContent)
+      : null;
+    const requestBudget = parsedAsJson
+      && contractDiagnostic?.validationStage === 'requested_context'
+      && contractDiagnostic.checkId === 'context_request_limit_exceeded'
+      ? spreadsheetRequestedContextBudget
       : null;
     const payload = {
       schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
       stage: 'repair_response_contract',
       instruction: sheetBounds
         ? 'The requested_context request in returnedSemanticContent has a range outside the safe bounds supplied in sheetBounds. Adjust only the out-of-bounds startRow, endRow, startColumn, and endColumn values in each request item so every range fits within its sheetId\'s bounds in sheetBounds. Preserve sheetId, chunk, reason, the continuation token, and every other value exactly as returned. Do not add workbook facts, infer classifications, create new sheet, column, row, question, or continuation identifiers, or widen the request beyond fitting the supplied bounds. Return only the repaired contract JSON.'
-        : parsedAsJson
-          ? 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.'
-          : 'The returned semantic content below was not valid JSON. Reformat only the semantic decisions it already expresses into the supplied response contract as valid JSON. Preserve every semantic decision exactly as intended. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
+        : requestBudget
+          ? 'At least one request item in returnedSemanticContent exceeds the supplied requestBudget: its row count (endRow - startRow + 1) exceeds maxRowsPerRequestedRange, or its cell count (rows x columns) exceeds maxCellsPerRequestedRange. Reduce only the startRow, endRow, startColumn, and endColumn values in each over-budget request item so its row count and cell count each fit within requestBudget. Only shrink a range; never expand it beyond what was already returned. Preserve sheetId, chunk, reason, the continuation token, the number of request items, and every other value exactly as returned. Do not add workbook facts, infer classifications, create new sheet, column, row, question, or continuation identifiers, or add or remove request items. Return only the repaired contract JSON.'
+          : parsedAsJson
+            ? 'Reformat only the returned semantic content into the supplied response contract. Preserve every semantic decision exactly as returned. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.'
+            : 'The returned semantic content below was not valid JSON. Reformat only the semantic decisions it already expresses into the supplied response contract as valid JSON. Preserve every semantic decision exactly as intended. Do not add workbook facts, infer classifications, create sheet, column, row, question, or continuation identifiers, or request more context. Return only the repaired contract JSON.',
       responseContract: spreadsheetAIResponseContract,
       ...(sheetBounds ? { sheetBounds } : {}),
+      ...(requestBudget ? { requestBudget } : {}),
       returnedSemanticContent,
     };
     return safeJsonSize(payload) <= SPREADSHEET_SEMANTIC_LIMITS.maxRequestBytes
@@ -1380,7 +1390,7 @@ export async function analyseSpreadsheetWithAI(
       continuationToken: token,
       overview,
       responseContract: spreadsheetAIResponseContract,
-      instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient.',
+      instruction: 'Interpret spreadsheet semantics. You own worksheet purpose, transaction/reference distinction, ranges, fields, inclusion rules, direction, and overlap hypotheses. Return only the versioned response contract. Do not write records. Request bounded context when the overview is insufficient; each request_context request item must fit within responseContract.response.requestContext.requestBudget (rows per range, cells per range, and total request items).',
     };
     let contextHistory = resumable ? testOptions!.session!.contextHistory : [];
     const checkpoint = async (
