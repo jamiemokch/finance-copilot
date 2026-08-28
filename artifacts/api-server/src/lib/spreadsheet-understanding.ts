@@ -129,11 +129,12 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
-export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v2' as const;
+export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v3' as const;
 
 /** Closed set of stages a contract-invalid response can be rejected at. */
 export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_STAGES = [
   'response_size',
+  'null_content',
   'json_parse',
   'legacy_schema',
   'requested_context',
@@ -173,6 +174,21 @@ export type SpreadsheetProviderAttemptContractDiagnostic = {
 };
 
 /**
+ * Bounded, privacy-safe facts about the provider's chat-completion envelope
+ * itself, captured before `message.content` is ever collapsed to `''`. This
+ * is what lets telemetry distinguish "the provider returned null/absent
+ * content" (e.g. a refusal or an alternate terminal envelope) from "the
+ * provider returned non-JSON text". It never carries refusal text, message
+ * content, or any other provider-authored string.
+ */
+export type SpreadsheetProviderAttemptResponseEnvelope = {
+  contentPresence: 'string' | 'null_or_absent';
+  refusalPresent: boolean;
+  finishReason: 'stop' | 'length' | 'content_filter' | 'tool_calls' | 'function_call' | 'other' | 'missing';
+  choiceCount: number;
+};
+
+/**
  * This contains operational metadata only. It deliberately excludes workbook
  * values, request payloads, response text, provider headers, and raw errors.
  */
@@ -196,6 +212,8 @@ export type SpreadsheetProviderAttempt = {
   failurePhase: 'provider_request' | 'response_validation' | 'repair_validation' | null;
   /** Populated only when outcomeCategory is 'contract_invalid'; absent on success and on provider-request failures. */
   contractDiagnostic?: SpreadsheetProviderAttemptContractDiagnostic;
+  /** Populated whenever a provider response was actually received (success or contract-invalid); absent on provider-request/transport failures where there is no response to describe. */
+  responseEnvelope?: SpreadsheetProviderAttemptResponseEnvelope;
 };
 
 /** Literal schema metadata is kept beside the validator so the contract can be exported to tooling. */
