@@ -64,8 +64,8 @@ jobs:
       - name: Run isolated evidence DB regression suite
         run: pnpm --filter @workspace/api-server run test:evidence-safety
 
-      - name: Build workspace library type declarations
-        run: pnpm run typecheck:libs
+      - name: Build API-server referenced library type declarations
+        run: pnpm exec tsc --build lib/db lib/api-zod lib/integrations-openai-ai-server
 
       - name: Run API-server typecheck
         run: pnpm --filter @workspace/api-server run typecheck
