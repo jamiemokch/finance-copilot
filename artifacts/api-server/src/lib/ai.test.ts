@@ -290,7 +290,7 @@ test('a classifyResponse implementation may optionally carry contractDiagnostic 
     chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
   } as unknown as OpenAI;
   const contractDiagnostic = {
-    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v3' as const,
+    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v4' as const,
     validationStage: 'import_plan' as const,
     checkId: 'unknown_sheet_reference',
     issueCode: null,
@@ -1159,6 +1159,42 @@ test('a schema-invalid response records a safe first Zod issue and never leaks a
   }
 });
 
+test('an enveloped response whose inner payload fails validation is classified as wire_schema, never the legacy whole-object fallback', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Wire schema probe,24\n'), 'text/csv', 'wire-schema.csv');
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async () => {
+      calls += 1;
+      // Structurally a current transport envelope (top-level `response` key)
+      // whose inner payload does not satisfy the response union — this must
+      // not be misreported as a legacy unwrapped payload.
+      return { choices: [{ message: { content: JSON.stringify({
+        response: {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          stage: 'final_plan',
+          request: null,
+          plan: { status: 'not_a_real_status' },
+        },
+      }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'failed');
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.providerAttempts?.length, 2);
+  for (const attempt of result.providerAttempts ?? []) {
+    assert.equal(attempt.outcomeCategory, 'contract_invalid');
+    const diagnostic = attempt.contractDiagnostic;
+    assert.ok(diagnostic, 'a contract-invalid attempt always carries a diagnostic');
+    assert.equal(diagnostic.validationStage, 'wire_schema');
+    assert.notEqual(diagnostic.validationStage, 'legacy_schema');
+    assert.equal(diagnostic.checkId, 'schema_invalid');
+    assert.equal(typeof diagnostic.issueCode, 'string');
+    assert.deepEqual(diagnostic.responseFingerprint?.knownKeys, ['response']);
+  }
+});
+
 test('an oversized provider response records validationStage=response_size and is never sent to a repair pass', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Oversized response probe,22\n'), 'text/csv', 'oversized.csv');
   let calls = 0;
@@ -1438,6 +1474,16 @@ test('an import-plan rejection is recorded with a validationStage distinct from 
 test('a successful analyse run never attaches a contractDiagnostic to any provider attempt', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Clean success probe,25\n'), 'text/csv', 'clean-success.csv');
   const client = scriptedClient((payload) => finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]));
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(result.status, 'success');
+  assert.ok(result.providerAttempts?.length);
+  assert.equal(result.providerAttempts?.every((attempt) => attempt.contractDiagnostic === undefined), true);
+});
+
+test('a valid current transport envelope with a top-level response key still parses and succeeds unchanged', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Enveloped success probe,26\n'), 'text/csv', 'wire-schema-success.csv');
+  const client = scriptedClient((payload) => ({ response: finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')]) }));
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
   assert.equal(result.status, 'success');
