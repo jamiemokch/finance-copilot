@@ -2643,14 +2643,38 @@ router.delete("/profiles/:profileId/evidence/:evidenceId/links/:transactionId", 
   try {
     const profile = await requireProfile(req.params.profileId, req.user.id);
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
-    const [link] = await db.update(evidenceTransactionLinksTable).set({
-      linkStatus: "detached", detachedAt: new Date(),
-    }).where(and(
-      eq(evidenceTransactionLinksTable.profileId, profile.id),
-      eq(evidenceTransactionLinksTable.evidenceId, req.params.evidenceId),
-      eq(evidenceTransactionLinksTable.transactionId, req.params.transactionId),
-      eq(evidenceTransactionLinksTable.linkStatus, "active"),
-    )).returning();
+    const link = await db.transaction(async (tx) => {
+      const [detached] = await tx.update(evidenceTransactionLinksTable).set({
+        linkStatus: "detached", detachedAt: new Date(),
+      }).where(and(
+        eq(evidenceTransactionLinksTable.profileId, profile.id),
+        eq(evidenceTransactionLinksTable.evidenceId, req.params.evidenceId),
+        eq(evidenceTransactionLinksTable.transactionId, req.params.transactionId),
+        eq(evidenceTransactionLinksTable.linkStatus, "active"),
+      )).returning();
+      if (!detached) return undefined;
+      // A confirmed document loses its terminal state only when this was its
+      // last active link — otherwise it is still backing another confirmed
+      // Financial Memory record and must stay confirmed.
+      const remainingActiveLinks = await tx.select({ id: evidenceTransactionLinksTable.id })
+        .from(evidenceTransactionLinksTable)
+        .where(and(
+          eq(evidenceTransactionLinksTable.profileId, profile.id),
+          eq(evidenceTransactionLinksTable.evidenceId, detached.evidenceId),
+          eq(evidenceTransactionLinksTable.linkStatus, "active"),
+        )).for("update");
+      if (remainingActiveLinks.length === 0) {
+        await tx.update(evidenceItemsTable).set({
+          status: "needs_review",
+          reviewState: "reviewed",
+        }).where(and(
+          eq(evidenceItemsTable.id, detached.evidenceId),
+          eq(evidenceItemsTable.profileId, profile.id),
+          eq(evidenceItemsTable.reviewState, "confirmed"),
+        ));
+      }
+      return detached;
+    });
     if (!link) { res.status(404).json({ error: "Active evidence link not found" }); return; }
     await addEvidenceAudit(profile.id, link.evidenceId, req.user.id, "transaction_link_detached", { transactionId: link.transactionId });
     res.status(204).end();

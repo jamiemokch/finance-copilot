@@ -441,6 +441,43 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
     assert.equal(detached.status, 204);
     const afterDetach = await request(aliceSession, `/api/profiles/${alicePrimary}/position`);
     assert.deepEqual(immutableFinancialSnapshot(afterDetach.body), immutableFinancialSnapshot(afterAttach.body));
+    const [evidenceAfterPartialDetach] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceId));
+    assert.equal(
+      evidenceAfterPartialDetach.reviewState,
+      'confirmed',
+      'a confirmed document keeps its confirmed state while another active link (the original confirmation) remains',
+    );
+    assert.equal(evidenceAfterPartialDetach.status, 'processed');
+
+    const lastLinkDetach = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/links/${confirmationKey}`, {
+      method: 'DELETE',
+    });
+    assert.equal(lastLinkDetach.status, 204);
+    const [evidenceAfterFinalDetach] = await db.select().from(evidenceItemsTable).where(eq(evidenceItemsTable.id, evidenceId));
+    assert.equal(
+      evidenceAfterFinalDetach.reviewState,
+      'reviewed',
+      'detaching the final active link restores the saved-review state instead of leaving a stale confirmed flag',
+    );
+    assert.equal(evidenceAfterFinalDetach.status, 'needs_review');
+    const unmatchedAfterFinalDetach = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/unmatched`);
+    assert.equal(unmatchedAfterFinalDetach.status, 200);
+    assert.ok(
+      unmatchedAfterFinalDetach.body.some((item: { id: string }) => item.id === evidenceId),
+      'a document with no remaining active links returns to the review queue',
+    );
+    const financialMemoryAfterFinalDetach = await db.select().from(transactionsTable)
+      .where(and(eq(transactionsTable.id, confirmationKey), eq(transactionsTable.profileId, alicePrimary)));
+    assert.equal(
+      financialMemoryAfterFinalDetach.length,
+      1,
+      'detaching supporting evidence must not delete or duplicate the confirmed Financial Memory transaction',
+    );
+
+    const redetachAttempt = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/links/${confirmationKey}`, {
+      method: 'DELETE',
+    });
+    assert.equal(redetachAttempt.status, 404, 'detaching an already-detached link is not treated as a new active link');
 
     const replacementUpload = await upload(aliceSession, alicePrimary, 'replacement receipt bytes');
     const replacement = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${evidenceId}/replace`, {
