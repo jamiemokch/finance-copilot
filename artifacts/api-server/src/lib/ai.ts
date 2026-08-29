@@ -1132,6 +1132,13 @@ function buildSpreadsheetContractDiagnostic(
   let parsed: ReturnType<typeof parseSpreadsheetProviderResponse>;
   if (wire.success) {
     parsed = wire.data.response;
+  } else if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && 'response' in raw) {
+    // A structurally current transport envelope (top-level `response` key)
+    // whose inner payload failed the wire schema. Report that primary
+    // failure directly instead of falling through to the legacy whole-object
+    // union below, which would mask it behind a misleading legacy_schema
+    // diagnostic for a response that was never a legacy unwrapped payload.
+    return diagnostic('wire_schema', 'schema_invalid', fingerprint, wire.error.issues[0]);
   } else {
     const legacy = spreadsheetAIResponseSchema.safeParse(raw);
     if (!legacy.success) {

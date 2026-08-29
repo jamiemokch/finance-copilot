@@ -129,13 +129,14 @@ export const spreadsheetUnderstandingProposalSchema = z.object({
 export type SpreadsheetUnderstandingProposal = z.infer<typeof spreadsheetUnderstandingProposalSchema>;
 export type SpreadsheetAIStatus = 'not_requested' | 'not_sampled' | 'success' | 'partial' | 'fallback' | 'failed' | 'incomplete' | 'abstained';
 
-export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v3' as const;
+export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION = 'spreadsheet-provider-attempt-contract-diagnostic.v4' as const;
 
 /** Closed set of stages a contract-invalid response can be rejected at. */
 export const SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_STAGES = [
   'response_size',
   'null_content',
   'json_parse',
+  'wire_schema',
   'legacy_schema',
   'requested_context',
   'import_plan',
