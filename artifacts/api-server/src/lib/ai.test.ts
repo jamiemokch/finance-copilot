@@ -1195,6 +1195,56 @@ test('an enveloped response whose inner payload fails validation is classified a
   }
 });
 
+test('a transactional first-sheet plan missing a required description column binding fails wire_schema custom at response.plan.sheets.0, matching the reported bounded failure class, and the pipeline recovers once repair supplies it', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Description binding probe,18\n'), 'text/csv', 'description-binding.csv');
+  let calls = 0;
+  let initialToken = '';
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        // Otherwise-complete transactional sheet plan, but the description
+        // column binding is missing — the exact bounded custom-refinement
+        // class reported at response.plan.sheets.0.
+        const incompleteSheet = semanticSheet('sheet_1', 'transactional');
+        incompleteSheet.fields = {
+          ...incompleteSheet.fields,
+          description: { columnId: null, confidence: 0, rationale: 'Not confident in this bounded context.' },
+        };
+        // The reported failure carries a `response` transport envelope
+        // (wire_schema), not the legacy unwrapped payload.
+        return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [incompleteSheet]) }) } }] };
+      }
+      repairPayload = payload;
+      return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [semanticSheet('sheet_1', 'transactional')]) }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.outcomeCategory,
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+    attempt.contractDiagnostic?.issueCode,
+    attempt.contractDiagnostic?.issuePath,
+  ]), [
+    ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan.sheets.0'],
+    ['success', null, undefined, undefined, undefined, undefined],
+  ]);
+  const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { sheet?: { transactionalRule?: string } } } } } | undefined;
+  assert.match(
+    String(contract?.response?.finalOrAbstain?.plan?.sheet?.transactionalRule),
+    /description/,
+    'the repair prompt states that a description column binding is required for transactional sheets',
+  );
+});
+
 test('an oversized provider response records validationStage=response_size and is never sent to a repair pass', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Oversized response probe,22\n'), 'text/csv', 'oversized.csv');
   let calls = 0;
