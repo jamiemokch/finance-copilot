@@ -246,7 +246,7 @@ export const spreadsheetAIResponseContract = {
           disposition: ['transactional', 'summary', 'reference', 'duplicate', 'excluded', 'unresolved', 'not_analysed'],
           decisionSource: ['ai', 'user', 'manual_recovery'],
           fields: ['date', 'description', 'signedAmount', 'debit', 'credit', 'category'],
-          transactionalRule: 'requires headerRow, dataRange, date and amount/debit/credit column IDs, and at least one include rowRule',
+          transactionalRule: 'requires headerRow, a dataRange whose startRow is after headerRow, column IDs for both date and description, column IDs for either signedAmount or both debit and credit together, and at least one include rowRule',
         },
       },
     },
