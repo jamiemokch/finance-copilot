@@ -1,5 +1,6 @@
 import { Badge, Button, Card } from '@/components/ui';
 import { evidenceApi, transactionsApi, type APIEvidenceItem, type APIEvidenceLink, type APITransaction } from '@/lib/api';
+import { detachEvidenceAndRefresh } from '@/lib/evidence-detach';
 import { useStore, type TransactionItem } from '@/lib/store';
 import { ArrowLeft, CalendarDays, ChevronRight, Clock3, FileText, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -134,14 +135,22 @@ export default function FinancialMemory() {
     if (!entry || !activeProfileId || !window.confirm('Detach this supporting document? The financial record will not be changed.')) return;
     setDocumentActionId(evidenceId);
     setError('');
-    try {
-      await evidenceApi.detach(activeProfileId, evidenceId, entry.id);
-      setLinkedEvidence(current => current.filter(link => link.evidenceId !== evidenceId));
-    } catch {
+    const result = await detachEvidenceAndRefresh({
+      detach: () => evidenceApi.detach(activeProfileId, evidenceId, entry.id),
+      fetchLinks: () => transactionsApi.evidenceLinks(activeProfileId, entry.id),
+      refreshGlobalState: refreshData,
+    });
+    if (result.outcome === 'detach_failed') {
       setError('We could not detach this supporting document. Please try again.');
-    } finally {
-      setDocumentActionId(null);
+    } else if (result.outcome === 'refresh_failed') {
+      // The detach itself succeeded server-side; only the follow-up refresh failed.
+      // Drop the known-detached link locally rather than claim the detach failed.
+      setLinkedEvidence(current => current.filter(link => link.evidenceId !== evidenceId));
+      setError('The document was detached, but we could not refresh your records. Please refresh the page.');
+    } else {
+      setLinkedEvidence(result.linkedEvidence);
     }
+    setDocumentActionId(null);
   };
 
   const tombstoneDocument = async (document: APIEvidenceItem) => {
