@@ -46,6 +46,7 @@ import {
   buildSpreadsheetProviderPositiveCompatibilityPayload,
   buildSpreadsheetProviderPositiveCompatibilityWorkbook,
   SPREADSHEET_PROVIDER_POSITIVE_COMPATIBILITY_TOKEN,
+  SPREADSHEET_SHEET_PLAN_CUSTOM_PREDICATE_IDS,
   type SpreadsheetImportPlan,
   type SpreadsheetStructuralWorkbook,
 } from './spreadsheet-semantic-contract.js';
@@ -1090,6 +1091,21 @@ function contractDiagnosticResponseFingerprint(raw: unknown): SpreadsheetProvide
  * response (the pass path is unchanged); callers that only need the
  * pass/fail signal check the result for null.
  */
+/**
+ * The only source of `predicateId`: a fixed, developer-authored identifier a
+ * custom refinement attaches via Zod's `params`, allow-listed here against
+ * `SPREADSHEET_SHEET_PLAN_CUSTOM_PREDICATE_IDS` so an unrecognised or
+ * provider-influenced value can never reach retained diagnostics.
+ */
+function extractSheetPlanCustomPredicateId(issue?: { code: string; params?: Record<string, unknown> }): string | null {
+  if (issue?.code !== 'custom') return null;
+  const candidate = issue.params?.predicateId;
+  return typeof candidate === 'string'
+    && (SPREADSHEET_SHEET_PLAN_CUSTOM_PREDICATE_IDS as readonly string[]).includes(candidate)
+    ? candidate
+    : null;
+}
+
 function buildSpreadsheetContractDiagnostic(
   content: string,
   workbook: SpreadsheetWorkbook,
@@ -1099,7 +1115,7 @@ function buildSpreadsheetContractDiagnostic(
     validationStage: SpreadsheetProviderAttemptContractDiagnosticStage,
     checkId: string | null,
     responseFingerprint: SpreadsheetProviderAttemptResponseFingerprint | null = null,
-    issue?: { code: string; path: Array<string | number> },
+    issue?: { code: string; path: Array<string | number>; params?: Record<string, unknown> },
   ): SpreadsheetProviderAttemptContractDiagnostic => ({
     diagnosticVersion: SPREADSHEET_PROVIDER_ATTEMPT_CONTRACT_DIAGNOSTIC_VERSION,
     validationStage,
@@ -1108,6 +1124,7 @@ function buildSpreadsheetContractDiagnostic(
     issuePath: issue && issue.path.length
       ? issue.path.slice(0, CONTRACT_DIAGNOSTIC_MAX_ISSUE_PATH_SEGMENTS).map(String).join('.')
       : null,
+    predicateId: extractSheetPlanCustomPredicateId(issue),
     responseFingerprint,
   });
 

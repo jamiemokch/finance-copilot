@@ -290,7 +290,7 @@ test('a classifyResponse implementation may optionally carry contractDiagnostic 
     chat: { completions: { create: async () => ({ choices: [{ message: { content: '{}' } }] }) } },
   } as unknown as OpenAI;
   const contractDiagnostic = {
-    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v4' as const,
+    diagnosticVersion: 'spreadsheet-provider-attempt-contract-diagnostic.v5' as const,
     validationStage: 'import_plan' as const,
     checkId: 'unknown_sheet_reference',
     issueCode: null,
@@ -1237,6 +1237,13 @@ test('a transactional first-sheet plan missing a required description column bin
     ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan.sheets.0'],
     ['success', null, undefined, undefined, undefined, undefined],
   ]);
+  // The retained predicateId must distinguish this transactional-bindings
+  // failure from the header/data-ordering failure below even though both
+  // collapse to the same validationStage/checkId/issueCode/issuePath tuple.
+  assert.equal(result.providerAttempts?.[0]?.contractDiagnostic?.predicateId, 'sheet_transactional_required_bindings');
+  const diagnosticJson = JSON.stringify(result.providerAttempts?.[0]?.contractDiagnostic);
+  assert.equal(diagnosticJson?.includes('transactional sheet has required bindings'), false, 'the raw Zod custom message must never be retained');
+  assert.equal(diagnosticJson?.includes('Description binding probe'), false, 'no workbook cell content may be retained');
   const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { sheet?: { transactionalRule?: string } } } } } | undefined;
   assert.match(
     String(contract?.response?.finalOrAbstain?.plan?.sheet?.transactionalRule),
@@ -1290,6 +1297,13 @@ test('a non-transactional first-sheet plan whose dataRange does not start after 
     ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan.sheets.0'],
     ['success', null, undefined, undefined, undefined, undefined],
   ]);
+  // Distinct from the transactional-bindings predicateId above, proving the
+  // two previously-indistinguishable custom failures now retain separate
+  // bounded identifiers.
+  assert.equal(result.providerAttempts?.[0]?.contractDiagnostic?.predicateId, 'sheet_header_data_order');
+  const diagnosticJson = JSON.stringify(result.providerAttempts?.[0]?.contractDiagnostic);
+  assert.equal(diagnosticJson?.includes('data begins after header'), false, 'the raw Zod custom message must never be retained');
+  assert.equal(diagnosticJson?.includes('Header order probe'), false, 'no workbook cell content may be retained');
   const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { sheet?: { headerDataOrderRule?: string } } } } } | undefined;
   assert.match(
     String(contract?.response?.finalOrAbstain?.plan?.sheet?.headerDataOrderRule),

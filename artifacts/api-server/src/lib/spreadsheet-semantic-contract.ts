@@ -110,6 +110,20 @@ export const spreadsheetAbstentionSchema = z.object({
   manualRecoveryRequired: z.literal(true),
 }).strict();
 
+/**
+ * Stable, developer-authored identifiers for the two bounded custom
+ * refinements below. These exist only so a contract-invalid response can be
+ * attributed to the specific predicate that rejected it (never to the Zod
+ * message text or any workbook content) once it reaches diagnostic
+ * telemetry. Extend this list only when a new custom predicate is added to
+ * finalSheetPlan; never source an identifier from provider-influenced data.
+ */
+export const SPREADSHEET_SHEET_PLAN_CUSTOM_PREDICATE_IDS = [
+  'sheet_header_data_order',
+  'sheet_transactional_required_bindings',
+] as const;
+export type SpreadsheetSheetPlanCustomPredicateId = typeof SPREADSHEET_SHEET_PLAN_CUSTOM_PREDICATE_IDS[number];
+
 const fieldBinding = z.object({
   columnId: columnId.nullable(),
   confidence: z.number().int().min(0).max(100),
@@ -148,13 +162,21 @@ const finalSheetPlan = z.object({
   unresolvedQuestionIds: z.array(z.string().regex(/^question_[A-Za-z0-9_-]{1,127}$/)).max(20),
 }).strict().superRefine((sheet, context) => {
   if (sheet.dataRange && sheet.headerRow && sheet.dataRange.startRow <= sheet.headerRow) {
-    context.addIssue({ code: 'custom', message: 'data begins after header' });
+    context.addIssue({
+      code: 'custom',
+      message: 'data begins after header',
+      params: { predicateId: 'sheet_header_data_order' satisfies SpreadsheetSheetPlanCustomPredicateId },
+    });
   }
   if (sheet.disposition === 'transactional') {
     if (!sheet.headerRow || !sheet.dataRange || !sheet.fields.date.columnId
       || (!sheet.fields.signedAmount.columnId && !(sheet.fields.debit.columnId && sheet.fields.credit.columnId))
       || !sheet.fields.description.columnId) {
-      context.addIssue({ code: 'custom', message: 'transactional sheet has required bindings' });
+      context.addIssue({
+        code: 'custom',
+        message: 'transactional sheet has required bindings',
+        params: { predicateId: 'sheet_transactional_required_bindings' satisfies SpreadsheetSheetPlanCustomPredicateId },
+      });
     }
   }
 });
