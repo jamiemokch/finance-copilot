@@ -1245,6 +1245,59 @@ test('a transactional first-sheet plan missing a required description column bin
   );
 });
 
+test('a non-transactional first-sheet plan whose dataRange does not start after headerRow fails wire_schema custom at response.plan.sheets.0, matching the reported bounded failure class, and the pipeline recovers once repair supplies an ordered range', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Header order probe,12\n'), 'text/csv', 'header-order.csv');
+  let calls = 0;
+  let initialToken = '';
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        // A non-transactional (reference) sheet that states both headerRow
+        // and dataRange, but dataRange does not begin after headerRow — the
+        // same superRefine custom issue as the description-binding case
+        // above, except triggered on a sheet where the disposition-scoped
+        // transactionalRule text would not obviously apply.
+        const invertedSheet = semanticSheet('sheet_1', 'reference', {
+          headerRow: 2,
+          dataRange: { startRow: 1, endRow: 1 },
+        });
+        return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [invertedSheet]) }) } }] };
+      }
+      repairPayload = payload;
+      const orderedSheet = semanticSheet('sheet_1', 'reference', {
+        headerRow: 1,
+        dataRange: { startRow: 2, endRow: 2 },
+      });
+      return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [orderedSheet]) }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.outcomeCategory,
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+    attempt.contractDiagnostic?.issueCode,
+    attempt.contractDiagnostic?.issuePath,
+  ]), [
+    ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan.sheets.0'],
+    ['success', null, undefined, undefined, undefined, undefined],
+  ]);
+  const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { sheet?: { headerDataOrderRule?: string } } } } } | undefined;
+  assert.match(
+    String(contract?.response?.finalOrAbstain?.plan?.sheet?.headerDataOrderRule),
+    /regardless of disposition/,
+    'the repair prompt states the header/dataRange ordering rule applies to every sheet, not only transactional ones',
+  );
+});
+
 test('an oversized provider response records validationStage=response_size and is never sent to a repair pass', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Oversized response probe,22\n'), 'text/csv', 'oversized.csv');
   let calls = 0;
