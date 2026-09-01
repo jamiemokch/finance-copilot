@@ -263,6 +263,9 @@ export const spreadsheetAIResponseContract = {
       plan: {
         required: ['schemaVersion', 'status', 'continuationToken', 'sheets', 'unresolvedQuestions', 'abstention', 'summary'],
         status: ['complete', 'incomplete'],
+        sheetIdUniquenessRule: 'Every sheet plan\'s sheetId must be unique within sheets; the same sheetId must never be repeated across more than one sheet plan in the same response.',
+        completeForbidsAbstentionRule: 'A plan with status "complete" must have abstention set to null.',
+        incompleteRequiresReasonRule: 'A plan with status "incomplete" must have abstention set (non-null) or at least one entry in unresolvedQuestions; it can never be incomplete with neither present.',
         sheet: {
           required: ['sheetId', 'disposition', 'decisionSource', 'validationReason', 'purpose', 'headerRow', 'dataRange', 'rowRules', 'fields', 'transactionSemantics', 'duplicateOrOverlap', 'unresolvedQuestionIds'],
           disposition: ['transactional', 'summary', 'reference', 'duplicate', 'excluded', 'unresolved', 'not_analysed'],
