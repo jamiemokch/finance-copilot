@@ -1,141 +1,77 @@
-# Finance Copilot — Development Control Rules
+# Finance Copilot — Development Rules
 
-These rules are mandatory for all Claude Code work in this repository unless the repository owner explicitly overrides them for a specific task.
+These rules replace the previous detailed control framework.
 
-## Roles
-- ChatGPT is the Product Owner, Technical PM, controller, acceptance reviewer, and merge controller.
-- Claude Code is the single repository coding agent and owns implementation decomposition inside an approved controller item.
-- Replit is runtime/hosting/UAT only unless explicitly authorised otherwise. Replit must not independently write application code.
-- Do not overlap code-writing work with another coding agent.
+## 1. Backbone V1 first
+Build and verify the simplest clean end-to-end Finance Copilot backbone before expanding features or chasing edge cases.
 
-## Primary optimisation target
-1. Optimise for low-rework delivery, not minimum turns, minimum tokens, or artificially tiny diffs.
-2. Engineering cost/time is acceptable when it improves first-time-right architecture, implementation quality, regression coverage, observability, or Golden Path confidence.
-3. Avoid spend that produces rebuild/debug loops caused by an incomplete controller contract, misunderstood architecture, duplicated implementation, or premature runtime patching.
-4. Every meaningful implementation cycle should leave durable value: reliable code, regression tests, architecture knowledge, observability, or verified Golden Path confidence.
-5. Never use guessing-based patch loops.
+Backbone V1 is:
 
-## Core operating model
-1. Stabilise before adding features whenever core reliability is not Verified.
-2. Controller defines the meaningful outcome, constraints, acceptance criteria, risk boundaries, and prohibited surfaces.
-3. Claude inspects the relevant repository surfaces, identifies dependencies, decomposes the work internally, implements the coherent solution, tests it, commits/pushes it, and reports all deliverables in one implementation log.
-4. Controller reviews the complete delivered diff, tests, architecture fit, regression risk, privacy/data risk, and acceptance criteria before merge.
-5. Merge only after controller review. Runtime UAT follows merge where required.
-6. Understand → implement root-cause-correct solution → regression test → controller review → runtime verify → next.
+simple financial input (spreadsheet / bank / document)
+→ AI understands and proposes a clean internal financial representation
+→ user reviews and confirms
+→ Financial Memory is updated
+→ tax estimate, tax-return readiness, deadlines, reminders and useful business/tax suggestions refresh from Financial Memory
+→ the user keeps adding documents/financial information through the year
+→ Financial Memory and guidance keep updating
+→ year-end output becomes a tax-return-ready annual pack.
 
-## Task boundary and decomposition
-- Prefer one meaningful, bounded outcome over many micro-issues.
-- Use the smallest coherent vertical slice that can fully satisfy the outcome; do not split work by individual field, error code, helper, or file unless that split is independently valuable and testable.
-- Claude owns internal implementation decomposition. The controller should not feed implementation one tiny step at a time.
-- Controller task contracts should name expected files when useful, but avoid rigid allowlists that prevent necessary dependencies. Use hard prohibited surfaces for genuinely high-risk areas instead.
-- If Claude must touch an unexpected but directly required dependency, it may do so within the approved outcome and must explain the reason in its delivery report. High-risk surfaces remain prohibited unless explicitly authorised.
-- Do not expand product/business scope beyond the approved outcome.
+Everything should support this backbone or stay out of the critical path.
 
-## Attempt / debugging guardrail
-- The historical two-attempt rule is a guardrail against repeating the same failed hypothesis, not a mechanical quota.
-- If an implementation attempt makes evidence-backed progress and only a direct, bounded correction remains, the controller may continue that coherent implementation without creating artificial micro-tasks.
-- If two attempts substantially repeat the same failing approach, or the root cause remains unproven, STOP repeating that approach and switch to diagnostic-only root-cause analysis before further coding.
-- Diagnostic work should repair the implementation understanding or controller contract, then return to one coherent implementation item; do not create a chain of one-field successor issues unless independently justified.
+Keep architecture, code, tests, state ownership and data flows clean so future development is easy. Do not over-engineer for hypothetical future requirements, but do not leave avoidable duplication, dead paths or confusing ownership behind when touching an area.
 
-## Priority order
-- P0: auth, session, routing, persistence
-- P1: Financial Memory, data consistency, evidence linking
-- P2: ingestion
-- P3: AI/provider reliability
-- P4: UX/polish
+## 2. Use agent time and tokens sensibly
+Agents should use the time/tokens genuinely needed to understand the relevant code, make a coherent change and test it properly.
 
-Do not prioritise P4 work while unresolved higher-priority foundation issues block the Golden Path.
+Do not optimise for minimum tokens or artificially tiny tasks.
+Do not waste tokens on repeated broad audits, progress checklists, unnecessary documentation, speculative architecture or endless debugging loops.
 
-## Required controller task contract
-Every implementation item must explicitly state:
-- WHY / user or reliability outcome
-- ROOT CAUSE — confirmed, probable, or not yet confirmed
-- ACCEPTANCE CRITERIA / DONE WHEN
-- IMPORTANT CONSTRAINTS and PROHIBITED SURFACES
-- RISK / IMPACT
-- TEST PLAN, including relevant regression coverage
-- ROLLBACK
-- GOLDEN PATH impact
+Rules must be neither so tight that agents cannot finish coherent work nor so loose that scope becomes uncontrolled.
 
-Expected files or likely seams may be listed for orientation, but they are not automatically hard allowlists.
+## 3. Keep / Consolidate / Remove — always keep it simple
+When working in an area, classify existing code and paths as:
 
-If ROOT CAUSE is not confirmed, do not present a speculative fix as certain. Spend diagnostic effort first when uncertainty is material to architecture or likely to cause rework.
+- KEEP — clear, useful and part of the current/future backbone.
+- CONSOLIDATE — duplicated or overlapping logic/state that should have one clear owner.
+- REMOVE — dead, superseded, temporary, obsolete diagnostic/workaround or unnecessary complexity.
 
-## Implementation delivery contract
-A Claude implementation attempt should normally complete the whole bounded item:
-- inspect relevant dependencies
-- make the coherent implementation
-- add/update focused regression tests
-- run required tests
-- commit and push all intended changes
-- report commit SHA, changed files, tests/results, deviations from expected files, remaining unknowns, and Built/Tested status
+Prefer the simplest coherent design that preserves correctness and future extensibility.
+Do not refactor unrelated code just to make it prettier.
+Do not keep obsolete complexity merely because it already exists.
 
-Do not spend turns producing progress checklists when those turns are needed to finish the implementation. Internal decomposition is Claude's responsibility.
+## 4. Controller must keep work moving
+ChatGPT is the active project controller/product owner.
+Claude is the primary repository implementation agent.
+Replit is the runtime/UAT environment.
 
-## Controller review contract
-Before merge, ChatGPT must review the delivered work as one package:
-- actual changed files and diff
-- whether the implementation satisfies the outcome rather than merely passing tests
-- architecture fit and unnecessary duplication
-- scope creep and unexpected dependencies
-- privacy/data/security implications
-- relevant automated tests and regression coverage
-- rollback practicality
-- Golden Path impact
+The controller should actively chase agents, review output, unblock delivery, make decisions and move to the next useful task. Do not leave an available agent or delivery lane idle when useful non-conflicting work can proceed.
 
-CI success alone is never Verified.
+Avoid making the repository owner act as an intermediary. Escalate only genuine product/business decisions, permissions or unavoidable access blockers.
 
-## Status language
-Use only these delivery states:
-- Built: code has been written and delivered to the implementation branch.
-- Tested: relevant automated tests pass.
-- Verified: the relevant end-to-end / browser/runtime Golden Path passes with no known regression.
+## Working principles
+- Prefer one meaningful end-to-end outcome over chains of micro-issues.
+- Fix root causes where practical; do not repeatedly patch symptoms.
+- Keep Financial Memory as the core financial source of truth. Workflow/session/AI execution state should support it, not compete with it.
+- AI should make semantic judgements; deterministic application logic should own deterministic structure, validation and bookkeeping rules where practical.
+- User confirmation remains the boundary before proposed financial records become confirmed Financial Memory.
+- A complex edge case must not block Backbone V1 if the simple supported path works safely and the edge case can fail cleanly.
+- Every meaningful change should leave the codebase at least as understandable and testable as before.
 
-Only Verified counts as Done where runtime verification is required.
+## Minimum safety boundaries
+These are baseline engineering/data protections, not reasons to create process overhead:
 
-## Golden Path
-The core sole-trader journey must remain the heartbeat regression path:
-1. Create account / sign in
-2. Complete onboarding
-3. Reload and confirm persistence
-4. Upload bank CSV and review resulting records
-5. Upload receipt/document
-6. AI review/categorisation where applicable
-7. Explicit confirmation creates the correct Financial Memory record
-8. Confirmed evidence disappears from the review queue
-9. Upload spreadsheet and complete semantic review/import when in scope
-10. Logout
-11. Login again
-12. Confirm business/profile/Financial Memory state persists and remains consistent
+- Never expose secrets, tokens, customer financial data or other sensitive information in logs, commits, issues or agent prompts.
+- Never silently import or confirm financial records without the required user confirmation.
+- Avoid destructive production data changes unless explicitly authorised.
+- Avoid overlapping agents editing the same code at the same time.
+- Application changes should remain reviewable and testable before being treated as complete.
 
-Meaningful changes must state which Golden Path steps are affected and how they were verified.
+## Definition of progress
+Progress is measured primarily by how much of Backbone V1 is cleanly working end to end, not by issue count or number of fixes merged.
 
-## Safety and high-risk surfaces
-- No direct writes to `main`; work through a branch and pull request unless explicitly authorised.
-- No production deployment from a coding task unless explicitly authorised.
-- No production database or destructive data changes unless explicitly authorised.
-- Never expose secrets, tokens, customer financial data, or sensitive runtime values in logs, commits, issues, or PRs.
-- Do not silently change environment variables, dependencies, runtime configuration, schemas, migrations, auth/session design, deployment settings, or workflow permissions. Treat these as high-risk surfaces requiring explicit controller awareness/authorisation.
-- Keep rollback practical and explicit for implementation work.
-- Replit remains runtime-only and must not make overlapping application-code fixes. Runtime findings return to the GitHub/Claude implementation loop.
+When deciding what to do next, ask:
+1. Does this materially unblock or strengthen Backbone V1?
+2. Does it simplify or clarify the code/data flow for future development?
+3. Is there a cheaper/simpler way to reach the same reliable outcome?
 
-## Diagnostic-only tasks
-When a task says DIAGNOSTIC ONLY:
-- Make no code changes.
-- Make no refactors.
-- Make no dependency/configuration changes.
-- Do not deploy.
-- Distinguish every material finding as CONFIRMED, PROBABLE, or UNKNOWN.
-- Cite concrete repository evidence for confirmed findings.
-- State exactly what runtime/log/browser evidence is missing for unknowns.
-- Produce the smallest coherent next implementation contract that resolves the root cause; do not default to micro-task decomposition.
-
-## Communication
-The repository owner is non-technical. Final task reports must include a short plain-English explanation covering:
-- what was found or changed
-- why it matters
-- what could be affected
-- what was tested
-- whether the result is Built, Tested, or Verified
-
-Do not claim success beyond the evidence available.
+If the answer to all three is no, it is probably not the next priority.
