@@ -1423,60 +1423,30 @@ test('an out-of-bounds requested-context rejection is repaired with safe parser 
   ]);
 });
 
-test('a schema-valid requested-context over-limit rejection is recorded across both response and repair validation phases', async () => {
-  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Over-limit probe row ${index + 1},${index + 1}`).join('\n');
-  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-over-limit.csv');
-  const client = scriptedClient(() => ({
+test('a within-bounds requested-context range exceeding the row budget is shrunk to the row budget, not rejected', () => {
+  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Row shrink probe row ${index + 1},${index + 1}`).join('\n');
+  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-row-shrink.csv');
+  const context = buildRequestedSpreadsheetContext(workbook, {
     schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-    stage: 'request_context',
-    request: {
-      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-      continuationToken: 'seed-token-9',
-      allowedSheetIds: ['sheet_1'],
-      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Over-limit probe.' }],
-    },
-    plan: null,
-  }));
-
-  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  assert.equal(result.status, 'failed');
-  assert.deepEqual(result.providerAttempts?.map((attempt) => [
-    attempt.failurePhase,
-    attempt.contractDiagnostic?.validationStage,
-    attempt.contractDiagnostic?.checkId,
-  ]), [
-    ['response_validation', 'requested_context', 'context_request_limit_exceeded'],
-    ['repair_validation', 'requested_context', 'context_request_limit_exceeded'],
-  ]);
+    continuationToken: '12345678',
+    allowedSheetIds: ['sheet_1'],
+    requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs a large sample.' }],
+  });
+  assert.deepEqual(context.ranges[0]?.range, { startRow: 1, endRow: 40, startColumn: 1, endColumn: 1 });
+  assert.equal(context.ranges[0]?.truncated, true);
+  assert.equal(context.ranges[0]?.rows.length, 40);
 });
 
-test('an over-limit requested-context rejection is repaired with the authoritative budget and proceeds through normal validation', async () => {
-  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Budget repair probe row ${index + 1},${index + 1}`).join('\n');
-  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-limit-repair.csv');
+test('an over-limit requested-context request is served shrink-only clipped instead of triggering a repair round-trip', async () => {
+  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Over-limit probe row ${index + 1},${index + 1}`).join('\n');
+  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-over-limit.csv');
   let calls = 0;
-  let repairPayload: Record<string, unknown> | undefined;
-  let initialToken: string | undefined;
-  const overLimitRequest = (token: string) => ({
-    schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-    stage: 'request_context',
-    request: {
-      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-      continuationToken: token,
-      allowedSheetIds: ['sheet_1'],
-      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs enough rows to see the pattern.' }],
-    },
-    plan: null,
-  });
+  let servedContext: Record<string, unknown> | undefined;
   const client = {
     chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
       calls += 1;
       const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
       if (calls === 1) {
-        initialToken = String(payload.continuationToken);
-        return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken)) } }] };
-      }
-      if (calls === 2) {
-        repairPayload = payload;
         return {
           choices: [{
             message: {
@@ -1485,9 +1455,9 @@ test('an over-limit requested-context rejection is repaired with the authoritati
                 stage: 'request_context',
                 request: {
                   schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-                  continuationToken: initialToken,
+                  continuationToken: String(payload.continuationToken),
                   allowedSheetIds: ['sheet_1'],
-                  requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 40, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs enough rows to see the pattern.' }],
+                  requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 50, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Needs enough rows to see the pattern.' }],
                 },
                 plan: null,
               }),
@@ -1495,61 +1465,38 @@ test('an over-limit requested-context rejection is repaired with the authoritati
           }],
         };
       }
+      servedContext = payload.context as Record<string, unknown>;
       return { choices: [{ message: { content: JSON.stringify(finalResponse(String(payload.continuationToken), [semanticSheet('sheet_1', 'transactional')])) } }] };
     } } },
   } as unknown as OpenAI;
 
   const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  assert.equal(calls, 3, 'exactly one bounded repair call precedes the follow-up requested-context call');
+  assert.equal(calls, 2, 'no bounded repair round-trip is needed for a shrink-only clip');
   assert.equal(result.status, 'success');
-  assert.deepEqual(repairPayload?.requestBudget, { maxRequestedRanges: 4, maxRowsPerRequestedRange: 40, maxCellsPerRequestedRange: 480 });
-  assert.match(String(repairPayload?.instruction), /requestBudget/);
-  assert.equal(Object.hasOwn(repairPayload ?? {}, 'sheetBounds'), false, 'an over-limit repair never carries out-of-bounds sheet bounds');
-  assert.equal(Object.hasOwn(repairPayload ?? {}, 'overview'), false);
-  assert.equal(Object.hasOwn(repairPayload ?? {}, 'workbook'), false);
-  assert.doesNotMatch(JSON.stringify(repairPayload), /Budget repair probe row/);
+  const ranges = (servedContext?.ranges ?? []) as Array<Record<string, unknown>>;
+  assert.equal(ranges.length, 1);
+  assert.deepEqual(ranges[0]?.range, { startRow: 1, endRow: 40, startColumn: 1, endColumn: 1 });
+  assert.equal(ranges[0]?.truncated, true);
   assert.deepEqual(result.providerAttempts?.map((attempt) => [attempt.outcomeCategory, attempt.failurePhase]), [
-    ['contract_invalid', 'response_validation'],
     ['success', null],
     ['success', null],
   ]);
 });
 
-test('a still-over-limit repaired requested-context response remains rejected', async () => {
-  const dataRows = Array.from({ length: 59 }, (_, index) => `06/04/2025,Still over limit probe row ${index + 1},${index + 1}`).join('\n');
-  const workbook = inspectSpreadsheet(Buffer.from(`Date,Description,Amount\n${dataRows}\n`), 'text/csv', 'context-limit-repair-fail.csv');
-  let calls = 0;
-  let initialToken: string | undefined;
-  const overLimitRequest = (token: string, endRow: number) => ({
+test('a within-bounds requested-context range still exceeding the cell budget after row clipping is also shrunk column-wise', () => {
+  const columns = Array.from({ length: 100 }, (_, index) => `C${index + 1}`);
+  const header = columns.join(',');
+  const dataRow = columns.map((_, index) => index + 1).join(',');
+  const workbook = inspectSpreadsheet(Buffer.from(`${header}\n${Array.from({ length: 5 }, () => dataRow).join('\n')}\n`), 'text/csv', 'context-column-shrink.csv');
+  const context = buildRequestedSpreadsheetContext(workbook, {
     schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-    stage: 'request_context',
-    request: {
-      schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
-      continuationToken: token,
-      allowedSheetIds: ['sheet_1'],
-      requests: [{ sheetId: 'sheet_1', startRow: 1, endRow, startColumn: 1, endColumn: 1, chunk: 0, reason: 'Still needs too many rows.' }],
-    },
-    plan: null,
+    continuationToken: '12345678',
+    allowedSheetIds: ['sheet_1'],
+    requests: [{ sheetId: 'sheet_1', startRow: 1, endRow: 6, startColumn: 1, endColumn: 100, chunk: 0, reason: 'Needs all columns for a few rows.' }],
   });
-  const client = {
-    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
-      calls += 1;
-      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
-      if (calls === 1) {
-        initialToken = String(payload.continuationToken);
-        return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken, 50)) } }] };
-      }
-      return { choices: [{ message: { content: JSON.stringify(overLimitRequest(initialToken!, 45)) } }] };
-    } } },
-  } as unknown as OpenAI;
-
-  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
-  assert.equal(calls, 2, 'one invalid response and exactly one bounded repair attempt — no unbounded retry loop');
-  assert.equal(result.status, 'failed');
-  assert.deepEqual(result.providerAttempts?.map((attempt) => attempt.contractDiagnostic?.checkId), [
-    'context_request_limit_exceeded',
-    'context_request_limit_exceeded',
-  ]);
+  assert.deepEqual(context.ranges[0]?.range, { startRow: 1, endRow: 6, startColumn: 1, endColumn: 80 });
+  assert.equal(context.ranges[0]?.truncated, true);
+  assert.equal(context.ranges[0]?.rows[0]?.values.length, 80);
 });
 
 test('the initial workbook-overview payload exposes the same authoritative requested-context budget enforced by the protected validator', async () => {
