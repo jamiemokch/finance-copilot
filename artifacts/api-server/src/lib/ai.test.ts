@@ -1312,6 +1312,172 @@ test('a non-transactional first-sheet plan whose dataRange does not start after 
   );
 });
 
+test('a final plan repeating the same sheetId across two sheet plans fails wire_schema custom at response.plan (the parent-plan uniqueness invariant, not a sheets.N entry), and the pipeline recovers once repair supplies distinct sheetIds', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Duplicate sheetId probe,15\n'), 'text/csv', 'duplicate-sheet-id.csv');
+  let calls = 0;
+  let initialToken = '';
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        // Two otherwise-valid sheet plans repeating the same sheetId — the
+        // parent-plan uniqueness invariant, distinct from any single sheet's
+        // own custom refinement.
+        const duplicated = {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          stage: 'final_plan',
+          request: null,
+          plan: {
+            schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+            status: 'complete',
+            continuationToken: initialToken,
+            sheets: [semanticSheet('sheet_1', 'transactional'), semanticSheet('sheet_1', 'transactional')],
+            unresolvedQuestions: [],
+            abstention: null,
+            summary: 'A bounded semantic review is ready for human confirmation.',
+          },
+        };
+        return { choices: [{ message: { content: JSON.stringify({ response: duplicated }) } }] };
+      }
+      repairPayload = payload;
+      return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [semanticSheet('sheet_1', 'transactional')]) }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.outcomeCategory,
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+    attempt.contractDiagnostic?.issueCode,
+    attempt.contractDiagnostic?.issuePath,
+  ]), [
+    ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan'],
+    ['success', null, undefined, undefined, undefined, undefined],
+  ]);
+  assert.equal(result.providerAttempts?.[0]?.contractDiagnostic?.predicateId, null, 'the parent-plan invariants are not sheet-plan custom predicates');
+  const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { sheetIdUniquenessRule?: string } } } } | undefined;
+  assert.match(
+    String(contract?.response?.finalOrAbstain?.plan?.sheetIdUniquenessRule),
+    /unique/,
+    'the repair prompt states that every sheetId must be unique across sheet plans',
+  );
+});
+
+test('a final plan marked complete while still carrying an abstention fails wire_schema custom at response.plan (the parent-plan complete/abstention invariant), and the pipeline recovers once repair clears the abstention', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Complete abstention probe,9\n'), 'text/csv', 'complete-abstention.csv');
+  let calls = 0;
+  let initialToken = '';
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        const invalid = {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          stage: 'final_plan',
+          request: null,
+          plan: {
+            schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+            status: 'complete',
+            continuationToken: initialToken,
+            sheets: [semanticSheet('sheet_1', 'transactional')],
+            unresolvedQuestions: [],
+            abstention: { reason: 'insufficient_evidence', detail: 'Bounded uncertainty.', manualRecoveryRequired: true },
+            summary: 'A bounded semantic review is ready for human confirmation.',
+          },
+        };
+        return { choices: [{ message: { content: JSON.stringify({ response: invalid }) } }] };
+      }
+      repairPayload = payload;
+      return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [semanticSheet('sheet_1', 'transactional')]) }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.outcomeCategory,
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+    attempt.contractDiagnostic?.issueCode,
+    attempt.contractDiagnostic?.issuePath,
+  ]), [
+    ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan'],
+    ['success', null, undefined, undefined, undefined, undefined],
+  ]);
+  const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { completeForbidsAbstentionRule?: string } } } } | undefined;
+  assert.match(
+    String(contract?.response?.finalOrAbstain?.plan?.completeForbidsAbstentionRule),
+    /complete/,
+    'the repair prompt states that a complete plan must not carry an abstention',
+  );
+});
+
+test('a final plan marked incomplete with neither an abstention nor an unresolved question fails wire_schema custom at response.plan (the parent-plan incomplete-states-why invariant), and the pipeline recovers once repair supplies a reason', async () => {
+  const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Incomplete no reason probe,7\n'), 'text/csv', 'incomplete-no-reason.csv');
+  let calls = 0;
+  let initialToken = '';
+  let repairPayload: Record<string, unknown> | undefined;
+  const client = {
+    chat: { completions: { create: async (input: { messages: Array<{ content: string }> }) => {
+      calls += 1;
+      const payload = JSON.parse(input.messages.at(-1)?.content ?? '{}') as Record<string, unknown>;
+      if (calls === 1) {
+        initialToken = String(payload.continuationToken);
+        const invalid = {
+          schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+          stage: 'final_plan',
+          request: null,
+          plan: {
+            schemaVersion: SPREADSHEET_SEMANTIC_SCHEMA_VERSION,
+            status: 'incomplete',
+            continuationToken: initialToken,
+            sheets: [semanticSheet('sheet_1', 'transactional')],
+            unresolvedQuestions: [],
+            abstention: null,
+            summary: 'A bounded semantic review is ready for human confirmation.',
+          },
+        };
+        return { choices: [{ message: { content: JSON.stringify({ response: invalid }) } }] };
+      }
+      repairPayload = payload;
+      return { choices: [{ message: { content: JSON.stringify({ response: finalResponse(initialToken, [semanticSheet('sheet_1', 'transactional')]) }) } }] };
+    } } },
+  } as unknown as OpenAI;
+
+  const result = await analyseSpreadsheetWithAI(workbook, analyseSpreadsheetStructure(workbook), { client, retryDelayMs: 0 });
+  assert.equal(calls, 2, 'one invalid response and one bounded repair attempt');
+  assert.equal(result.status, 'success');
+  assert.deepEqual(result.providerAttempts?.map((attempt) => [
+    attempt.outcomeCategory,
+    attempt.failurePhase,
+    attempt.contractDiagnostic?.validationStage,
+    attempt.contractDiagnostic?.checkId,
+    attempt.contractDiagnostic?.issueCode,
+    attempt.contractDiagnostic?.issuePath,
+  ]), [
+    ['contract_invalid', 'response_validation', 'wire_schema', 'schema_invalid', 'custom', 'response.plan'],
+    ['success', null, undefined, undefined, undefined, undefined],
+  ]);
+  const contract = repairPayload?.responseContract as { response?: { finalOrAbstain?: { plan?: { incompleteRequiresReasonRule?: string } } } } | undefined;
+  assert.match(
+    String(contract?.response?.finalOrAbstain?.plan?.incompleteRequiresReasonRule),
+    /unresolvedQuestions/,
+    'the repair prompt states that an incomplete plan needs either an abstention or an unresolved question',
+  );
+});
+
 test('an oversized provider response records validationStage=response_size and is never sent to a repair pass', async () => {
   const workbook = inspectSpreadsheet(Buffer.from('Date,Description,Amount\n06/04/2025,Oversized response probe,22\n'), 'text/csv', 'oversized.csv');
   let calls = 0;
