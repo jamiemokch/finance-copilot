@@ -665,6 +665,50 @@ test('M9 evidence remains profile-bound, review-only, idempotent, and financiall
       savedReview.sheetMappings,
       'a rejected correction leaves the last saved mapping in place after reload',
     );
+    const retryRequestedEventsBefore = await db.select().from(evidenceAuditEventsTable).where(and(
+      eq(evidenceAuditEventsTable.profileId, alicePrimary),
+      eq(evidenceAuditEventsTable.evidenceId, reviewDraftEvidenceId),
+      eq(evidenceAuditEventsTable.eventType, 'spreadsheet_semantic_retry_requested'),
+    ));
+    assert.equal(retryRequestedEventsBefore.length, 0, 'no retry-boundary marker exists before any retry_automatic request');
+
+    const blockedRetryOnSavedReview = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, {
+      method: 'POST', body: JSON.stringify({ mode: 'retry_automatic' }),
+    });
+    assert.equal(blockedRetryOnSavedReview.status, 409, 'automatic retry is guarded once a manual review is saved');
+    assert.equal(
+      blockedRetryOnSavedReview.body.error,
+      'Automatic review cannot replace saved manual choices. Continue the saved review instead.',
+    );
+    const retryRequestedEventsAfterGuard = await db.select().from(evidenceAuditEventsTable).where(and(
+      eq(evidenceAuditEventsTable.profileId, alicePrimary),
+      eq(evidenceAuditEventsTable.evidenceId, reviewDraftEvidenceId),
+      eq(evidenceAuditEventsTable.eventType, 'spreadsheet_semantic_retry_requested'),
+    ));
+    assert.equal(
+      retryRequestedEventsAfterGuard.length, 1,
+      'the route-boundary retry marker is retained even though the saved-review guard exits before provider work',
+    );
+    assert.equal((retryRequestedEventsAfterGuard[0].details as { mode?: string }).mode, 'retry_automatic');
+
+    const ordinaryResumeAfterGuard = await request(
+      aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, { method: 'POST' },
+    );
+    assert.equal(ordinaryResumeAfterGuard.status, 200);
+    const manualRecoveryAfterGuard = await request(aliceSession, `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/detect-schema`, {
+      method: 'POST', body: JSON.stringify({ mode: 'manual_recovery' }),
+    });
+    assert.equal(manualRecoveryAfterGuard.status, 200);
+    const retryRequestedEventsAfterOrdinary = await db.select().from(evidenceAuditEventsTable).where(and(
+      eq(evidenceAuditEventsTable.profileId, alicePrimary),
+      eq(evidenceAuditEventsTable.evidenceId, reviewDraftEvidenceId),
+      eq(evidenceAuditEventsTable.eventType, 'spreadsheet_semantic_retry_requested'),
+    ));
+    assert.equal(
+      retryRequestedEventsAfterOrdinary.length, 1,
+      'ordinary resume and manual recovery requests do not emit the retry-boundary marker',
+    );
+
     const actionableRejection = await request(
       aliceSession,
       `/api/profiles/${alicePrimary}/evidence/${reviewDraftEvidenceId}/confirm-spreadsheet`,

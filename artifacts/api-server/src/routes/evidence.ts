@@ -1099,6 +1099,14 @@ router.post("/profiles/:profileId/evidence/:evidenceId/detect-schema", async (re
     if (!profile) { res.status(404).json({ error: "Profile not found" }); return; }
     const evidenceItem = await getEvidenceItem(profile.id, req.params.evidenceId);
     if (!evidenceItem) { res.status(404).json({ error: "Evidence item not found" }); return; }
+    // Retained before any saved-review / semantic-session guard or provider work so a
+    // later guard/exit can never erase the fact that this authenticated retry reached
+    // the application route. Privacy-safe: no workbook/provider content, mode only.
+    if (detectionMode === "retry_automatic") {
+      await addEvidenceAudit(profile.id, evidenceItem.id, req.user.id, "spreadsheet_semantic_retry_requested", {
+        mode: detectionMode,
+      });
+    }
     if (evidenceItem.workflowVersion >= 2) {
       res.status(422).json({ error: "Original documents use the review workflow, not spreadsheet import." }); return;
     }
