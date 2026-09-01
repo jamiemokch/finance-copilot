@@ -254,7 +254,7 @@ export const spreadsheetAIResponseContract = {
       },
       requestBudget: {
         ...spreadsheetRequestedContextBudget,
-        rule: 'Each request item\'s row count (endRow - startRow + 1) must be at most maxRowsPerRequestedRange, and its cell count (rows x columns) must be at most maxCellsPerRequestedRange. At most maxRequestedRanges request items are allowed.',
+        rule: 'Each request item\'s row count (endRow - startRow + 1) must be at most maxRowsPerRequestedRange, and its cell count (rows x columns) must be at most maxCellsPerRequestedRange. At most maxRequestedRanges request items are allowed. A request item that exceeds either budget is never rejected outright: it is served as the largest shrink-only reduction that fits (rows first, then columns), starting from its own startRow/startColumn, and the served range is reported back in that item\'s range; the served range never exceeds what was requested.',
       },
       plan: null,
     },
@@ -704,6 +704,8 @@ function columnIndex(id: string): number {
 /**
  * Re-checks every AI request against parser-visible bounds. The provider cannot
  * expand its own context window or request raw values outside this allow-list.
+ * A range within bounds but above the row/cell budget is served shrink-only
+ * clipped rather than rejected; see spreadsheetAIResponseContract's requestBudget rule.
  */
 export function buildRequestedSpreadsheetContext(
   workbook: SpreadsheetWorkbook,
@@ -719,22 +721,31 @@ export function buildRequestedSpreadsheetContext(
       || requested.startColumn < sheet.parserRange.startColumn || requested.endColumn > sheet.parserRange.endColumn) {
       throw new Error('context_request_out_of_bounds');
     }
-    const rowBudget = requested.endRow - requested.startRow + 1;
-    const cellBudget = rowBudget * (requested.endColumn - requested.startColumn + 1);
-    if (rowBudget > SPREADSHEET_SEMANTIC_LIMITS.maxRowsPerRequestedRange
-      || cellBudget > SPREADSHEET_SEMANTIC_LIMITS.maxCellsPerRequestedRange) throw new Error('context_request_limit_exceeded');
-    totalCells += cellBudget;
+    // A range above the safe budget is never rejected outright: it is
+    // deterministically shrunk to fit, rows first and then columns, starting
+    // from the requested startRow/startColumn. This can only reduce the
+    // served range below what was requested, never expand it, and the actual
+    // served coordinates are reported back below so a still-oversized
+    // response can never silently look identical to what was asked for.
+    const clippedEndRow = Math.min(requested.endRow, requested.startRow + SPREADSHEET_SEMANTIC_LIMITS.maxRowsPerRequestedRange - 1);
+    const rowBudget = clippedEndRow - requested.startRow + 1;
+    const maxColumnsForRowBudget = Math.floor(SPREADSHEET_SEMANTIC_LIMITS.maxCellsPerRequestedRange / rowBudget);
+    const clippedEndColumn = Math.min(requested.endColumn, requested.startColumn + maxColumnsForRowBudget - 1);
+    const columnBudget = clippedEndColumn - requested.startColumn + 1;
+    const truncated = clippedEndRow !== requested.endRow || clippedEndColumn !== requested.endColumn;
+    totalCells += rowBudget * columnBudget;
     const rowMap = new Map(sheet.rows.map((row) => [row.rowNumber, row]));
     return {
       sheetId: sheet.sheetId,
-      range: { startRow: requested.startRow, endRow: requested.endRow, startColumn: requested.startColumn, endColumn: requested.endColumn },
+      range: { startRow: requested.startRow, endRow: clippedEndRow, startColumn: requested.startColumn, endColumn: clippedEndColumn },
+      truncated,
       chunk: requested.chunk,
       reason: requested.reason,
       rows: Array.from({ length: rowBudget }, (_, offset) => {
         const row = rowMap.get(requested.startRow + offset);
         return {
           rowNumber: requested.startRow + offset,
-          values: Array.from({ length: requested.endColumn - requested.startColumn + 1 }, (_, columnOffset) =>
+          values: Array.from({ length: columnBudget }, (_, columnOffset) =>
             redactSpreadsheetValue(row?.values[requested.startColumn - 1 + columnOffset] ?? '', {
               preserveStructuralHeader: (requested.startRow + offset) === sheet.inferredHeaderRow,
               preserveStructuralTitle: (requested.startRow + offset) < (sheet.inferredHeaderRow ?? 0)
