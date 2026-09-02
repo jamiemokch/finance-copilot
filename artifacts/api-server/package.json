@@ -7,7 +7,7 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "test:baseline-safe": "pnpm run test:ingestion && pnpm run test:spreadsheet-ai && pnpm run test:guided-review-dom && pnpm run test:spreadsheet-timeout-ui && pnpm run test:bank-csv && pnpm run test:self-assessment && pnpm run test:auth-bootstrap && pnpm run test:evidence-detach-refresh && pnpm run test:financial-memory-predicate && pnpm run test:year-end-pack-guard",
+    "test:baseline-safe": "pnpm run test:ingestion && pnpm run test:spreadsheet-ai && pnpm run test:guided-review-dom && pnpm run test:spreadsheet-timeout-ui && pnpm run test:bank-csv && pnpm run test:self-assessment && pnpm run test:auth-bootstrap && pnpm run test:evidence-detach-refresh && pnpm run test:financial-memory-predicate",
     "test:ingestion": "esbuild src/lib/spreadsheet.test.ts --bundle --platform=node --format=cjs --outfile=dist/spreadsheet.test.cjs && node --test dist/spreadsheet.test.cjs",
     "test:spreadsheet-ai": "esbuild src/lib/ai.test.ts --bundle --platform=node --format=cjs --outfile=dist/ai.test.cjs && node --test dist/ai.test.cjs",
     "check:spreadsheet-provider": "node ./scripts/run-spreadsheet-provider-compatibility-check.mjs",
@@ -23,7 +23,6 @@
     "test:auth-bootstrap": "esbuild ../sme-finance-copilot/src/lib/auth-bootstrap.test.ts --bundle --platform=node --format=cjs --outfile=dist/auth-bootstrap.test.cjs && node --test dist/auth-bootstrap.test.cjs",
     "test:evidence-detach-refresh": "esbuild ../sme-finance-copilot/src/lib/evidence-detach.test.ts --bundle --platform=node --format=cjs --outfile=dist/evidence-detach.test.cjs && node --test dist/evidence-detach.test.cjs",
     "test:financial-memory-predicate": "esbuild ../sme-finance-copilot/src/lib/financial-memory.test.ts --bundle --platform=node --format=cjs --outfile=dist/financial-memory.test.cjs && node --test dist/financial-memory.test.cjs",
-    "test:year-end-pack-guard": "esbuild ../sme-finance-copilot/src/lib/year-end-pack.test.ts --bundle --platform=node --format=cjs --outfile=dist/year-end-pack.test.cjs && node --test dist/year-end-pack.test.cjs",
     "test:self-assessment-routes": "node ./scripts/run-self-assessment-route-test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

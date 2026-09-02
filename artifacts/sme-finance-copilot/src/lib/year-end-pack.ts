@@ -13,7 +13,7 @@ export function yearEndReadinessPercent(counts: YearEndChecklistCounts): number 
 }
 
 export function canBuildYearEndPack(counts: YearEndChecklistCounts, pendingInboxCount: number): boolean {
-  return pendingInboxCount === 0 && counts.done >= counts.total - 1;
+  return pendingInboxCount === 0 && counts.total > 0 && counts.done === counts.total;
 }
 
 // A pack generated earlier must stop presenting as ready the moment new

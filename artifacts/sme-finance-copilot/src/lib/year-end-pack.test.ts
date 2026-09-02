@@ -9,9 +9,10 @@ import {
 
 test('pack can only be built once Inbox is clear and the checklist is materially complete', () => {
   assert.equal(canBuildYearEndPack({ total: 4, done: 4 }, 0), true);
-  assert.equal(canBuildYearEndPack({ total: 4, done: 3 }, 0), true);
+  assert.equal(canBuildYearEndPack({ total: 4, done: 3 }, 0), false);
   assert.equal(canBuildYearEndPack({ total: 4, done: 2 }, 0), false);
   assert.equal(canBuildYearEndPack({ total: 4, done: 4 }, 1), false);
+  assert.equal(canBuildYearEndPack({ total: 0, done: 0 }, 0), false);
 });
 
 test('a previously generated pack stops presenting as ready once new pending Inbox items appear', () => {
