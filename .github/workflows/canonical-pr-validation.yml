@@ -32,6 +32,7 @@ jobs:
           --health-retries 10
     env:
       EVIDENCE_TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/finance_copilot_ci
+      BACKBONE_V1_TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/finance_copilot_ci
     steps:
       - name: Checkout PR head commit
         uses: actions/checkout@v6
@@ -63,6 +64,9 @@ jobs:
 
       - name: Run isolated evidence DB regression suite
         run: pnpm --filter @workspace/api-server run test:evidence-safety
+
+      - name: Run isolated Backbone V1 end-to-end regression
+        run: pnpm --filter @workspace/api-server run test:backbone-v1-regression
 
       - name: Build API-server referenced library type declarations
         run: pnpm exec tsc --build lib/db lib/api-zod lib/integrations-openai-ai-server
