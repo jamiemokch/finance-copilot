@@ -171,6 +171,76 @@ continued",-42.00
   assert.equal(ukTaxYear('2025-04-06'), '2025-2026');
 });
 
+test('a merged category label spanning multiple rows fills down to every covered row', () => {
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    ['Date', 'Category', 'Amount'],
+    ['01/05/2025', 'Office supplies', -20],
+    ['02/05/2025', '', -15],
+    ['03/05/2025', '', -30],
+  ]);
+  worksheet['!merges'] = [{ s: { r: 1, c: 1 }, e: { r: 3, c: 1 } }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Ledger');
+  const file = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  const inspected = inspectSpreadsheet(file, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'merged-category.xlsx');
+  const analysis = analyseSpreadsheet(inspected, {
+    selectedSheetIds: ['sheet_1'],
+    sheetMappings: { sheet_1: { columns: { date: 0, category: 1, amount: 2 } } },
+  });
+
+  const rows = analysis.sheets[0]!.rows.filter((row) => row.sourceRow >= 2 && row.sourceRow <= 4);
+  assert.deepEqual(rows.map((row) => row.primaryDisposition), ['imported', 'imported', 'imported']);
+  assert.deepEqual(rows.map((row) => row.normalizedValueReference.description), ['Office supplies', 'Office supplies', 'Office supplies']);
+  const filledCell = inspected.sheets[0]!.rows.find((row) => row.rowNumber === 3)!.cells[1]!;
+  assert.equal(filledCell.value, 'Office supplies');
+  assert.equal(filledCell.merged, true);
+  assert.deepEqual(filledCell.mergeTopLeft, { rowNumber: 2, columnId: 'col_B' });
+});
+
+test('a merged date spanning multiple transaction rows fills down instead of leaving later rows unresolved', () => {
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    ['Date', 'Description', 'Amount'],
+    ['01/05/2025', 'Coffee', -3.5],
+    ['', 'Lunch', -8.2],
+    ['02/05/2025', 'Taxi', -12],
+  ]);
+  worksheet['!merges'] = [{ s: { r: 1, c: 0 }, e: { r: 2, c: 0 } }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Ledger');
+  const file = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  const inspected = inspectSpreadsheet(file, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'merged-date.xlsx');
+  const analysis = analyseSpreadsheet(inspected, {
+    selectedSheetIds: ['sheet_1'],
+    sheetMappings: { sheet_1: { columns: { date: 0, description: 1, amount: 2 } } },
+  });
+
+  const lunchRow = analysis.sheets[0]!.rows.find((row) => row.normalizedValueReference.description === 'Lunch');
+  assert.equal(lunchRow?.primaryDisposition, 'imported');
+  assert.equal(lunchRow?.normalizedValueReference.date, '2025-05-01');
+});
+
+test('a running-balance column is never treated as the transaction amount', () => {
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    ['Date', 'Description', 'Amount', 'Balance'],
+    ['02/05/2025', 'Coffee', '3.50 DR', '996.50'],
+    ['03/05/2025', 'Salary', '2000.00', '2996.50'],
+  ]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Statement');
+  const file = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  const analysis = analyseSpreadsheet(inspectSpreadsheet(file, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'running-balance.xlsx'));
+
+  const sheet = analysis.sheets[0]!;
+  assert.equal(sheet.mapping.columns.amount, 2);
+  assert.equal(sheet.mapping.columns.balance, 3);
+  const byDescription = new Map(sheet.rows.map((row) => [row.normalizedValueReference.description, row.normalizedValueReference.amount]));
+  assert.equal(byDescription.get('Coffee'), -3.5);
+  assert.equal(byDescription.get('Salary'), 2000);
+});
+
 test('AI workbook samples retain structural signals without sending payment narrative or PII', () => {
   const csv = [
     'Date,Description,Amount',
