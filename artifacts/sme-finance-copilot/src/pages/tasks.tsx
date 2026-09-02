@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
+import { canBuildYearEndPack, computeYearEndTotals, shouldShowGeneratedYearEndPack, yearEndReadinessPercent } from '@/lib/year-end-pack';
 
 type TabId = 'todo' | 'reconciliation' | 'timeline';
 
@@ -661,8 +662,11 @@ function YearEndTab() {
 
   const total = activeChecklist.length;
   const done = activeChecklist.filter(i => i.status === 'done').length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  const canBuildPack = activeInbox.length === 0 && done >= total - 1;
+  const checklistCounts = { total, done };
+  const pct = yearEndReadinessPercent(checklistCounts);
+  const canBuildPack = canBuildYearEndPack(checklistCounts, activeInbox.length);
+  const showGeneratedPack = shouldShowGeneratedYearEndPack(yearEndPackGenerated, checklistCounts, activeInbox.length);
+  const totals = computeYearEndTotals(plBreakdown.revenues, plBreakdown.confirmedExpenses);
 
   const getCategoryLabel = (cat: string) => {
     switch (cat) {
@@ -752,18 +756,21 @@ function YearEndTab() {
       })}
 
       {/* Year-End Pack */}
-      {!yearEndPackGenerated ? (
+      {!showGeneratedPack ? (
         <Card className="p-8 flex flex-col md:flex-row items-center justify-between gap-6 shadow-sm">
           <div>
-            <h3 className="font-serif text-xl font-medium">Ready to compile your Year-End Pack?</h3>
+            <h3 className="font-serif text-xl font-medium">Ready to review your Year-End summary?</h3>
             <p className="text-muted-foreground mt-1 max-w-md text-sm">
-              Once all tasks are ready, we generate a locked pack you can send to an accountant or use to file directly.
+              Once your tasks are ready, we compile a summary of your confirmed figures for your own review. Sending to an accountant or filing directly isn't available yet.
             </p>
             {!canBuildPack && (
               <p className="text-xs text-amber-700 mt-2 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5" />
                 {activeInbox.length > 0 ? `Resolve ${activeInbox.length} Inbox item${activeInbox.length !== 1 ? 's' : ''} first.` : 'Complete remaining checklist tasks to unlock.'}
               </p>
+            )}
+            {yearEndPackGenerated && !canBuildPack && (
+              <p className="text-xs text-amber-700 mt-1">Your previous summary is no longer shown because new items need review — it will reappear once they're resolved.</p>
             )}
           </div>
           <Button
@@ -772,7 +779,7 @@ function YearEndTab() {
             disabled={!canBuildPack}
             onClick={() => setYearEndPackGenerated(true)}
           >
-            {canBuildPack ? 'Build Year-End Pack' : 'Complete tasks to unlock'}
+            {canBuildPack ? 'Compile Year-End Summary' : 'Complete tasks to unlock'}
           </Button>
         </Card>
       ) : (
@@ -783,18 +790,18 @@ function YearEndTab() {
                 <CheckCircle2 className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-medium">Year-End Pack Generated</h3>
-                <p className="text-sm opacity-80">Compiled {new Date().toLocaleDateString('en-GB')} · Locked for review</p>
+                <h3 className="font-medium">Year-End Summary compiled</h3>
+                <p className="text-sm opacity-80">Compiled {new Date().toLocaleDateString('en-GB')} · For your review — not sent or filed</p>
               </div>
             </div>
             <Button variant="outline" className="bg-background cursor-pointer whitespace-nowrap" onClick={() => setYearEndPackGenerated(false)}>
-              Unlock & Edit
+              Back to checklist
             </Button>
           </div>
           <Card className="p-6 shadow-sm">
             <div className="flex justify-between items-center mb-6 pb-4 border-b border-border">
               <h2 className="text-xl font-serif flex items-center gap-2">
-                <Briefcase className="w-5 h-5 text-primary" /> Pack Preview
+                <Briefcase className="w-5 h-5 text-primary" /> Summary Preview
               </h2>
               <div className="flex gap-2">
                 <Button variant="outline" className="gap-2 text-sm opacity-50 cursor-not-allowed" disabled title="Coming soon">
@@ -812,8 +819,9 @@ function YearEndTab() {
                   {[
                     ['Entity', activeProfile?.name ?? '—'],
                     ['Period', taxPeriod],
-                    ['Total Income', `£${plBreakdown.revenues.reduce((s, r) => s + r.amount, 0).toLocaleString()}`],
-                    ['Allowable Expenses', `£${plBreakdown.confirmedExpenses.reduce((s, e) => s + e.amount, 0).toLocaleString()}`],
+                    ['Total Income (confirmed)', `£${totals.confirmedIncome.toLocaleString()}`],
+                    ['Allowable Expenses (confirmed)', `£${totals.confirmedAllowableExpenses.toLocaleString()}`],
+                    ['Profit (confirmed basis)', `£${totals.confirmedProfit.toLocaleString()}`],
                   ].map(([k, v]) => (
                     <div key={k} className="flex justify-between border-b border-border pb-2">
                       <dt className="text-muted-foreground">{k}</dt>
