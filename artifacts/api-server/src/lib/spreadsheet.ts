@@ -226,11 +226,9 @@ function rangeForSheet(sheet: any): { startRow: number; endRow: number; startCol
   return { startRow: startRow + 1, endRow: endRow + 1, startColumn: startColumn + 1, endColumn: endColumn + 1 };
 }
 
-function mergeForCell(sheet: any, row: number, column: number) {
-  const merge = (sheet?.['!merges'] ?? []).find((item: any) =>
+function mergeRangeForCell(sheet: any, row: number, column: number) {
+  return (sheet?.['!merges'] ?? []).find((item: any) =>
     row >= item.s.r && row <= item.e.r && column >= item.s.c && column <= item.e.c);
-  if (!merge) return undefined;
-  return { rowNumber: merge.s.r + 1, columnId: cellId(merge.s.c) };
 }
 
 function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
@@ -269,11 +267,19 @@ function inspectExcel(buffer: Buffer, filename: string): SpreadsheetWorkbook {
         const address = XLSX.utils.encode_cell({ r: rowIndex - 1, c: columnIndex - 1 });
         const raw = source?.[address];
         const text = safeCellText(raw);
-        const mergeTopLeft = mergeForCell(source, rowIndex - 1, columnIndex - 1);
-        const merged = Boolean(mergeTopLeft);
+        const merge = mergeRangeForCell(source, rowIndex - 1, columnIndex - 1);
+        const mergeTopLeft = merge ? { rowNumber: merge.s.r + 1, columnId: cellId(merge.s.c) } : undefined;
+        const merged = Boolean(merge);
+        const isAnchor = !merge || (merge.s.r === rowIndex - 1 && merge.s.c === columnIndex - 1);
+        // Excel stores a merged range's value only on its anchor (top-left) cell; every
+        // other member cell is blank in the file. Backfilling that known anchor value into
+        // an otherwise-blank member cell is mechanical, not an inference: it never overrides
+        // a cell that already carries its own value.
+        const value = isAnchor || text.value ? text.value
+          : safeCellText(source?.[XLSX.utils.encode_cell({ r: merge.s.r, c: merge.s.c })]).value;
         cells.push({
           columnId: cellId(columnIndex - 1), columnIndex: columnIndex - 1,
-          value: text.value, ...(text.formula ? { formula: text.formula } : {}),
+          value, ...(text.formula ? { formula: text.formula } : {}),
           ...(text.formulaValue ? { formulaValue: text.formulaValue } : {}),
           hasStyle: text.hasStyle, merged, ...(mergeTopLeft ? { mergeTopLeft } : {}),
         });
