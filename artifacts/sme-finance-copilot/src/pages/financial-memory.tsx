@@ -1,6 +1,7 @@
 import { Badge, Button, Card } from '@/components/ui';
 import { evidenceApi, transactionsApi, type APIEvidenceItem, type APIEvidenceLink, type APITransaction } from '@/lib/api';
 import { detachEvidenceAndRefresh } from '@/lib/evidence-detach';
+import { isConfirmedFinancialMemoryRecord } from '@/lib/financial-memory';
 import { useStore, type TransactionItem } from '@/lib/store';
 import { ArrowLeft, CalendarDays, ChevronRight, Clock3, FileText, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -113,9 +114,11 @@ export default function FinancialMemory() {
     return () => { cancelled = true; };
   }, [activeProfileId, entryId, refreshing]);
 
-  // Bank CSV movements are durable Financial Memory records immediately, but
-  // remain visibly unreviewed until a person assigns their accounting meaning.
-  const records = transactions;
+  // Bank CSV movements are durable records immediately, but only join this
+  // Financial Memory list once a person assigns their accounting meaning.
+  // Unresolved rows stay visible in the ingest/review flow (which reads the
+  // same store-wide `transactions`) until then.
+  const records = transactions.filter(isConfirmedFinancialMemoryRecord);
 
   const refresh = async () => {
     setRefreshing(true);
